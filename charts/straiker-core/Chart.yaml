@@ -1,0 +1,34 @@
+apiVersion: v2
+name: straiker-core
+description: >
+  Always-required Straiker application services: frontend, Bifrost LLM
+  gateway, and the bundled dex/Caddy stack. A small umbrella of its own
+  subcharts (straiker-bifrost, straiker-frontend) rather than one flat set of
+  templates — same "small charts" philosophy as this repo's top-level charts,
+  just scoped one level down since these two are always installed/upgraded
+  together as a single release. Installed standalone at the top level
+  (formerly nested under a now-sunset charts/straiker umbrella — promoted to
+  top-level so it can be installed/upgraded/checked independently of
+  straiker-system/straiker-artifact). Other products (Ascend/Defend/...) will
+  land as their own separate top-level charts.
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - control-plane
+  - bifrost
+  - llm-gateway
+dependencies:
+  - name: straiker-bifrost
+    version: "0.1.0"
+    condition: straiker-bifrost.enabled
+  - name: straiker-frontend
+    version: "0.1.0"
+    condition: straiker-frontend.enabled

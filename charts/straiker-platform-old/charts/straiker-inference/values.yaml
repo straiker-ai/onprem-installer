@@ -1,0 +1,47 @@
+# Default values for straiker-inference.
+#
+# One Helm release per model. Set modelProfile; the chart derives everything else.
+#
+# Install:
+#   helm install antman      oci://.../straiker-inference --version 1.0.1 -n straiker-inference
+#   helm install hulk        oci://.../straiker-inference --version 1.0.1 -n straiker-inference --set modelProfile=hulk
+#   helm install quicksilver oci://.../straiker-inference --version 1.0.1 -n straiker-inference --set modelProfile=quicksilver
+#   helm install thor        oci://.../straiker-inference --version 1.0.1 -n straiker-inference --set modelProfile=thor
+#   helm install thanos      oci://.../straiker-inference --version 1.0.1 -n straiker-inference --set modelProfile=thanos
+
+# Model to run. One of: antman, hulk, quicksilver, thor, thanos
+modelProfile: antman
+
+# GPU tier. Leave empty to auto-select the cost-optimal tier for the model.
+# EKS: g4dn (T4 16 GB), g5 (A10G 24 GB), p4d (A100 40 GB), p3 (V100 16 GB)
+# GKE: t4, l4, a100
+gpuProfile: ""
+
+# Cloud provider: eks or gke
+cloudProvider: eks
+
+replicas: 1
+
+imagePullSecrets: []
+
+# vLLM image tag — update when upgrading vLLM.
+image:
+  tag: v0.14.0
+
+# Extra nodeSelector labels merged on top of the GPU profile's built-in selector.
+nodeSelector: {}
+
+# Node-local model cache (DaemonSet pre-warms models to EBS volume).
+# Dramatically speeds up pod startup by avoiding re-download on reschedule.
+modelCache:
+  enabled: true
+  # Absolute path on node where models are cached (should be EBS gp3 mount)
+  hostPath: /mnt/model-cache
+  # AWS region for S3 sync in DaemonSet (only used if cloudProvider == eks)
+  awsRegion: us-east-1
+
+inferenceService:
+  gpu_count: 1
+  # Override max_model_len when the model+GPU profile default needs adjustment.
+  max_model_len: ""
+

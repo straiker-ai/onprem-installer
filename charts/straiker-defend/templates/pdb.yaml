@@ -1,0 +1,14 @@
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: straiker-defend-pdb
+  namespace: {{ include "defend.namespace" . }}
+  labels:
+    {{- include "defend.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: straiker-defend
+{{- end }}

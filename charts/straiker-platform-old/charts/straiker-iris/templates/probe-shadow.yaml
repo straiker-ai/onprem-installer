@@ -1,0 +1,138 @@
+{{- if .Values.probeShadow.enabled }}
+{{- $ps := .Values.probeShadow }}
+{{- $cpUrl := printf "http://iris-control-plane-service.%s.svc.cluster.local" (include "iris.namespace" .) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-probe-shadow
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-shadow
+spec:
+  replicas: {{ $ps.replicaCount }}
+  selector:
+    matchLabels:
+      app: iris-probe-shadow
+  template:
+    metadata:
+      labels:
+        app: iris-probe-shadow
+    spec:
+      serviceAccountName: iris-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: iris-probe-shadow
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "run_probe_shadow.py"]
+        resources:
+          {{- toYaml $ps.resources | nindent 10 }}
+        env:
+          {{- include "iris.commonEnv" . | nindent 8 }}
+        - name: SYS__INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INTERNAL_API_KEY
+        - name: SYS__IRIS_ADMIN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__IRIS_ADMIN_API_KEY
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: SYS__IRIS_CONTROL_PLANE_URL
+          value: {{ $cpUrl | quote }}
+        - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+          value: {{ include "iris.controlPlaneEndpoint" . | quote }}
+        ports:
+        - containerPort: {{ $ps.service.targetPort }}
+        startupProbe:
+          httpGet:
+            path: /ping
+            port: {{ $ps.service.targetPort }}
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 12
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: {{ $ps.service.targetPort }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: {{ $ps.service.targetPort }}
+          initialDelaySeconds: 20
+          periodSeconds: 40
+          timeoutSeconds: 30
+          failureThreshold: 20
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-probe-shadow-service
+  namespace: {{ include "iris.namespace" . }}
+  {{- with $ps.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-shadow
+spec:
+  type: {{ $ps.service.type }}
+  selector:
+    app: iris-probe-shadow
+  sessionAffinity: {{ $ps.service.sessionAffinity }}
+  ports:
+    - protocol: TCP
+      port: {{ $ps.service.port }}
+      targetPort: {{ $ps.service.targetPort }}
+      name: http
+{{- if $ps.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iris-probe-shadow-hpa
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $ps.hpa.minReplicas }}
+  maxReplicas: {{ $ps.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iris-probe-shadow
+  targetCPUUtilizationPercentage: {{ $ps.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

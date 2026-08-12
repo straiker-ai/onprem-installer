@@ -1,0 +1,217 @@
+# ============================================================
+# Straiker Enterprise — Customer Values Template
+# ============================================================
+# Instructions for SE:
+#   1. Copy this file to customers/<customer-name>/values.yaml
+#   2. Fill in every field marked REQUIRED.
+#   3. Enable the components for the purchased SKU (see SKU section).
+#   4. Create straiker-secrets (see Secrets section below).
+#   5. Install:
+#        helm install straiker-platform \
+#          oci://registry.straiker.ai/charts/straiker-platform \
+#          --version <VERSION> \
+#          --namespace <NAMESPACE> --create-namespace \
+#          -f customers/<customer-name>/values.yaml
+#
+# NOTE: onprem_v2 has no in-cluster registry. Before installing, mirror
+# container images into your own ECR/GAR — see zarf/README.md — and set
+# global.registry below to that registry's host+prefix.
+# ============================================================
+
+# ── SKU — enable components matching the purchased tier ─────
+#
+#   Ascend:  thanos + iris
+#   Defend:  antman + hulk + quicksilver + thor + argus + iris
+#   Full:    all of the above
+
+# ---------- Ascend ----------
+# inference-thanos:
+#   enabled: true
+# straiker-iris:
+#   enabled: true
+
+# ---------- Defend ----------
+# inference-antman:
+#   enabled: true
+# inference-hulk:
+#   enabled: true
+# inference-quicksilver:
+#   enabled: true
+# inference-thor:
+#   enabled: true
+# straiker-argus:
+#   enabled: true
+# straiker-iris:
+#   enabled: true
+
+# ---------- Full ----------
+# inference-antman:
+#   enabled: true
+# inference-hulk:
+#   enabled: true
+# inference-quicksilver:
+#   enabled: true
+# inference-thor:
+#   enabled: true
+# inference-thanos:
+#   enabled: true
+# straiker-argus:
+#   enabled: true
+# straiker-iris:
+#   enabled: true
+
+# ── Global ───────────────────────────────────────────────────
+global:
+  cloudProvider: eks    # REQUIRED — eks | gke
+
+  # REQUIRED — the customer's own registry that images were mirrored into
+  # (see zarf/README.md). e.g.:
+  #   EKS: <account-id>.dkr.ecr.<region>.amazonaws.com/straiker
+  #   GKE: <region>-docker.pkg.dev/<project>/straiker
+  registry: ""
+
+  # REQUIRED when straiker-argus or any inference-* component is enabled —
+  # the customer's own bucket that LLM model weights + tokenizer artifacts
+  # were synced into (see zarf/README.md "Model artifacts"). e.g.:
+  #   AWS: s3://<customer-bucket>/straiker-models
+  #   GCP: gs://<customer-bucket>/straiker-models
+  modelBucket: ""
+
+# ── Control plane ────────────────────────────────────────────
+straiker-control:
+  db:
+    host: ""          # REQUIRED — RDS endpoint or straiker-postgres.straiker-infra.svc.cluster.local
+    name: ""          # REQUIRED — database name (e.g. platform)
+    user: ""          # REQUIRED — database user (e.g. platform)
+    sslMode: require  # disable for in-cluster postgres; require for RDS/Cloud SQL
+
+  # ── OIDC SSO (optional) ────────────────────────────────────
+  # Enables an SSO sign-in button on the login page.
+  # When omitted, only email/password login is available.
+  # oidc:
+  #   enabled: true
+  #   issuer: ""          # e.g. https://accounts.google.com or Okta issuer URL
+  #   clientId: ""        # OIDC app client ID
+  #   displayName: ""     # button label; defaults to "Sign in with SSO"
+  #   autoProvision: false
+  #   allowedDomains: ""  # comma-separated; restricts JIT provisioning
+  #   # Store client secret in straiker-secrets under key OIDC_CLIENT_SECRET
+
+  bootstrap:
+    adminEmail: ""    # Seeds initial admin user on first install (idempotent)
+    customerName: ""  # Seeds initial tenant name on first install
+
+  # Public URL of the control plane — used for CORS and absolute URL construction.
+  # Set to the ingress host or load balancer address.
+  origin: ""          # e.g. https://straiker.example.com
+
+# ── Iris ─────────────────────────────────────────────────────
+# Required for any SKU that includes iris.
+straiker-iris:
+  db:
+    host: ""          # REQUIRED — RDS endpoint or straiker-postgres.straiker-infra.svc.cluster.local
+    name: ""          # REQUIRED — database name (e.g. iris)
+    user: ""          # REQUIRED — database user (e.g. iris)
+    sslMode: require  # disable for in-cluster postgres; require for RDS/Cloud SQL
+
+# ── Bifrost LLM gateway ─────────────────────────────────────
+# Required for any SKU that includes iris (Ascend / Defend / Full).
+# iris always routes LLM calls through bifrost (SYS__SELF_HOSTED=true);
+# disable this only if iris is also disabled.
+straiker-bifrost:
+  enabled: true
+  image:
+    tag: ""   # REQUIRED — bifrost image version (output of `make publish-bifrost`)
+
+  # ── LLM providers ──────────────────────────────────────────
+  # Enabled providers depend on which API keys are present in straiker-secrets.
+  # OpenAI / xAI / Anthropic are always active when their keys are supplied
+  # (see straiker-secrets section below).
+  #
+  # AWS Bedrock (optional) — uncomment and fill in to enable.
+  # Add the env vars to straiker-secrets (kubectl create secret ... --from-literal=...).
+  # Three auth modes are supported; uncomment only one block:
+  #
+  # -- Mode 1: Static IAM credentials --
+  # providers:
+  #   bedrock:
+  #     enabled: true
+  #     auth: static
+  #     accessKeySecret: SYS__AWS_ACCESS_KEY_ID      # key name in straiker-secrets
+  #     secretKeySecret: SYS__AWS_SECRET_ACCESS_KEY  # key name in straiker-secrets
+  #     region: us-east-1
+  #
+  # -- Mode 2: STS AssumeRole (cross-account) --
+  # providers:
+  #   bedrock:
+  #     enabled: true
+  #     auth: role
+  #     roleArn: "arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>"
+  #     region: us-east-1
+  #     # Optional: externalId and sessionName for role trust policy
+  #     # externalId: ""
+  #     # sessionName: straiker-bifrost
+  #
+  # -- Mode 3: Ambient (EC2/EKS IRSA — no credentials in secret) --
+  # providers:
+  #   bedrock:
+  #     enabled: true
+  #     auth: ambient
+  #     region: us-east-1
+  #
+  # Bedrock model names follow AWS conventions, e.g.:
+  #   anthropic.claude-3-5-sonnet-20241022-v2:0
+  #   amazon.nova-pro-v1:0
+  #   meta.llama3-70b-instruct-v1:0
+
+# ── Argus ────────────────────────────────────────────────────
+# Required for any SKU that includes argus (Defend / Full).
+straiker-argus: {}
+
+# ── straiker-secrets ─────────────────────────────────────────
+# Create this secret in the install namespace before running helm install.
+# The preflight job validates all keys for enabled components before any pod starts.
+#
+# Generate and create (run once):
+#
+#   PLATFORM_PW=<platform-db-password>
+#   IRIS_PW=<iris-db-password>
+#   INFERENCE_KEY=$(openssl rand -hex 32)
+#   CP_INBOUND_KEY=$(openssl rand -hex 32)   # iris/argus → straiker-control
+#   CP_OUTBOUND_KEY=$(openssl rand -hex 32)  # straiker-control → iris & argus
+#
+#   kubectl create secret generic straiker-secrets \
+#     -n <NAMESPACE> \
+#     --from-literal=SYS__PLATFORM_DB_PASSWORD="${PLATFORM_PW}" \
+#     --from-literal=SYS__ASCEND_RDS_PASSWORD="${IRIS_PW}" \
+#     --from-literal=SYS__INFERENCE_API_KEY="${INFERENCE_KEY}" \
+#     --from-literal=INTERNAL_API_KEY="${CP_INBOUND_KEY}" \
+#     --from-literal=SYS__INTERNAL_API_KEY="Bearer ${CP_INBOUND_KEY}" \
+#     --from-literal=SYS__FOUNDATION_API_KEY="Bearer ${CP_INBOUND_KEY}" \
+#     --from-literal=IRIS_CONTROL_PLANE_ADMIN_API_KEY="${CP_OUTBOUND_KEY}" \
+#     --from-literal=SYS__IRIS_ADMIN_API_KEY="${CP_OUTBOUND_KEY}" \
+#     --from-literal=SYS__INTERNAL_ARGUS_API_KEY="${CP_OUTBOUND_KEY}" \
+#     --from-literal=SYS__ARGUS_API_KEY="${CP_OUTBOUND_KEY}" \
+#     --from-literal=SYS__XAI_API_KEY="<xai-api-key>" \
+#     --from-literal=SYS__OPENAI_API_KEY="<openai-api-key>" \
+#     --from-literal=SYS__ANTHROPIC_API_KEY="<anthropic-api-key>"  # optional — enables Claude routing
+#   # Bedrock (static creds — omit if using IRSA/role):
+#   # --from-literal=SYS__AWS_ACCESS_KEY_ID="<aws-access-key-id>" \
+#   # --from-literal=SYS__AWS_SECRET_ACCESS_KEY="<aws-secret-access-key>"
+#
+# Key reference:
+#   SYS__PLATFORM_DB_PASSWORD          straiker-control → postgres
+#   SYS__ASCEND_RDS_PASSWORD           iris → postgres
+#   SYS__INFERENCE_API_KEY             iris + argus → inference (must match VLLM_API_KEY)
+#   INTERNAL_API_KEY                   straiker-control verifies inbound from iris/argus
+#   SYS__INTERNAL_API_KEY              iris → straiker-control  (verbatim: "Bearer <key>")
+#   SYS__FOUNDATION_API_KEY            argus → straiker-control (verbatim: "Bearer <key>")
+#   IRIS_CONTROL_PLANE_ADMIN_API_KEY   straiker-control → iris & argus
+#   SYS__IRIS_ADMIN_API_KEY            iris verifies inbound from straiker-control
+#   SYS__INTERNAL_ARGUS_API_KEY        argus verifies inbound from straiker-control + iris
+#   SYS__ARGUS_API_KEY                 iris → argus (iris adds Bearer prefix in code)
+#   SYS__XAI_API_KEY                   iris → xAI API (hard required; no fallback)
+#   SYS__OPENAI_API_KEY                iris recon agents → OpenAI API
+#   SYS__ANTHROPIC_API_KEY             bifrost → Anthropic API (optional — Claude models only)
+#   SYS__AWS_ACCESS_KEY_ID             bifrost → Bedrock (static creds, mode 1 only)
+#   SYS__AWS_SECRET_ACCESS_KEY         bifrost → Bedrock (static creds, mode 1 only)

@@ -1,0 +1,70 @@
+Straiker Infrastructure Chart
+==============================
+Release: {{ .Release.Name }}  Namespace: {{ .Release.Namespace }}
+
+{{- if index .Values.tags "opensearch" }}
+
+OpenSearch (official chart opensearch-project/opensearch 3.6.0)
+---------------------------------------------------------------
+REST API (within-cluster):
+  http://opensearch-cluster-master.{{ .Release.Namespace }}.svc.cluster.local:9200
+
+{{- if gt (int .Values.opensearch.replicas) 1 }}
+Multi-node cluster ({{ .Values.opensearch.replicas }} replicas). Cluster reports
+green only after all nodes have joined — allow ~60s after install.
+{{- else }}
+Single-node mode (singleNode: true).
+{{- end }}
+
+⚠  vm.max_map_count: OpenSearch requires vm.max_map_count ≥ 262144 on every
+   node it runs on. Set this on host nodes before installing:
+     sysctl -w vm.max_map_count=262144
+   Persist it via /etc/sysctl.d/99-opensearch.conf.
+
+{{- if .Values.opensearch.extraEnvs }}
+{{- range .Values.opensearch.extraEnvs }}
+{{- if eq .name "DISABLE_SECURITY_PLUGIN" }}
+⚠  Security plugin is DISABLED. Suitable for internal-only deployments.
+   Do not expose port 9200 outside the cluster.
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if index .Values.tags "redpanda" }}
+
+Redpanda (official chart redpanda/redpanda 26.1.3)
+--------------------------------------------------
+Kafka bootstrap (within-cluster):
+  {{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:9093
+
+Admin API:
+  http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:9644
+
+Schema Registry:
+  http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:8081
+
+HTTP Proxy (pandaproxy):
+  http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local:8082
+
+Note: Redpanda services are named after the Helm release ({{ .Release.Name }}).
+If you install with a different release name, update all references above.
+{{- end }}
+
+{{- if .Values.postgres }}
+
+PostgreSQL
+----------
+  Host: straiker-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432
+  Database: {{ .Values.postgres.database }}
+  User: {{ .Values.postgres.user }}
+  Password: kubectl get secret straiker-postgres-secret -n {{ .Release.Namespace }} \
+              -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
+{{- end }}
+
+{{- if .Values.redis }}
+
+Redis
+-----
+  redis://straiker-redis.{{ .Release.Namespace }}.svc.cluster.local:6379
+{{- end }}

@@ -1,0 +1,81 @@
+{{- if .Values.probeWorker.enabled }}
+{{- $pw := .Values.probeWorker }}
+{{- $cpUrl := printf "http://iris-control-plane-service.%s.svc.cluster.local" (include "iris.namespace" .) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-probe-worker
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-worker
+spec:
+  replicas: {{ $pw.replicaCount }}
+  selector:
+    matchLabels:
+      app: iris-probe-worker
+  template:
+    metadata:
+      labels:
+        app: iris-probe-worker
+    spec:
+      terminationGracePeriodSeconds: 600
+      serviceAccountName: iris-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: iris-probe-worker
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "run_probe_worker.py"]
+        resources:
+          {{- toYaml $pw.resources | nindent 10 }}
+        env:
+          {{- include "iris.commonEnv" . | nindent 8 }}
+        - name: SYS__INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INTERNAL_API_KEY
+        - name: SYS__ARGUS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__ARGUS_API_KEY
+        - name: SYS__INFERENCE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INFERENCE_API_KEY
+        - name: SYS__IRIS_URL
+          value: {{ $cpUrl | quote }}
+        - name: SYS__ARGUS_ENDPOINT
+          value: {{ .Values.argus.endpoint | default (printf "http://argus-service.%s.svc.cluster.local/api/v1/detect" .Release.Namespace) | quote }}
+        - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+          value: {{ include "iris.controlPlaneEndpoint" . | quote }}
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $pw.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iris-probe-worker-hpa
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $pw.hpa.minReplicas }}
+  maxReplicas: {{ $pw.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iris-probe-worker
+  targetCPUUtilizationPercentage: {{ $pw.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

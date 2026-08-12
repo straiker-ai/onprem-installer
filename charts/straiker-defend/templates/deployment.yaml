@@ -1,0 +1,235 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-defend
+  namespace: {{ include "defend.namespace" . }}
+  labels:
+    {{- include "defend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+      maxSurge: 25%
+  selector:
+    matchLabels:
+      app: straiker-defend
+  template:
+    metadata:
+      labels:
+        app: straiker-defend
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: tokenizer-pull
+          image: {{ include "defend.modelSyncImage" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              HUB="/models/hub"
+              FAKE_HASH="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              {{- $root := . }}
+              {{- range .Values.tokenizers }}
+              {{- $cacheDir := printf "models--%s" (.hfModelId | replace "/" "--") }}
+              if [ -f "${HUB}/{{ $cacheDir }}/refs/main" ]; then
+                echo "Already cached: {{ .hfModelId }}"
+              else
+                echo "Pulling tokenizer for {{ .hfModelId }}..."
+                mkdir -p /tmp/tok
+                {{ include "defend.modelSyncCmd" (dict "root" $root "src" (printf "tokenizer/%s" .destPath) "dst" "/tmp/tok") }}
+                mkdir -p "${HUB}/{{ $cacheDir }}/snapshots/${FAKE_HASH}" \
+                         "${HUB}/{{ $cacheDir }}/refs"
+                cp -r /tmp/tok/. "${HUB}/{{ $cacheDir }}/snapshots/${FAKE_HASH}/"
+                printf '%s' "${FAKE_HASH}" > "${HUB}/{{ $cacheDir }}/refs/main"
+                rm -rf /tmp/tok
+                echo "Done: {{ .hfModelId }}"
+              fi
+              {{- end }}
+              echo "All tokenizers ready."
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+
+        # Converts synced tokenizer files for sentence-transformers models to
+        # the proper HF hub cache layout (blobs + symlinks) snapshot_download
+        # expects — the plain file copy tokenizer-pull does above isn't enough
+        # for this specific loader.
+        - name: st-cache-fix
+          image: {{ include "defend.image" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+            - |
+              import os, shutil, hashlib
+              HUB = "/models/hub"
+              FAKE_HASH = "a" * 40
+              models = ["sentence-transformers/all-MiniLM-L6-v2"]
+              for hf_model_id in models:
+                  model_dir = "models--" + hf_model_id.replace("/", "--")
+                  storage = os.path.join(HUB, model_dir)
+                  snap = os.path.join(storage, "snapshots", FAKE_HASH)
+                  blobs = os.path.join(storage, "blobs")
+                  if not os.path.isdir(snap):
+                      print(f"SKIP {hf_model_id}: snapshot dir missing")
+                      continue
+                  if os.path.isdir(blobs):
+                      print(f"SKIP {hf_model_id}: already converted")
+                      continue
+                  os.makedirs(blobs, exist_ok=True)
+                  entries = []
+                  for dirpath, _, filenames in os.walk(snap):
+                      for fn in filenames:
+                          fpath = os.path.join(dirpath, fn)
+                          if not os.path.islink(fpath):
+                              rel = os.path.relpath(fpath, snap)
+                              with open(fpath, "rb") as f:
+                                  sha = hashlib.sha256(f.read()).hexdigest()
+                              entries.append((fpath, rel, sha))
+                  for fpath, rel, sha in entries:
+                      blob = os.path.join(blobs, sha)
+                      if not os.path.exists(blob):
+                          shutil.copy2(fpath, blob)
+                      os.remove(fpath)
+                      depth = len(rel.split(os.sep)) + 1
+                      os.symlink(os.path.join(*(['..'] * depth), "blobs", sha), fpath)
+                  print(f"OK {hf_model_id}: converted to blob cache")
+          env:
+            - name: HF_HOME
+              value: /models
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      containers:
+        - name: argus
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          image: {{ include "defend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ include "defend.secretName" . }}
+                optional: true
+            - secretRef:
+                name: {{ include "defend.sessionSecretName" . }}
+          env:
+            - name: SYS__ARGUS_VERSION
+              value: {{ .Values.image.tag | quote }}
+            - name: SYS__ARGUS_ENV
+              value: "production"
+            - name: SYS__SELF_HOSTED
+              value: "true"
+            - name: SYS__LOGGING__LEVEL
+              value: {{ .Values.logging.level | quote }}
+            - name: SYS__LOGGING__RENDERER
+              value: {{ .Values.logging.renderer | quote }}
+            - name: SYS__SECRET_MANAGER_ENABLED
+              value: "false"
+            - name: SYS__REDIS_URL
+              value: {{ include "defend.redisUrl" . | quote }}
+            - name: SYS__SETTINGS_SYNC_ENABLED
+              value: {{ .Values.settingsSync.enabled | quote }}
+            - name: SYS__FOUNDATION_ENDPOINT
+              value: {{ include "defend.foundationEndpoint" . | quote }}
+            - name: SYS__ARCHIVE_ENABLED
+              value: {{ .Values.archive.enabled | quote }}
+            {{- if .Values.archive.enabled }}
+            - name: SYS__ARCHIVE_MODE
+              value: "redpanda"
+            - name: SYS__ARCHIVE_REDPANDA_ENDPOINT
+              value: {{ include "defend.archiveEndpoint" . | quote }}
+            - name: SYS__ARCHIVE_REDPANDA_TIMEOUT_SECONDS
+              value: {{ .Values.archive.timeoutSeconds | quote }}
+            - name: SYS__ARCHIVE_STREAM_TURNS
+              value: {{ .Values.archive.streamTurns | quote }}
+            - name: SYS__ARCHIVE_STREAM_TURNS_FLAGGED
+              value: {{ .Values.archive.streamTurnsFlagged | quote }}
+            - name: SYS__ARCHIVE_STREAM_TURNS_INSIGHTS
+              value: {{ .Values.archive.streamTurnsInsights | quote }}
+            {{- end }}
+            {{- range $key, $ep := .Values.llmEndpoints }}
+            - name: {{ printf "SYS__LLM_ENDPOINTS__%s" (snakecase $key | upper) }}
+              value: {{ printf "http://inference-%s.%s.svc.cluster.local:8000%s" $ep.model (include "defend.namespace" $) $ep.path | quote }}
+            {{- end }}
+            {{- if .Values.customerSettings.ioTimeoutSeconds }}
+            - name: CUSTOMER__RUNTIME__IO_TIMEOUT
+              value: {{ .Values.customerSettings.ioTimeoutSeconds | quote }}
+            {{- end }}
+            {{- if .Values.customerSettings.categorySettings }}
+            - name: CUSTOMER__DETECTION__CATEGORY_SETTINGS
+              value: {{ .Values.customerSettings.categorySettings | quote }}
+            {{- end }}
+            - name: SYS__ATTACHMENTS_S3_ENABLED
+              value: "false"
+            - name: HF_HOME
+              value: /models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: SENTENCE_TRANSFORMERS_HOME
+              value: /models/hub
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          startupProbe:
+            httpGet:
+              path: /api/v1/private/ping
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            httpGet:
+              path: /api/v1/private/ping
+              port: {{ .Values.service.targetPort }}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/private/ping
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+            limits:
+              memory: {{ .Values.resources.limits.memory | quote }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 500Mi
+      {{- include "defend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

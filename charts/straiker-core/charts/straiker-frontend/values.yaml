@@ -1,0 +1,193 @@
+# Only used by the parent chart's Chart.yaml dependency condition
+# (straiker-frontend.enabled) — frontend itself has no internal toggle
+# (unlike dex/caddy below, it's not optional within this subchart).
+enabled: true
+
+# ── dex (disposable local OIDC provider, builtin password-DB) ───────────
+dex:
+  enabled: true
+
+  image:
+    repository: dexidp/dex
+    tag: v2.45.1
+    pullPolicy: IfNotPresent
+
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  service:
+    port: 5556
+
+  # Demo credential — override for anything beyond quick testing.
+  staticClient:
+    id: straiker
+    secret: "change-me-too"
+
+# TLS termination + routing to this Service (which proxies /dex/* to dex —
+# see dex-proxy.ts) now lives in the standalone charts/straiker-edge chart
+# (formerly a nested "internalEdge" component here, extracted once a second
+# real consumer — charts/straiker-defend's API — needed the same edge).
+# This value must still match that chart's own httpsPort: frontend.origin
+# below computes the externally-reachable https://app.<appDomain>:<port> URL
+# for OIDC redirects, and these are independent top-level charts with no way
+# to read each other's values directly.
+edgeHttpsPort: 8443
+
+# ── Frontend (formerly "control" — renamed and rebuilt against
+# ~/straiker/frontend/onprem/docker-compose.yaml's "frontend" service as the
+# authoritative reference, not the old straiker-control chart) ────────────
+# Deployment + Service + DB connection + schema migration + admin-bootstrap
+# seeding + OIDC SSO (backed by the bundled dex above).
+frontend:
+  image:
+    # Straiker's own application image — unlike bifrost (an official upstream
+    # image), this lives under an extra "straiker/" segment in the same
+    # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
+    # since it's Straiker's own component, not third-party.
+    repository: straiker/frontend
+    tag: onprem-v2026.8.2
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets: []
+
+  nodeSelector: {}
+  tolerations: []
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+
+  # Defaults to https://app.<global.appDomain> (Caddy's own routed host) — must
+  # match how the app is actually reached, since it drives both this env var
+  # and dex's OIDC redirect URI (see frontend.origin helper). Override when
+  # testing through a port-forward on a non-standard port (e.g.
+  # https://app.straiker.internal:8443), or the OIDC login flow will loop.
+  origin: ""
+  logLevel: info
+
+  # Defaults to charts/straiker-system's own postgres (platform database),
+  # in global.infraNamespace. Override host/name/user for external RDS/Cloud
+  # SQL, or a differently-configured postgres.
+  db:
+    host: ""
+    port: 5432
+    name: platform
+    user: platform
+    sslMode: disable
+    # Matches charts/straiker-system's postgres.yaml Secret exactly
+    # (straiker-postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
+    # separate operator-supplied secret.
+    passwordSecret:
+      name: straiker-postgres-secret
+      key: POSTGRES_PASSWORD_PLATFORM
+
+  # Liquibase schema migration (docker-compose's "migrate" service) —
+  # required for frontend to function at all (its tables don't exist
+  # otherwise). Same image as frontend by default (built together — see
+  # cloudbuild.yaml's onprem-base/straiker/frontend-migrate), override
+  # repository/tag independently if that ever changes.
+  dbMigrate:
+    enabled: true
+    image:
+      repository: straiker/frontend-migrate
+      tag: onprem-v2026.8.2
+    backoffLimit: 2
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  # Admin-bootstrap seeding (docker-compose's "bootstrap" service) — runs once,
+  # idempotently, right after dbMigrate: seeds the initial tenant + admin user
+  # row so the admin's first OIDC login (whichever IdP returns this email)
+  # logs in as admin instead of being JIT-provisioned as a viewer. adminEmail
+  # must match whatever identity is meant to be admin — defaults to
+  # admin@<global.appDomain>, matching dex's own seeded password-DB admin user
+  # (see dex-configmap.yaml's staticPasswords) so the bundled local IdP logs in
+  # as admin out of the box.
+  bootstrap:
+    enabled: true
+    adminEmail: ""
+    customerName: "My Company"
+    image:
+      repository: library/postgres
+      tag: 16-alpine
+      pullPolicy: IfNotPresent
+    backoffLimit: 3
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+
+  # Defaults to charts/straiker-system's own opensearch, in global.infraNamespace.
+  opensearch:
+    url: ""
+
+  # Backed by the bundled dex stack above by default — every field left empty
+  # falls back to dex's own issuer/staticClient (see frontend.oidcIssuer and
+  # friends in _helpers.tpl). Override all of them together to point at a
+  # customer's own IdP instead — matching docker-compose's own framing that
+  # dex is never a permanent identity store. Dex itself (and its own
+  # DEX_OIDC_CLIENT_ID/SECRET identity) stays deployed regardless, since it's
+  # also the always-on login fallback if the customer's own IdP breaks (see
+  # frontend-deployment.yaml).
+  oidc:
+    enabled: true
+    issuer: ""
+    clientId: ""
+    clientSecret: ""
+    authorizationEndpoint: ""
+    tokenEndpoint: ""
+    jwksUri: ""
+    displayName: ""
+    scopes: ""
+    autoProvision: true
+    defaultRole: viewer
+    allowedDomains: ""
+
+  # Not yet built in this chart family (argus/iris/scout) — left as explicit
+  # overrides rather than auto-derived, unlike the old umbrella chart where
+  # they lived in the same namespace by construction. Omitted entirely from
+  # the Deployment's env when unset, rather than pointing at a URL that
+  # resolves to nothing.
+  argusEndpoint: ""
+  irisControlPlaneAdminEndpoint: ""
+  # Service-to-service auth — both read from an operator-supplied secret
+  # (frontend.secretRef's straiker-secrets by default). Leave secretKey empty
+  # to omit the env var entirely (e.g. when argus/iris aren't deployed yet).
+  irisControlPlaneAdminApiKey:
+    secretName: ""
+    secretKey: ""
+  scoutEndpoint: ""
+  internalApiKey:
+    secretName: ""
+    secretKey: ""

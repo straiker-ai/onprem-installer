@@ -1,0 +1,132 @@
+# Default values for argus helm chart (on-prem)
+
+# Cloud provider.  Must match cloudProvider in the straiker-infra chart.
+# Selects the CLI image/command used by the tokenizer-pull init container
+# to sync from global.modelBucket: aws s3 sync (eks) vs gsutil rsync (gke).
+cloudProvider: eks
+
+# imagePullSecrets added to every pod spec.
+imagePullSecrets: []
+
+# Target node architecture. Sets kubernetes.io/arch nodeSelector on all pods.
+# Supported: arm64 | amd64
+arch: arm64
+
+nodeSelector: {}
+
+replicaCount: 3
+
+# ── Resource limits ───────────────────────────────────────────
+# Argus loads sentence-transformers (~200 MB) + 6 tokenizers (~400 MB)
+# plus Python/model inference overhead. Requires at least 3 Gi RAM.
+# c6g.large (4 GB) leaves no headroom — use c6g.xlarge (8 GB) minimum.
+resources:
+  requests:
+    cpu: "500m"
+    memory: "3Gi"
+  limits:
+    memory: "6Gi"
+
+image:
+  # Auto-derived from global.registry if empty: <global.registry>/docker/onprem-argus
+  repository: ""
+  tag: v0.1.15
+
+# ── Ingress ───────────────────────────────────────────────────
+
+# ── Service ───────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# ── HPA ───────────────────────────────────────────────────────
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+# ── Argus config ──────────────────────────────────────────────
+argus:
+  # AWS Secrets Manager — disable for on-prem; supply secrets via k8sSecret instead.
+  secretManager:
+    enabled: false
+    region: ""
+    secretName: ""
+
+  # Secret "straiker-secrets" must exist in this namespace before installing.
+  # Required keys:
+  #   SYS__INFERENCE_API_KEY        — must match VLLM_API_KEY in straiker-inference
+  #   SYS__FOUNDATION_API_KEY       — sent verbatim as the Authorization header to
+  #                                   straiker-control (no "Bearer" prefix added by argus);
+  #                                   must be set to "Bearer <INTERNAL_API_KEY>" where
+  #                                   INTERNAL_API_KEY is the value in straiker-secrets
+  #   SYS__INTERNAL_ARGUS_API_KEY   — argus verifies "Authorization: Bearer <value>" from
+  #                                   both straiker-control and iris; set the same <value>
+  #                                   as IRIS_CONTROL_PLANE_ADMIN_API_KEY and SYS__ARGUS_API_KEY
+  # Do NOT add SYS__ARGUS_CONTROL_PLANE_API_KEY / _WEB_KEY — Foundation manages
+  # tenants/apps/settings; leaving these unset disables the built-in /api/v1/cp routes.
+
+  redis:
+    # Auto-populated when inClusterRedis.enabled=true.
+    # Override with an external Redis URL when inClusterRedis.enabled=false.
+    url: ""
+
+  # Kinesis archiving — AWS-only; disable for on-prem.
+  kinesis:
+    enabled: false
+    region: ""
+    streamTurns: ""
+    streamTurnsFlagged: ""
+    streamTurnsInsights: ""
+
+  # Redpanda archiving — always on for on-prem (mirrors iris behaviour).
+  # Writes detection turns to Redpanda topics consumed by Vector → OpenSearch.
+  # Topic names must match vector.opensearch.turns.* in straiker-infra.
+  redpanda:
+    enabled: true
+    streamTurns: "turns"
+    streamTurnsFlagged: "turns-flagged"
+    streamTurnsInsights: "turns-insights"
+
+  # S3 attachments — AWS-only; disable for on-prem.
+  attachments:
+    enabled: false
+    bucket: ""
+    region: ""
+    prefix: "turns-attachments"
+
+  foundation:
+    # Straiker control plane (straiker-control) endpoint.
+    # Leave empty to auto-derive: http://straiker-control-service.<namespace>.svc.cluster.local
+    # SYS__FOUNDATION_API_KEY and SYS__INTERNAL_ARGUS_API_KEY must be in straiker-secrets.
+    endpoint: ""
+    # Enable the settings-synchronizer daemon that pulls tenant settings from Foundation.
+    # Should be true for all on-prem deployments.
+    syncEnabled: true
+
+# ── Karpenter scheduling ──────────────────────────────────────
+karpenter:
+  enabled: true
+
+# ── In-cluster Redis ──────────────────────────────────────────
+# When enabled, deploys a single-instance Redis and wires argus.redis.url
+# automatically. Set enabled=false and set argus.redis.url to use an
+# external Redis (e.g. ElastiCache).
+inClusterRedis:
+  enabled: true
+
+# ── External Secrets Operator ─────────────────────────────────
+# When enabled, creates an ExternalSecret that syncs from AWS Secrets Manager
+# (or any ESO-supported store) into the Kubernetes secret named by
+# argus.k8sSecret.name. Requires ESO installed in the cluster.
+externalSecret:
+  enabled: false
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: aws-secrets-manager   # name of your ClusterSecretStore or SecretStore
+    kind: ClusterSecretStore
+  # The Secrets Manager secret key to extract all fields from.
+  remoteSecretKey: ""           # e.g. prod-secrets

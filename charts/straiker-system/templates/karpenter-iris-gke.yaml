@@ -1,0 +1,36 @@
+{{- if and .Values.karpenter.iris (eq .Values.cloudProvider "gke") }}
+
+{{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "nodepools.karpenter.sh") }}
+  {{- fail "Karpenter is not installed: CRD 'nodepools.karpenter.sh' not found.\nInstall the community karpenter-provider-gcp Helm chart first (this installer's phase_karpenter does this when --cloud-provider gke --install-eks is used), then re-run this chart.\nSee: https://github.com/cloudpilot-ai/karpenter-provider-gcp" }}
+{{- end }}
+{{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gkenodeclasses.karpenter.k8s.gke.io") }}
+  {{- fail "GKE Karpenter CRD 'gkenodeclasses.karpenter.k8s.gke.io' not found.\nThere is no native GKE Karpenter add-on (that Google Cloud doc URL previously here does not exist) -- ensure the community karpenter-provider-gcp Helm chart is actually installed and its CRDs have reconciled." }}
+{{- end }}
+
+{{- $iris := .Values.karpenter.iris }}
+{{- $gke  := .Values.gke }}
+{{- $nc   := $gke.iris.nodeClass }}
+
+{{- include "infra.karpenterNodePool" (dict
+      "root" $
+      "pool" $iris.nodePool
+      "nodeClassGroup" "karpenter.k8s.gke.io"
+      "nodeClassKind" "GCENodeClass"
+      "nodeClassName" $nc.name
+      "extraRequirements" (list
+        (dict "key" "cloud.google.com/machine-family" "operator" "In" "values" $gke.iris.machineFamilies)
+      )
+    ) }}
+
+---
+apiVersion: karpenter.k8s.gke.io/v1
+kind: GCENodeClass
+metadata:
+  name: {{ $nc.name }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+spec:
+  bootDiskSizeGB: {{ $nc.bootDiskSizeGB }}
+  bootDiskType: {{ $nc.bootDiskType }}
+
+{{- end }}

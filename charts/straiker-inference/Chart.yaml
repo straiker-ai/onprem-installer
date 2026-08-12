@@ -1,0 +1,27 @@
+apiVersion: v2
+name: straiker-inference
+description: >
+  vLLM inference server — serves a single LLM whose weights are synced from
+  global.modelBucket (S3/GCS) by an initContainer, either straight into a
+  node-local hostPath cache (marker-gated, so a later pod on the same node
+  skips the download) or into an emptyDir when node-local caching is off. One
+  release per model (set modelProfile; everything else — origin, GPU tier,
+  served names — is derived). Ported from
+  charts/straiker-platform-old/charts/straiker-inference: same chart,
+  installed independently per model (install-straiker.sh loops over whichever
+  models the selected products need) rather than bundled into an umbrella —
+  consistent with this repo's "small charts, independent apply/check" charts.
+type: application
+version: 0.1.13
+appVersion: "0.1.2"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - inference
+  - vllm
+  - gpu

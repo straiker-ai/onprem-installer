@@ -1,0 +1,47 @@
+{{- if and .Values.efs.enabled .Values.efs.modelsPvc.enabled }}
+{{- $fsId := required "efs.fileSystemId is required when efs.enabled=true" .Values.efs.fileSystemId }}
+{{- $pvc := .Values.efs.modelsPvc }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ $pvc.name }}-pv
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: efs-models
+spec:
+  capacity:
+    storage: {{ $pvc.size }}
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Values.efs.storageClass.name }}
+  mountOptions:
+    - tls
+    - iam
+  csi:
+    driver: efs.csi.aws.com
+    volumeHandle: {{ $fsId }}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $pvc.name }}
+  namespace: {{ $pvc.namespace }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: efs-models
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: {{ .Values.efs.storageClass.name }}
+  volumeName: {{ $pvc.name }}-pv
+  resources:
+    requests:
+      storage: {{ $pvc.size }}
+
+{{- end }}
