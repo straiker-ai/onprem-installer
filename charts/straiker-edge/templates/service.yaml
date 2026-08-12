@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-edge
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  # ClusterIP by default — don't assume the customer's cluster has a cloud
+  # LoadBalancer or wants a NodePort. Override once real external access is wanted.
+  type: {{ .Values.service.type }}
+  selector:
+    app: straiker-edge
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.httpNodePort }}
+      nodePort: {{ .Values.service.httpNodePort }}
+      {{- end }}
+    - name: https
+      port: {{ .Values.httpsPort }}
+      targetPort: https
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.httpsNodePort }}
+      nodePort: {{ .Values.service.httpsNodePort }}
+      {{- end }}

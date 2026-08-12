@@ -1,0 +1,49 @@
+{{- if .Values.inClusterRedis.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-redis
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iris-redis
+  template:
+    metadata:
+      labels:
+        app: iris-redis
+    spec:
+      containers:
+      - name: redis
+        image: {{ include "iris.redisImage" . | quote }}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-redis
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: iris-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+{{- end }}

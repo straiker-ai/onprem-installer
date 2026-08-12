@@ -1,0 +1,48 @@
+{{- if .Values.nvidia.devicePlugin.enabled }}
+{{- $dp := .Values.nvidia.devicePlugin }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: straiker-nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nvidia-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app: straiker-nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: straiker-nvidia-device-plugin
+        app.kubernetes.io/component: nvidia-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+
+      nodeSelector:
+        purpose: argus-model-workers
+      containers:
+        - name: nvidia-device-plugin
+          image: {{ include "infra.image" (dict "image" $dp.image "global" .Values.global) | quote }}
+          imagePullPolicy: {{ $dp.image.pullPolicy }}
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: {{ $dp.failOnInitError | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $dp.resources | nindent 12 }}
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+{{- end }}

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: straiker-frontend
+description: >
+  Frontend + its bundled OIDC login stack (dex, with its own builtin
+  password-DB) + Caddy edge routing — nested under charts/straiker-core as a
+  subchart (not a standalone top-level chart) since it's always
+  installed/upgraded together with straiker-bifrost as one release. dex/caddy
+  exist purely to support this component's login flow and have no other
+  consumer, so they're bundled here rather than split into their own chart.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - frontend
+  - oidc
+  - dex
+  - caddy

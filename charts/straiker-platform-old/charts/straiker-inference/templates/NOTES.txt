@@ -1,0 +1,19 @@
+{{- $modelProfiles := include "straiker-inference.modelProfiles" . | fromYaml }}
+{{- $mp := index $modelProfiles (.Values.modelProfile | default "") | default dict }}
+{{- $origin := get $mp "origin" | default .Values.modelProfile }}
+{{- $storagePrefix := get $mp "storagePrefix" | default .Values.modelProfile }}
+straiker-inference {{ .Chart.Version }} installed.
+
+Secret required (must exist before pod can start):
+
+  kubectl create secret generic straiker-secrets \
+    -n {{ .Release.Namespace }} \
+    --from-literal=VLLM_API_KEY=<your-api-key>
+
+Model profile: {{ .Values.modelProfile }}
+Origin:        {{ $origin }}
+Storage path:  models/{{ $storagePrefix }}
+GPUs:   {{ .Values.inferenceService.gpu_count | default 1 }}
+
+Check pod status:
+  kubectl get pods -n {{ .Release.Namespace }} -l app={{ include "straiker-inference.fullname" . }}

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-edge-config
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  Caddyfile: |
+    {{- range .Values.routes }}
+    {{ .subdomain }}.{{ $.Values.global.appDomain }}:{{ $.Values.httpsPort }} {
+      tls internal
+      reverse_proxy {{ .targetService }}:{{ .targetPort }}
+    }
+    {{- end }}

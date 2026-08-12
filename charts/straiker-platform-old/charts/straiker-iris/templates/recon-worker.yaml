@@ -1,0 +1,82 @@
+{{- if .Values.reconWorker.enabled }}
+{{- $rw := .Values.reconWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-recon-worker
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recon-worker
+spec:
+  replicas: {{ $rw.replicaCount }}
+  selector:
+    matchLabels:
+      app: iris-recon-worker
+  template:
+    metadata:
+      labels:
+        app: iris-recon-worker
+    spec:
+      terminationGracePeriodSeconds: 300
+      serviceAccountName: iris-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: iris-recon-worker
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "run_recon_worker.py"]
+        resources:
+          {{- toYaml $rw.resources | nindent 10 }}
+        env:
+          {{- include "iris.commonEnv" . | nindent 8 }}
+        - name: SYS__INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INTERNAL_API_KEY
+        - name: SYS__INFERENCE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INFERENCE_API_KEY
+        - name: SYS__DB_HOST
+          value: {{ required "db.host is required" .Values.db.host | quote }}
+        - name: SYS__DB_PORT
+          value: {{ .Values.db.port | quote }}
+        - name: SYS__DB_NAME
+          value: {{ required "db.name is required" .Values.db.name | quote }}
+        - name: SYS__DB_USER
+          value: {{ required "db.user is required" .Values.db.user | quote }}
+        - name: SYS__ASCEND_RDS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.dbPasswordSecretName" . }}
+              key: {{ include "iris.dbPasswordSecretKey" . }}
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $rw.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iris-recon-worker-hpa
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $rw.hpa.minReplicas }}
+  maxReplicas: {{ $rw.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iris-recon-worker
+  targetCPUUtilizationPercentage: {{ $rw.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-defend
+  namespace: {{ include "defend.namespace" . }}
+  labels:
+    {{- include "defend.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: straiker-defend
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      name: http

@@ -1,0 +1,64 @@
+# global.dockerRegistry: same convention as every other chart in this repo —
+# when set, Caddy's image (relative repository, no registry host) resolves
+# against this instead of pulling directly from Straiker's own registry.
+# global.appDomain: must match charts/straiker-core's own global.appDomain —
+# both charts need the same base domain for their routed hostnames to agree
+# (e.g. dex's OIDC issuer, computed in straiker-frontend, must be reachable
+# at the exact host this chart actually routes).
+# global.sharedNodeSelector: same convention/value as charts/straiker-core and
+# charts/straiker-system (targets the untainted "general" NodePool).
+global:
+  dockerRegistry: ""
+  appDomain: straiker.internal
+  sharedNodeSelector:
+    purpose: general
+
+image:
+  repository: library/caddy
+  tag: 2-alpine
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+nodeSelector: {}
+tolerations: []
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+# Not the standard 443 — no sudo needed to bind locally without an ingress.
+# Drives every route's site address and this chart's own container/Service
+# port together. charts/straiker-frontend's own edgeHttpsPort value must be
+# kept in sync with this one (used there only to compute frontend.origin for
+# OIDC redirects — that chart has no way to read this chart's values
+# directly, since both are independent top-level charts).
+httpsPort: 8443
+
+service:
+  type: ClusterIP
+  # Only used when service.type: NodePort — leave null for Kubernetes to
+  # pick a random nodePort.
+  httpNodePort: null
+  httpsNodePort: null
+
+# Each entry becomes its own Caddy site block: <subdomain>.<global.appDomain>,
+# reverse-proxied to <targetService>:<targetPort> (bare Service name — this
+# chart must be installed into the same namespace as everything it routes
+# to). tls internal issues each host its own self-signed cert; this is a
+# thin in-cluster edge for direct TLS termination, not a production ingress
+# — disable a route (or this whole chart) and bring your own ingress/
+# LoadBalancer once ready for that.
+routes:
+  - name: frontend
+    subdomain: app
+    targetService: straiker-frontend-service
+    targetPort: 80
+  - name: defend-api
+    subdomain: defend-api
+    targetService: straiker-defend
+    targetPort: 80

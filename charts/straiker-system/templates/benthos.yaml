@@ -1,0 +1,114 @@
+{{- if .Values.benthos }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-benthos-pipeline
+  namespace: {{ include "infra.namespace" . }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: benthos
+data:
+  archive-pipeline.yaml: |
+    http:
+      address: 0.0.0.0:4195
+      enabled: true
+
+    metrics:
+      prometheus: {}
+
+    input:
+      http_server:
+        path: /archive
+        allowed_verbs:
+          - POST
+
+    buffer:
+      memory:
+        limit: 100000000
+        batch_policy:
+          enabled: true
+          count: 50
+          period: 5s
+
+    # Routes each record to the OpenSearch index named by its own "stream"
+    # field (e.g. producers send stream: argus-turns / argus-turns-flagged /
+    # argus-turns-insights) — one output handles any stream name a producer
+    # sends, rather than a fixed fan_out branch per known stream that would
+    # need updating every time a new one's added.
+    output:
+      elasticsearch:
+        urls: ["{{ include "infra.opensearchUrl" . }}"]
+        index: '${! this.stream }'
+        id: '${! uuid_v4() }'
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-benthos
+  namespace: {{ include "infra.namespace" . }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: benthos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: straiker-benthos
+  template:
+    metadata:
+      labels:
+        app: straiker-benthos
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.sharedNodeSelector | nindent 8 }}
+      containers:
+        - name: benthos
+          image: {{ include "infra.benthosImage" . | quote }}
+          imagePullPolicy: {{ .Values.benthos.image.pullPolicy }}
+          command: ["run", "/etc/redpanda-connect/archive-pipeline.yaml"]
+          ports:
+            - containerPort: 4195
+          resources:
+            {{- toYaml .Values.benthos.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4195
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4195
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: pipeline-config
+              mountPath: /etc/redpanda-connect
+              readOnly: true
+      volumes:
+        - name: pipeline-config
+          configMap:
+            name: straiker-benthos-pipeline
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-benthos
+  namespace: {{ include "infra.namespace" . }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: benthos
+spec:
+  type: ClusterIP
+  selector:
+    app: straiker-benthos
+  ports:
+    - name: http
+      port: 4195
+      targetPort: 4195
+      protocol: TCP
+{{- end }}

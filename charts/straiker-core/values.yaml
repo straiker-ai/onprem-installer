@@ -1,0 +1,36 @@
+# Propagates automatically to every subchart (straiker-bifrost,
+# straiker-frontend) via Helm's built-in global-value mechanism — no
+# "straiker-bifrost.global.X" prefixing needed, just set global.X here (or
+# via --set global.X=... at install time) and every subchart sees it as
+# .Values.global.X.
+global:
+  # Same convention as charts/straiker-system: when set, every component's
+  # image (relative repository, no registry host) resolves against this
+  # instead of pulling directly from its own upstream registry.
+  dockerRegistry: ""
+
+  # Namespace charts/straiker-system is installed into — straiker-frontend's
+  # defaults (postgres/opensearch connection strings) assume that chart's
+  # actual resource names (straiker-postgres, straiker-postgres-secret,
+  # opensearch-cluster-master). Override if straiker-system lives elsewhere.
+  infraNamespace: straiker
+
+  # Node scheduling shared by every component across both subcharts — same
+  # convention as charts/straiker-system's sharedNodeSelector (targets the
+  # untainted "general" NodePool; see that chart for why this specific
+  # key/value). Each component can still override its own nodeSelector
+  # individually (e.g. straiker-bifrost.nodeSelector) if it ever needs to
+  # schedule differently.
+  sharedNodeSelector:
+    purpose: general
+
+  # Only used by straiker-frontend, for 
+  # - Dex's seeded admin user's cosmetic email 
+  # - Caddy's routed hostname (app.<appDomain>). 
+  appDomain: straiker.internal
+
+straiker-bifrost:
+  enabled: true
+
+straiker-frontend:
+  enabled: true
