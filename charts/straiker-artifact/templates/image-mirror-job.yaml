@@ -1,0 +1,81 @@
+{{- if .Values.imageMirror.enabled }}
+{{- $m := .Values.imageMirror }}
+{{/*
+crane/docker auth is keyed by registry hostname only (go-containerregistry's
+keychain matches a pull's authn entry by the ref's hostname, not any path) — so
+this must log in against just the host, not a per-image path, even though
+images below live under different source repos (e.g. onprem-base vs onprem-pro)
+on that same host. Assumes every image in the list shares one source host.
+*/}}
+{{- $sourceHost := index (splitList "/" (index $m.images 0).source) 0 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-artifact-image-mirror
+  namespace: {{ include "artifact-sync.namespace" . }}
+  labels:
+    {{- include "artifact-sync.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-sync
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: artifact-sync
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      restartPolicy: OnFailure
+      # crane comes from its own image via an initContainer (copied into a shared
+      # emptyDir) rather than curled from a GitHub release at runtime — the main
+      # container needs aws-cli for ECR auth, and no single public image bundles both.
+      initContainers:
+        - name: crane
+          # Straiker's own tooling image, not the customer's — this chart has no
+          # global.dockerRegistry override; the repository here already includes
+          # its own registry host.
+          image: {{ printf "%s:%s" $m.image.repository $m.image.tag | quote }}
+          command: ["sh", "-c", "cp \"$(command -v crane)\" /shared/crane"]
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      containers:
+        - name: mirror
+          image: public.ecr.aws/aws-cli/aws-cli:2.17.62
+          # GAR auth uses the well-documented "_json_key" docker-login-compatible flow
+          # (username _json_key, password = the raw service-account JSON), so no gcloud
+          # CLI is needed. ECR auth goes through aws-cli's own get-login-password.
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              export PATH="/shared:$PATH"
+              crane auth login {{ $.Values.ecrRegistry | quote }} \
+                --username AWS --password "$(aws ecr get-login-password)"
+              crane auth login {{ $sourceHost | quote }} \
+                --username _json_key --password "$(cat /var/secrets/source/key.json)"
+              {{- range $img := $m.images }}
+              {{- $imgSku := include "artifact-sync.imageSku" $img.source }}
+              {{- if or (eq $imgSku "base") (eq $imgSku $.Values.customerSku) }}
+              echo "Mirroring {{ $img.source }}:{{ $img.tag }} -> {{ $img.destRepository }}:{{ $img.tag }}..."
+              crane copy "{{ $img.source }}:{{ $img.tag }}" "{{ $.Values.ecrRegistry }}/{{ $img.destRepository }}:{{ $img.tag }}"
+              {{- else }}
+              echo "Skipping {{ $img.source }}:{{ $img.tag }} (sku: {{ $imgSku }}) — not included for this customer's sku ({{ $.Values.customerSku }})."
+              {{- end }}
+              {{- end }}
+              echo "Image mirror complete."
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: straiker-credential
+              mountPath: /var/secrets/source
+              readOnly: true
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+      volumes:
+        - name: shared
+          emptyDir: {}
+        - name: straiker-credential
+          secret:
+            secretName: {{ .Values.straikerCredentialSecretName }}
+{{- end }}

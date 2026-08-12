@@ -1,0 +1,60 @@
+{{- if and .Values.karpenter.gpu (eq .Values.cloudProvider "eks") }}
+
+{{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "nodepools.karpenter.sh") }}
+  {{- fail "Karpenter is not installed: CRD 'nodepools.karpenter.sh' not found.\nInstall Karpenter first, then re-run this chart.\nSee: https://karpenter.sh/docs/getting-started/" }}
+{{- end }}
+
+{{- $cluster := include "base.clusterName" . }}
+{{- $gpu     := .Values.karpenter.gpu }}
+{{- $eks     := .Values.eks }}
+{{- $role    := required "eks.nodeRole is required when cloudProvider=eks" $eks.nodeRole }}
+{{- $nc      := $eks.gpu.nodeClass }}
+
+{{- include "infra.karpenterNodePool" (dict
+      "root" $
+      "pool" $gpu.nodePool
+      "nodeClassGroup" "karpenter.k8s.aws"
+      "nodeClassKind" "EC2NodeClass"
+      "nodeClassName" $nc.name
+      "extraRequirements" (list
+        (dict "key" "karpenter.k8s.aws/instance-family" "operator" "In" "values" $eks.gpu.instanceFamilies)
+      )
+    ) }}
+
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: {{ $nc.name }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+spec:
+  role: {{ $role | quote }}
+  amiSelectorTerms:
+    {{- toYaml $nc.amiSelectorTerms | nindent 4 }}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ $cluster | quote }}
+        {{- range $k, $v := $nc.subnetSelectorTags }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ $cluster | quote }}
+        {{- range $k, $v := $nc.securityGroupSelectorTags }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+  blockDeviceMappings:
+    {{- toYaml $nc.blockDeviceMappings | nindent 4 }}
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+  tags:
+    karpenter.sh/discovery: {{ $cluster | quote }}
+    {{- range $k, $v := $nc.tags }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+
+{{- end }}
