@@ -1,0 +1,17 @@
+{{- if .Values.bifrost.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: bifrost-service
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.bifrost.service.type }}
+  selector:
+    app: bifrost
+  ports:
+    - name: http
+      port: {{ .Values.bifrost.service.port }}
+      targetPort: http
+{{- end }}

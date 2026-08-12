@@ -1,0 +1,49 @@
+apiVersion: v2
+name: straiker-platform
+version: 1.0.6
+description: >
+  Straiker enterprise umbrella chart.
+  Install with -f values-defend.yaml or -f values-ascend.yaml,
+  then -f values-customer.yaml to supply site-specific config.
+type: application
+dependencies:
+  # ── Defend models (antman, hulk, quicksilver, thor) ────────────────────
+  - name: straiker-inference
+    version: "1.0.3"
+    alias: inference-antman
+    condition: inference-antman.enabled
+  - name: straiker-inference
+    version: "1.0.3"
+    alias: inference-hulk
+    condition: inference-hulk.enabled
+  - name: straiker-inference
+    version: "1.0.3"
+    alias: inference-quicksilver
+    condition: inference-quicksilver.enabled
+  - name: straiker-inference
+    version: "1.0.3"
+    alias: inference-thor
+    condition: inference-thor.enabled
+  # ── Ascend model (thanos) ───────────────────────────────────────────────
+  - name: straiker-inference
+    version: "1.0.3"
+    alias: inference-thanos
+    condition: inference-thanos.enabled
+  # ── Iris — defend + ascend ──────────────────────────────────────────────
+  - name: straiker-iris
+    version: "1.0.3"
+    condition: straiker-iris.enabled
+  # ── Argus — defend only ─────────────────────────────────────────────────
+  - name: straiker-argus
+    version: "1.0.3"
+    condition: straiker-argus.enabled
+  # ── Control plane (frontend) ──────────────────────
+  - name: straiker-control
+    version: "1.0.0"
+    condition: straiker-control.enabled
+  # ── Bifrost LLM gateway — required when iris is enabled ────
+  # iris always routes LLM calls through bifrost (SYS__SELF_HOSTED=true).
+  # Enable/disable tracks straiker-iris.enabled.
+  - name: straiker-bifrost
+    version: "0.1.0"
+    condition: straiker-bifrost.enabled

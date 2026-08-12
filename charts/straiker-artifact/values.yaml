@@ -1,0 +1,103 @@
+# ecrRegistry/modelsBucket: populated by the installer from the
+# terraform/aws/artifacts outputs. Everything else here is fixed for this
+# project (Straiker's own source registry/bucket, not customer-configurable)
+# and should not be overridden per-install.
+straikerCredentialSecretName: straiker-credential
+serviceAccountName: straiker-artifact-hauler
+ecrRegistry: ""
+modelsBucket: ""
+# Populated by the installer, parsed from the credential's client_email
+# ("cust-<sku>-...@...") — decides which images below get attempted at all.
+# Falls back to "base" if it can't be determined (see prompt_for_straiker_credential
+# / detect_customer_sku in install-straiker.sh).
+customerSku: "base"
+
+imageMirror:
+  enabled: false
+  # Fixed sources this project mirrors from — full source URL per image (no tag),
+  # since different images live under different source repos (e.g. onprem-base vs
+  # onprem-pro, which are different SKUs — the credential may not be entitled to
+  # every repo) rather than one shared registry path. destRepository (the relative
+  # ECR path) must match terraform/aws/artifacts/locals.tf's image_names (which
+  # creates the ECR repos) and charts/straiker-system's own image repository values.
+  #
+  # No separate sku field: the sku is the source repo segment itself
+  # (".../onprem-base/..." -> "base", ".../onprem-pro/..." -> "pro" — see
+  # $imgSku in image-mirror-job.yaml). "base" images are attempted for every
+  # customer; anything else only when it matches customerSku above. This list
+  # is the explicit, known-correct set for each sku, so unlike the sku filter
+  # (which just avoids attempting images we already know aren't granted), an
+  # in-scope image failing to copy IS fatal — it fails the Job.
+  images:
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/nvidia/k8s-device-plugin
+      tag: v0.17.0
+      destRepository: nvidia/k8s-device-plugin
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/opensearchproject/opensearch
+      tag: "3.6.0"
+      destRepository: opensearchproject/opensearch
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/timberio/vector
+      tag: "0.55.0-distroless-libc"
+      destRepository: timberio/vector
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/valkey/valkey
+      tag: "8-alpine"
+      destRepository: valkey/valkey
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/postgres
+      tag: "16-alpine"
+      destRepository: library/postgres
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/maximhq/bifrost
+      tag: v1.6.7
+      destRepository: maximhq/bifrost
+    # Straiker's own frontend app — under onprem-base/straiker/* (an extra
+    # segment vs the third-party images above) since it's not upstream.
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend
+      tag: onprem-v2026.8.1
+      destRepository: straiker/frontend
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend-migrate
+      tag: onprem-v2026.8.1
+      destRepository: straiker/frontend-migrate
+    # Bundled disposable local IdP (charts/straiker/charts/straiker-core's
+    # glauth/dex).
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/glauth/glauth
+      tag: v2.5.2
+      destRepository: glauth/glauth
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/dexidp/dex
+      tag: v2.45.1
+      destRepository: dexidp/dex
+    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/caddy
+      tag: 2-alpine
+      destRepository: library/caddy
+  image:
+    repository: gcr.io/go-containerregistry/crane
+    tag: debug
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+
+modelSync:
+  enabled: false
+  sourceBucket: straiker-models
+  models:
+    - path: huggingface/antman/v23
+      destPath: antman
+    - path: huggingface/hulk/v23
+      destPath: hulk
+    - path: huggingface/quicksilver/v23
+      destPath: quicksilver
+    - path: huggingface/thor/v23
+      destPath: thor
+  image:
+    repository: rclone/rclone
+    tag: "1.68"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 2Gi
