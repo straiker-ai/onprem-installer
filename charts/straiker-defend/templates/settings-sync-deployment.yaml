@@ -1,0 +1,57 @@
+{{- if .Values.settingsSync.enabled }}
+# Settings Synchronizer Daemon — one instance per cluster, pulls
+# tenant/app/API-key/settings from Foundation (straiker-frontend) into Redis.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-defend-settings-sync
+  namespace: {{ include "defend.namespace" . }}
+  labels:
+    {{- include "defend.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: straiker-defend-settings-sync
+  template:
+    metadata:
+      labels:
+        app: straiker-defend-settings-sync
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: settings-sync
+          image: {{ include "defend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "argus.daemons.settings_synchronizer"]
+          envFrom:
+            - secretRef:
+                name: {{ include "defend.secretName" . }}
+                optional: true
+          env:
+            - name: SYS__SETTINGS_SYNC_ENABLED
+              value: "true"
+            - name: SYS__SELF_HOSTED
+              value: "true"
+            - name: SYS__SECRET_MANAGER_ENABLED
+              value: "false"
+            - name: SYS__FOUNDATION_ENDPOINT
+              value: {{ include "defend.foundationEndpoint" . | quote }}
+            - name: SYS__REDIS_URL
+              value: {{ include "defend.redisUrl" . | quote }}
+          resources:
+            requests:
+              cpu: 500m
+              memory: "1Gi"
+            limits:
+              memory: "1Gi"
+      {{- include "defend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

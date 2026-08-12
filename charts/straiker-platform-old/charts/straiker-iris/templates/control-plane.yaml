@@ -1,0 +1,120 @@
+{{- if .Values.controlPlane.enabled }}
+{{- $cp := .Values.controlPlane }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-control-plane
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ $cp.replicaCount }}
+  selector:
+    matchLabels:
+      app: iris-control-plane
+  template:
+    metadata:
+      labels:
+        app: iris-control-plane
+    spec:
+      terminationGracePeriodSeconds: {{ $cp.terminationGracePeriodSeconds | default 300 }}
+      serviceAccountName: iris-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: iris-control-plane
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "run_control_plane.py"]
+        resources:
+          {{- toYaml $cp.resources | nindent 10 }}
+        env:
+          {{- include "iris.commonEnv" . | nindent 8 }}
+        - name: SYS__INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INTERNAL_API_KEY
+        - name: SYS__IRIS_ADMIN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__IRIS_ADMIN_API_KEY
+        - name: SYS__DB_HOST
+          value: {{ required "db.host is required" .Values.db.host | quote }}
+        - name: SYS__DB_PORT
+          value: {{ .Values.db.port | quote }}
+        - name: SYS__DB_NAME
+          value: {{ required "db.name is required" .Values.db.name | quote }}
+        - name: SYS__DB_USER
+          value: {{ required "db.user is required" .Values.db.user | quote }}
+        - name: SYS__ASCEND_RDS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.dbPasswordSecretName" . }}
+              key: {{ include "iris.dbPasswordSecretKey" . }}
+        - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+          value: {{ include "iris.controlPlaneEndpoint" . | quote }}
+        - name: SYS__SYSTEM_PROMPT_MAX_LENGTH
+          value: {{ .Values.iris.systemPrompt.maxLength | quote }}
+        - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+          value: {{ .Values.publishTestRunSummary | quote }}
+        ports:
+        - containerPort: {{ $cp.service.targetPort }}
+        livenessProbe:
+          httpGet:
+            path: /api/v1/public/ping
+            port: {{ $cp.service.targetPort }}
+          initialDelaySeconds: 20
+          periodSeconds: 40
+          timeoutSeconds: 30
+          failureThreshold: 20
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-control-plane-service
+  namespace: {{ include "iris.namespace" . }}
+  {{- with $cp.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ $cp.service.type }}
+  selector:
+    app: iris-control-plane
+  ports:
+    - protocol: TCP
+      port: {{ $cp.service.port }}
+      targetPort: {{ $cp.service.targetPort }}
+      name: http
+{{- if $cp.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iris-control-plane-hpa
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $cp.hpa.minReplicas }}
+  maxReplicas: {{ $cp.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iris-control-plane
+  targetCPUUtilizationPercentage: {{ $cp.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

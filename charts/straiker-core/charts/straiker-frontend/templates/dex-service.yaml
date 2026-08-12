@@ -1,0 +1,20 @@
+{{- if .Values.dex.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex-service
+  namespace: {{ include "dex.namespace" . }}
+  labels:
+    {{- include "dex.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: dex
+  ports:
+    - name: http
+      port: {{ .Values.dex.service.port }}
+      targetPort: http
+    - name: grpc
+      port: 5557
+      targetPort: grpc
+{{- end }}

@@ -1,0 +1,259 @@
+# ─────────────────────────────────────────────────────────────
+# Straiker Iris chart – default values
+# ─────────────────────────────────────────────────────────────
+
+image:
+  # Auto-derived from global.registry when empty: <global.registry>/docker/onprem-iris
+  repository: ""
+  tag: v4.28.0
+
+imagePullSecrets: []
+
+# ── Bifrost LLM gateway ───────────────────────────────────────
+# Auto-derives to the sibling straiker-bifrost service.
+# Override only if bifrost is deployed separately.
+bifrost:
+  serviceUrl: ""  # default: http://bifrost-service.<namespace>.svc.cluster.local:8090/v1
+
+# ── Node scheduling ───────────────────────────────────────────
+# Override to pin iris pods to dedicated nodes:
+#   nodeSelector: { purpose: iris }
+#   tolerations:
+#   - { key: purpose, operator: Equal, value: iris, effect: NoSchedule }
+# Target node architecture. Sets kubernetes.io/arch nodeSelector on all pods.
+# Supported: arm64 | amd64
+arch: arm64
+
+nodeSelector:
+  karpenter.sh/nodepool: straiker-iris
+tolerations:
+  - key: purpose
+    operator: Equal
+    value: straiker-iris
+    effect: NoSchedule
+
+# ── Shared iris config ────────────────────────────────────────
+iris:
+  # Redis URL — auto-wired when inClusterRedis.enabled=true.
+  # Set explicitly when using an external Redis.
+  redis:
+    url: ""
+
+  systemPrompt:
+    maxLength: 5000
+
+  unalignedLLM:
+    throttle:
+      enabled: false
+      rpm: 300
+
+  logging:
+    level: "INFO"
+
+  # Redpanda event archive — routes SYS__ARCHIVE_ENABLED=true to Kafka, not Kinesis.
+  # bootstrapServers defaults to the in-cluster Redpanda: straiker-infra.<infraNamespace>.svc.cluster.local:9093
+  # stream must match the topic created by the straiker-infra chart.
+  archive:
+    bootstrapServers: ""   # leave empty to auto-derive
+    stream: "iris"
+
+  # Assessment cleanup settings (used by the CronJob).
+  cleanup:
+    delayDays: 30       # days after completion before cleanup runs
+    throttleSeconds: 60 # delay between deletions to reduce Redis pressure
+
+# ── PostgreSQL database ───────────────────────────────────────
+# Used by iris-control-plane and iris-recon-worker to store assessment state.
+db:
+  host: ""    # required — e.g. my-db.us-east-1.rds.amazonaws.com
+  port: 5432
+  name: ""    # required — database name
+  user: ""    # required — database user
+  # SSL mode for PostgreSQL connections.
+  # Use "require" for RDS/Cloud SQL (default). Set "disable" only for local non-SSL DBs.
+  sslMode: require
+
+  # Secret containing the database password.
+  # Defaults to straiker-secrets / SYS__ASCEND_RDS_PASSWORD.
+  # When using straiker-infra in-cluster postgres, point at its generated secret:
+  #   passwordSecret:
+  #     name: straiker-postgres-secret
+  #     key: POSTGRES_PASSWORD
+  passwordSecret:
+    name: ""   # defaults to straiker-secrets
+    key: ""    # defaults to SYS__ASCEND_RDS_PASSWORD
+
+# ── Database migration Job ────────────────────────────────────
+# Helm pre-install/pre-upgrade hook Job that applies Liquibase migrations
+# against the PostgreSQL database before any iris pods start.
+# Requires: db.host/name/user set, and straiker-secrets with SYS__ASCEND_RDS_PASSWORD.
+dbMigrate:
+  enabled: true
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+# ── Straiker control plane endpoint ──────────────────────────
+# Used by control-plane, probe-shadow, probe-worker, and report-worker.
+# Leave empty to auto-derive: http://straiker-control-service.<namespace>.svc.cluster.local
+straiker_control_plane_endpoint: ""
+
+# ── Service-to-service auth (straiker-secrets) ────────────────
+# Iris sends SYS__INTERNAL_API_KEY verbatim as the Authorization header to
+# straiker-control. straiker-control validates "Authorization: Bearer <key>",
+# so SYS__INTERNAL_API_KEY must be set to "Bearer <INTERNAL_API_KEY>".
+
+# Publish assessment progress and results to straiker-control.
+# Must be true for on-prem — the UI depends on these callbacks to show progress.
+publishTestRunSummary: true
+
+# Set true to enforce rate limiting against the target application endpoint.
+# Uses the maxQueriesPerMinute value from the assessment config (floor: 60 QPM).
+rateLimitCheck: true
+
+# ── Argus detection endpoint ──────────────────────────────────
+# Used by probe-worker to send prompts for detection.
+# SYS__ARGUS_API_KEY (iris) and SYS__INTERNAL_ARGUS_API_KEY (argus verifier) must have
+# the same raw value — iris adds "Bearer " in code, so both are plain values (no prefix).
+argus:
+  # Leave empty to auto-derive: http://argus-service.<namespace>.svc.cluster.local/api/v1/detect
+  endpoint: ""
+
+# ── Component: iris-control-plane ────────────────────────────
+controlPlane:
+  enabled: true
+  replicaCount: 3
+  # Allow in-flight start_run probe-generation tasks to finish before the pod
+  # is killed during a rolling update.  Must be > the longest expected
+  # probe-generation cycle (typically < 60s; 300s gives ample headroom).
+  terminationGracePeriodSeconds: 300
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8081
+    annotations: {}
+  hpa:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 30
+
+# ── Component: iris-probe-shadow ─────────────────────────────
+probeShadow:
+  enabled: true
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8005
+    sessionAffinity: ClientIP
+    annotations: {}
+  hpa:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 30
+
+# ── Component: iris-probe-worker ─────────────────────────────
+probeWorker:
+  enabled: true
+  replicaCount: 5
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  hpa:
+    enabled: false
+    minReplicas: 5
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 30
+
+# ── Component: iris-report-worker ────────────────────────────
+reportWorker:
+  enabled: true
+  replicaCount: 3
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  hpa:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 30
+
+# ── Component: iris-recon-worker ─────────────────────────────
+# Processes reconnaissance assessment tasks from the Redis queue.
+# Requires PostgreSQL — stores recon turns, tasks, and results.
+reconWorker:
+  enabled: true
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 50
+
+# ── Component: iris-assessment-cleanup ───────────────────────
+assessmentCleanup:
+  enabled: true
+  schedule: "0 2 * * *"  # daily 2 AM UTC
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  ttlSecondsAfterFinished: 21600    # keep completed job pods 6 h
+  activeDeadlineSeconds: 14400      # fail if not done in 4 h
+  backoffLimit: 2
+  concurrencyPolicy: Forbid
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+
+# ── In-cluster Redis ──────────────────────────────────────────
+# Deploys a single-instance Redis in the iris namespace.
+# All components default to redis://iris-redis.iris.svc.cluster.local:6379.
+# Set enabled=false and set iris.redis.url to use an external Redis.
+inClusterRedis:
+  enabled: true

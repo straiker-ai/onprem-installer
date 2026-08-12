@@ -1,0 +1,167 @@
+# global.dockerRegistry: same convention as every other chart in this repo —
+# when set, argus's image (relative repository, no registry host) resolves
+# against this instead of pulling directly from Straiker's own registry.
+# global.modelBucket: S3 (EKS) or GCS (GKE) bucket the tokenizer-pull init
+# container syncs from — matches charts/straiker-artifact's models_bucket.
+global:
+  dockerRegistry: ""
+  modelBucket: ""
+
+# Selects the CLI image/command the tokenizer-pull init container uses to
+# sync from global.modelBucket: aws s3 sync (eks) vs gsutil rsync (gke).
+cloudProvider: eks
+
+imagePullSecrets: []
+
+replicas: 3
+
+# Argus loads several tokenizers at startup (~400 MB) plus Python/runtime
+# overhead — matches straiker-platform-old's own sizing guidance.
+resources:
+  requests:
+    cpu: "500m"
+    memory: "3Gi"
+  limits:
+    memory: "6Gi"
+
+image:
+  repository: straiker/argus
+  # Must match the tag charts/straiker-artifact's imageMirror.images mirrors
+  # into ECR for straiker/argus.
+  tag: onprem-v2026.7.29
+  pullPolicy: IfNotPresent
+
+nodeSelector: {}
+tolerations: []
+
+serviceAccountName: straiker-defend
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Settings-synchronizer daemon — a single always-on replica that pulls
+# tenant/app/API-key/settings from Foundation (straiker-frontend) into Redis.
+# Should be on for every on-prem install (matches straiker-platform-old's own
+# default); docker-compose profile-gates the equivalent service purely for
+# local-dev convenience (skip the extra process when you're not testing
+# settings sync specifically), not a signal to disable it here.
+settingsSync:
+  enabled: true
+
+foundation:
+  # Foundation (tenant/app/settings control plane) is straiker-frontend in
+  # this repo's architecture (straiker-platform-old's separate
+  # straiker-control component doesn't exist here). Empty auto-derives to
+  # straiker-frontend-service in this same namespace.
+  endpoint: ""
+
+# Redis — reuses charts/straiker-system's own instance (service
+# "straiker-redis", this same namespace) rather than deploying a second one
+# just for argus, unlike straiker-platform-old's per-app inClusterRedis.
+redis:
+  url: ""
+
+# Archive pipeline: argus posts detection turns over HTTP to
+# charts/straiker-system's single shared Redpanda Connect (Benthos) instance,
+# which indexes them into that same chart's OpenSearch. One Benthos serves
+# every product that archives turns (not just defend/argus), so it's
+# infra-owned rather than deployed per-product here. Replaces
+# straiker-platform-old's Kafka-bootstrap-server-based archiving
+# (SYS__ARCHIVE_KAFKA_BOOTSTRAP_SERVERS), which assumed a full separate
+# Redpanda broker cluster in a shared infra namespace that this installer
+# doesn't provision — matches the lighter HTTP-based design already in
+# ~/argus/onprem/docker-compose.yml, just pointed at OpenSearch instead of
+# that file's local-disk file outputs (fine for docker-compose smoke testing,
+# not for a real on-prem install).
+archive:
+  enabled: true
+  streamTurns: argus-turns
+  streamTurnsFlagged: argus-turns-flagged
+  streamTurnsInsights: argus-turns-insights
+  timeoutSeconds: 5
+  # Defaults to charts/straiker-system's own Redpanda Connect service, in
+  # this same namespace.
+  endpoint: ""
+
+# CUSTOMER__ vars are policy/business config, not infra — left unset by
+# default (straiker-platform-old's reference chart baked in one specific
+# customer's category-detection thresholds; a generic on-prem chart
+# shouldn't assume any customer's policy). Set via --set/-f per install.
+customerSettings:
+  ioTimeoutSeconds: "30.0"
+  categorySettings: ""
+
+logging:
+  level: INFO
+  renderer: console
+
+# Karpenter scheduling — targets charts/straiker-system's shared, untainted
+# NodePool (opensearch/postgres/redis land here too) rather than a dedicated
+# per-service pool, so no toleration is needed. Set false only if this
+# cluster has no such NodePool at all (pods get no nodeSelector then).
+karpenter:
+  enabled: true
+
+# Tokenizers argus loads at startup, pre-cached via the tokenizer-pull init
+# container from global.modelBucket/tokenizer/<destPath> into a fake HF hub
+# cache layout (avoids a live Hub call at boot, matching this repo's
+# HF_HUB_OFFLINE=1 convention elsewhere). Same list straiker-platform-old's
+# reference chart used — no newer source for this specific list.
+# NOTE: charts/straiker-artifact does not yet sync these tokenizer paths into
+# global.modelBucket (its modelSync.models list only covers the 7 inference
+# model directories) — this is a known follow-up gap, not yet implemented.
+tokenizers:
+  - destPath: straikerinc--llama-3.2-3b-instruct-argus-v23
+    hfModelId: straikerinc/Llama-3.2-3B-Instruct-argus-v23
+  - destPath: straikerinc--internlm2_5-1_8b-chat-argus-v23
+    hfModelId: straikerinc/internlm2_5-1_8b-chat-argus-v23
+  - destPath: straikerinc--qwen2.5-3b-instruct-argus-v23
+    hfModelId: straikerinc/Qwen2.5-3B-instruct-argus-v23
+  - destPath: straikerinc--qwen3-4b-instruct-2507
+    hfModelId: straikerinc/Qwen3-4B-Instruct-2507
+  - destPath: straikerinc--qwen3-1.7b
+    hfModelId: straikerinc/Qwen3-1.7B
+  - destPath: straikerinc--qwen3-vl-2b-instruct-argus-384-color
+    hfModelId: straikerinc/Qwen3-VL-2B-Instruct-argus-384-color
+  - destPath: sentence-transformers--all-minilm-l6-v2
+    hfModelId: sentence-transformers/all-MiniLM-L6-v2
+
+# LLM inference endpoints — maps each of argus's SYS__LLM_ENDPOINTS__* keys to
+# one of charts/straiker-inference's per-model Services (inference-<model>,
+# this same namespace, port 8000). Matches straiker-platform-old's own
+# model-to-endpoint assignment (LLM_STOCK and LAVA both point at hulk there
+# too — not a typo carried over, that's what the reference chart did).
+llmEndpoints:
+  llama:
+    model: antman
+    path: /v1/completions
+  internlm:
+    model: quicksilver
+    path: /v1/completions
+  qwen:
+    model: thor
+    path: /v1/completions
+  llmStock:
+    model: hulk
+    path: /v1/chat/completions
+  lava:
+    model: hulk
+    path: /v1/chat/completions
+  vision:
+    model: vision
+    path: /v1/chat/completions
+  imageDetection:
+    model: wanda
+    path: /v1/chat/completions

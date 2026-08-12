@@ -1,0 +1,25 @@
+apiVersion: v2
+name: straiker-defend
+description: >
+  Argus detection engine (Straiker's "Defend" product) plus its settings-sync
+  daemon and an in-cluster Redpanda Connect (Benthos) pipeline that archives
+  detection turns into charts/straiker-system's OpenSearch. Ported from
+  charts/straiker-platform-old/charts/straiker-argus, updated to match the
+  current ~/argus/onprem/docker-compose.yml architecture: HTTP-based Redpanda
+  Connect archiving instead of a Kafka-broker cluster, straiker-system's
+  existing Redis instead of a second one, and no External Secrets Operator
+  dependency (single-namespace on-prem install has no cross-namespace secret
+  to sync).
+type: application
+version: 0.1.0
+appVersion: "0.1.25"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - argus
+  - defend

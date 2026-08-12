@@ -1,0 +1,17 @@
+{{- if .Values.glauth.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: glauth-service
+  namespace: {{ include "glauth.namespace" . }}
+  labels:
+    {{- include "glauth.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: glauth
+  ports:
+    - name: ldap
+      port: 3893
+      targetPort: ldap
+{{- end }}

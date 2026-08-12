@@ -1,0 +1,21 @@
+{{- if and (eq .Values.cloudProvider "gke") .Values.gke.filestore.enabled .Values.gke.filestore.modelsPvc.enabled }}
+{{- $pvc := .Values.gke.filestore.modelsPvc }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $pvc.name }}
+  namespace: {{ $pvc.namespace }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: filestore-models
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: {{ .Values.gke.filestore.storageClass.name }}
+  resources:
+    requests:
+      storage: {{ $pvc.size }}
+{{- end }}
