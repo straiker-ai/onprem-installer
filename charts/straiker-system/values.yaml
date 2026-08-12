@@ -1,0 +1,295 @@
+# Straiker infra chart default values
+
+cloudProvider: eks
+
+clusterName: ""
+
+# Karpenter
+karpenter:
+  gpu:
+    nodePool:
+      name: straiker-gpu
+      taints: []
+      labels:
+        purpose: argus-model-workers
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      disruption:
+        consolidationPolicy: WhenEmpty
+        consolidateAfter: 1h
+      expireAfter: 720h
+      limits:
+        nvidia.com/gpu: "20"
+
+  argus:
+    nodePool:
+      name: straiker-argus
+      labels:
+        purpose: straiker-argus
+      taints:
+        - key: purpose
+          value: straiker-argus
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      disruption:
+        consolidationPolicy: WhenEmpty
+        consolidateAfter: 30m
+      expireAfter: 720h
+      limits:
+        cpu: "100"
+        memory: 400Gi
+
+  iris:
+    nodePool:
+      name: straiker-iris
+      labels:
+        purpose: straiker-iris
+      taints:
+        - key: purpose
+          value: straiker-iris
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      disruption:
+        consolidationPolicy: WhenEmpty
+        consolidateAfter: 30m
+      expireAfter: 720h
+      limits:
+        cpu: "100"
+        memory: 400Gi
+
+  shared: null
+
+sharedNodeSelector: &sharedNodeSelector
+  node.kubernetes.io/purpose: general
+
+# EKS-specific configuration
+eks:
+  nodeRole: ""
+
+  gpu:
+    instanceFamilies: ["g4dn", "g5"]
+    nodeClass:
+      name: straiker-gpu
+      amiSelectorTerms:
+        - alias: al2023@latest
+      subnetSelectorTags: {}
+      securityGroupSelectorTags: {}
+      blockDeviceMappings:
+        - deviceName: /dev/xvda
+          ebs:
+            volumeSize: 200Gi
+            volumeType: gp3
+            iops: 3000
+            throughput: 125
+            deleteOnTermination: true
+      tags:
+        purpose: argus-model-workers
+
+  argus:
+    instanceFamilies: ["m6g", "c6g", "m7g", "c7g"]
+    instanceSizes: ["xlarge", "2xlarge", "4xlarge"]
+    nodeClass:
+      name: straiker-argus
+      amiSelectorTerms:
+        - alias: al2023@latest
+      subnetSelectorTags: {}
+      securityGroupSelectorTags: {}
+      blockDeviceMappings:
+        - deviceName: /dev/xvda
+          ebs:
+            volumeSize: 50Gi
+            volumeType: gp3
+            deleteOnTermination: true
+      tags:
+        purpose: straiker-argus
+
+  iris:
+    instanceFamilies: ["m6g", "c6g", "m7g", "c7g"]
+    instanceSizes: ["xlarge", "2xlarge"]
+    nodeClass:
+      name: straiker-iris
+      amiSelectorTerms:
+        - alias: al2023@latest
+      subnetSelectorTags: {}
+      securityGroupSelectorTags: {}
+      blockDeviceMappings:
+        - deviceName: /dev/xvda
+          ebs:
+            volumeSize: 50Gi
+            volumeType: gp3
+            deleteOnTermination: true
+      tags:
+        purpose: straiker-iris
+
+  shared:
+    instanceFamilies: ["m6g", "c6g", "m7g", "c7g"]
+    instanceSizes: ["large", "xlarge"]
+    nodeClass:
+      name: straiker-shared
+      amiSelectorTerms:
+        - alias: al2023@latest
+      subnetSelectorTags: {}
+      securityGroupSelectorTags: {}
+      blockDeviceMappings:
+        - deviceName: /dev/xvda
+          ebs:
+            volumeSize: 50Gi
+            volumeType: gp3
+            deleteOnTermination: true
+      tags:
+        purpose: straiker-shared
+
+# GKE-specific configuration
+gke:
+  gpu:
+    accelerators: ["nvidia-l4", "nvidia-tesla-t4"]
+    nodeClass:
+      name: straiker-gpu
+      bootDiskSizeGB: 200
+      bootDiskType: pd-ssd
+
+  argus:
+    machineFamilies: ["t2a"]
+    nodeClass:
+      name: straiker-argus
+      bootDiskSizeGB: 50
+      bootDiskType: pd-balanced
+
+  iris:
+    machineFamilies: ["t2a"]
+    nodeClass:
+      name: straiker-iris
+      bootDiskSizeGB: 50
+      bootDiskType: pd-balanced
+
+  shared:
+    machineFamilies: ["t2a"]
+    nodeClass:
+      name: straiker-shared
+      bootDiskSizeGB: 50
+      bootDiskType: pd-balanced
+
+  # Filestore CSI
+  filestore:
+    enabled: false
+
+    tier: standard
+    network: default
+
+    storageClass:
+      name: filestore-sc
+      reclaimPolicy: Retain
+
+    modelsPvc:
+      enabled: false
+      name: models-filestore-pvc
+      namespace: straiker
+      size: 1Ti
+
+# NVIDIA
+nvidia:
+  runtimeClass:
+    enabled: true
+    name: nvidia
+
+  devicePlugin:
+    enabled: true
+    image:
+      repository: nvcr.io/nvidia/k8s-device-plugin
+      tag: v0.17.0
+      pullPolicy: IfNotPresent
+    failOnInitError: "false"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+# EFS CSI StorageClasses
+efs:
+  enabled: false
+
+  fileSystemId: ""
+
+  storageClass:
+    name: efs-sc
+    reclaimPolicy: Retain
+    volumeBindingMode: Immediate
+
+  modelsPvc: null
+
+# Shared stateful infra
+tags:
+  opensearch: true
+
+# OpenSearch
+opensearch:
+  replicas: 1
+
+  singleNode: true
+
+  image:
+    tag: "3.6.0"
+    pullPolicy: IfNotPresent
+
+  opensearchJavaOpts: "-Xms512m -Xmx512m"
+
+  extraEnvs:
+    - name: DISABLE_SECURITY_PLUGIN
+      value: "true"
+    - name: DISABLE_INSTALL_DEMO_CONFIG
+      value: "true"
+
+  persistence:
+    enabled: true
+    enableInitChown: false
+    size: 10Gi
+    storageClass: ""
+
+  podSecurityContext:
+    fsGroup: 1000
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 2Gi
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+# PostgreSQL
+postgres: null
+
+# Redis
+redis: null

@@ -1,0 +1,65 @@
+name: Release Charts
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    # See https://github.com for updates
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Initialize gh-pages branch
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          worktree="$(mktemp -d)"
+          git worktree add --detach "$worktree" HEAD
+          git -C "$worktree" switch --orphan gh-pages
+          git -C "$worktree" rm -rf . >/dev/null 2>&1 || true
+          touch "$worktree/index.yaml"
+          git -C "$worktree" add index.yaml
+          git -C "$worktree" commit -m "Initialize gh-pages"
+          git -C "$worktree" push origin gh-pages
+          git worktree remove --force "$worktree"
+
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: charts
+          pages_branch: gh-pages
+          skip_existing: true
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Publish installer script
+        run: |
+          set -euo pipefail
+          worktree="$(mktemp -d)"
+          git fetch origin gh-pages
+          git worktree add "$worktree" origin/gh-pages
+          cp scripts/install.sh "$worktree/install.sh"
+          git -C "$worktree" add install.sh
+          if ! git -C "$worktree" diff --cached --quiet; then
+            git -C "$worktree" commit -m "Publish installer script"
+            git -C "$worktree" push origin gh-pages
+          fi
