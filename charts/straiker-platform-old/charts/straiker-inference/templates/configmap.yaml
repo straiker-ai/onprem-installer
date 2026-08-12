@@ -1,0 +1,47 @@
+{{- $modelProfiles := include "straiker-inference.modelProfiles" . | fromYaml }}
+{{- $gpuProfiles   := include "straiker-inference.gpuProfiles"   . | fromYaml }}
+{{- $mp := index $modelProfiles (.Values.modelProfile | default "") | default dict }}
+{{- $resolvedProfile := .Values.gpuProfile }}
+{{- if and (not $resolvedProfile) (eq .Values.cloudProvider "eks") }}
+  {{- $nodePool := lookup "karpenter.sh/v1" "NodePool" "" (include "straiker-inference.gpuNodePool" .) }}
+  {{- if $nodePool }}
+    {{- range $nodePool.spec.template.spec.requirements }}
+      {{- if eq .key "karpenter.k8s.aws/instance-family" }}
+        {{- if eq (len .values) 1 }}
+          {{- $resolvedProfile = index .values 0 }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if not $resolvedProfile }}
+  {{- $nodes := lookup "v1" "Node" "" "" }}
+  {{- if and $nodes $nodes.items }}
+    {{- range $nodes.items }}
+      {{- if not $resolvedProfile }}
+        {{- $accel := index .metadata.labels "cloud.google.com/gke-accelerator" | default "" }}
+        {{- if eq $accel "nvidia-l4" }}{{- $resolvedProfile = "l4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-t4" }}{{- $resolvedProfile = "t4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-a100" }}{{- $resolvedProfile = "a100" -}}{{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $resolvedProfile = $resolvedProfile | default (get $mp "defaultGpuProfile") | default "g4dn" }}
+{{- $profile     := index $gpuProfiles $resolvedProfile | default dict }}
+{{- $gpuOverrides := get $mp "gpuOverrides" | default dict }}
+{{- $gpuSpecific  := get $gpuOverrides $resolvedProfile | default dict }}
+{{- $memFraction := coalesce (get $gpuSpecific "mem_fraction_static") (get $profile "mem_fraction_static") "0.9" }}
+{{- $servedNames := get $mp "servedNames" }}
+{{- $modelName   := first ($servedNames | default (list .Values.modelProfile)) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}-configmap
+  labels:
+    {{- include "straiker-inference.labels" . | nindent 4 }}
+data:
+  MODEL_NAME: {{ $modelName | quote }}
+  IS_TRITON: "false"
+  GPU_COUNT: {{ .Values.inferenceService.gpu_count | default 1 | quote }}
+  MEM_FRACTION_STATIC: {{ $memFraction | quote }}

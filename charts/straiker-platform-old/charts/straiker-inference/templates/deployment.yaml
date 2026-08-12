@@ -1,0 +1,240 @@
+{{- $modelProfiles := include "straiker-inference.modelProfiles" . | fromYaml }}
+{{- $gpuProfiles   := include "straiker-inference.gpuProfiles"   . | fromYaml }}
+{{- $mp  := index $modelProfiles (.Values.modelProfile | default "") | default dict }}
+{{- $storagePrefix := get $mp "storagePrefix" | default "" }}
+{{- $servedNames := get $mp "servedNames" }}
+{{- $imageRepo := printf "%s/docker/straiker/vllm" (required "global.registry is required" .Values.global.registry) }}
+{{- $resolvedProfile := .Values.gpuProfile }}
+{{- if and (not $resolvedProfile) (eq .Values.cloudProvider "eks") }}
+  {{- /* EKS: read instance-family from the Karpenter NodePool */ -}}
+  {{- $nodePool := lookup "karpenter.sh/v1" "NodePool" "" (include "straiker-inference.gpuNodePool" .) }}
+  {{- if $nodePool }}
+    {{- range $nodePool.spec.template.spec.requirements }}
+      {{- if eq .key "karpenter.k8s.aws/instance-family" }}
+        {{- if eq (len .values) 1 }}
+          {{- $resolvedProfile = index .values 0 }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if not $resolvedProfile }}
+  {{- /* GKE: read accelerator type from cluster node labels */ -}}
+  {{- $nodes := lookup "v1" "Node" "" "" }}
+  {{- if and $nodes $nodes.items }}
+    {{- range $nodes.items }}
+      {{- if not $resolvedProfile }}
+        {{- $accel := index .metadata.labels "cloud.google.com/gke-accelerator" | default "" }}
+        {{- if eq $accel "nvidia-l4" }}{{- $resolvedProfile = "l4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-t4" }}{{- $resolvedProfile = "t4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-a100" }}{{- $resolvedProfile = "a100" -}}{{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $resolvedProfile = $resolvedProfile | default (get $mp "defaultGpuProfile") | default "g4dn" }}
+{{- $profile     := index $gpuProfiles $resolvedProfile | default dict }}
+{{- $gpuOverrides := get $mp "gpuOverrides" | default dict }}
+{{- $gpuSpecific  := get $gpuOverrides $resolvedProfile | default dict }}
+{{- $dtype        := coalesce (get $gpuSpecific "dtype")               (get $profile "dtype")               "half" }}
+{{- $maxModelLen  := coalesce .Values.inferenceService.max_model_len   (get $gpuSpecific "max_model_len")   (get $profile "max_model_len")   "16384" }}
+{{- $memFraction  := coalesce (get $gpuSpecific "mem_fraction_static") (get $profile "mem_fraction_static") "0.9" }}
+{{- $maxNumSeqs   := coalesce (get $gpuSpecific "max_num_seqs")       (get $profile "max_num_seqs")       "256" }}
+{{- $quantization := get $gpuSpecific "quantization" | default "" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "straiker-inference.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "straiker-inference.fullname" . }}
+        model: {{ .Values.modelProfile | quote }}
+        engine: vllm
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 180
+      runtimeClassName: nvidia
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $storagePrefix }}
+      {{- if .Values.modelCache.enabled }}
+      # When using node-local cache, just verify it exists (DaemonSet pre-warms it)
+      initContainers:
+        - name: model-cache-wait
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              cache_dir="{{ .Values.modelCache.hostPath }}/{{ $storagePrefix }}"
+              marker_file="$cache_dir/.synced"
+              timeout=1800  # 30 min timeout
+              elapsed=0
+              interval=10
+              while [ ! -f "$marker_file" ] && [ $elapsed -lt $timeout ]; do
+                echo "Waiting for model cache at $cache_dir (${elapsed}s)"
+                sleep $interval
+                elapsed=$((elapsed + interval))
+              done
+              if [ ! -f "$marker_file" ]; then
+                echo "ERROR: Model cache sync timeout after ${timeout}s"
+                exit 1
+              fi
+              echo "Model cache ready"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      {{- else }}
+      # Fallback: download from S3/GCS on first pod run (emptyDir; not persistent)
+      initContainers:
+        - name: model-bucket-sync
+          image: {{ include "straiker-inference.modelSyncImage" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - {{ include "straiker-inference.modelSyncCmd" (dict "root" . "src" (printf "models/%s" $storagePrefix) "dst" "/var/lib/models/model") | quote }}
+          volumeMounts:
+            - name: model-store
+              mountPath: /var/lib/models
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ include "straiker-inference.fullname" . }}
+          image: {{ printf "%s:%s" $imageRepo (include "straiker-inference.vllmTag" .) }}
+          imagePullPolicy: IfNotPresent
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 15
+          ports:
+            - containerPort: 8081
+          command:
+           - "vllm"
+           - "serve"
+           {{- if $storagePrefix }}
+           - "/var/lib/models/model"
+           {{- end }}
+           - "--port"
+           - "8081"
+           - "--trust-remote-code"
+           - "--dtype"
+           - {{ $dtype | quote }}
+           - "--max-model-len"
+           - {{ $maxModelLen | quote }}
+           - "--gpu-memory-utilization"
+           - {{ $memFraction | quote }}
+           - "--max-num-seqs"
+           - {{ $maxNumSeqs | quote }}
+           {{- if $quantization }}
+           - "--quantization"
+           - {{ $quantization | quote }}
+           {{- end }}
+           {{- if $servedNames }}
+           - "--served-model-name"
+           {{- range $servedNames }}
+           - {{ . | quote }}
+           {{- end }}
+           {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "straiker-inference.secretName" . }}
+            - configMapRef:
+                name: {{ include "straiker-inference.fullname" . }}-configmap
+          env:
+            - name: HF_TOKEN
+              value: "dummy"
+            - name: HUGGING_FACE_HUB_TOKEN
+              value: "dummy"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/.cache/huggingface
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+            {{- if $storagePrefix }}
+            - name: model-store
+              mountPath: /var/lib/models
+              readOnly: true
+            {{- end }}
+          # startupProbe gives vLLM up to 30 min to load the model before
+          # liveness kicks in — large models on cold nodes take 10-20 min.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 30
+            failureThreshold: 60
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 2
+              memory: 8Gi
+            limits:
+              nvidia.com/gpu: {{ .Values.inferenceService.gpu_count }}
+      {{- $profileNodeSelector := get $profile "nodeSelector" | default dict }}
+      {{- $effectiveNodeSelector := merge (deepCopy .Values.nodeSelector) $profileNodeSelector }}
+      {{- if $effectiveNodeSelector }}
+      nodeSelector:
+        {{- toYaml $effectiveNodeSelector | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+        {{- if $storagePrefix }}
+        {{- if .Values.modelCache.enabled }}
+        - name: model-store
+          hostPath:
+            path: {{ printf "%s/%s" .Values.modelCache.hostPath $storagePrefix | quote }}
+            type: Directory
+        {{- else }}
+        - name: model-store
+          emptyDir:
+            sizeLimit: 50Gi
+        {{- end }}
+        {{- end }}

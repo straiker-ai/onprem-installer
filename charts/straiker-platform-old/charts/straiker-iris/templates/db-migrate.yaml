@@ -1,0 +1,81 @@
+{{- if .Values.dbMigrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: iris-db-migrate
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.dbMigrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.dbMigrate.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.dbMigrate.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: iris-db-migrate
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Copy changelog files out of the iris image before Liquibase runs.
+      # This keeps migrations in sync with the iris image — no ConfigMap to maintain.
+      initContainers:
+      - name: copy-migrations
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+          - cp
+          - -r
+          - /app/packages/database/src/rds/liquibase/.
+          - /migrations
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        volumeMounts:
+        - name: migrations
+          mountPath: /migrations
+      containers:
+      - name: liquibase
+        image: {{ include "iris.liquibaseImage" . | quote }}
+        imagePullPolicy: IfNotPresent
+        args: ["update"]
+        resources:
+          {{- toYaml .Values.dbMigrate.resources | nindent 10 }}
+        env:
+        - name: LIQUIBASE_COMMAND_CHANGELOG_FILE
+          value: "master.json"
+        - name: LIQUIBASE_SEARCH_PATH
+          value: "/liquibase/changelog"
+        - name: LIQUIBASE_COMMAND_URL
+          value: {{ printf "jdbc:postgresql://%s:%v/%s?sslmode=%s" (required "db.host is required" .Values.db.host) .Values.db.port (required "db.name is required" .Values.db.name) .Values.db.sslMode | quote }}
+        - name: LIQUIBASE_COMMAND_USERNAME
+          value: {{ required "db.user is required" .Values.db.user | quote }}
+        - name: LIQUIBASE_COMMAND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.dbPasswordSecretName" . }}
+              key: {{ include "iris.dbPasswordSecretKey" . }}
+        volumeMounts:
+        - name: migrations
+          mountPath: /liquibase/changelog
+      volumes:
+      - name: migrations
+        emptyDir: {}
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

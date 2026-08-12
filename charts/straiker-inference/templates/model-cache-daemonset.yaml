@@ -1,0 +1,116 @@
+{{- if .Values.modelCache.enabled }}
+{{- $modelProfiles := include "straiker-inference.modelProfiles" . | fromYaml }}
+{{- $mp  := index $modelProfiles (.Values.modelProfile | default "") | default dict }}
+{{- $storagePrefix := get $mp "storagePrefix" | default "" }}
+{{- $bucket := required "global.modelBucket is required" .Values.global.modelBucket }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}-model-cache
+  namespace: {{ include "straiker-inference.namespace" . }}
+  labels:
+    {{- include "straiker-inference.labels" . | nindent 4 }}
+    app.kubernetes.io/component: model-cache
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "straiker-inference.fullname" . }}-model-cache
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: {{ include "straiker-inference.fullname" . }}-model-cache
+        model: {{ .Values.modelProfile | quote }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Only run on nodes with GPU labels (matching the inference deployment's nodeSelector)
+      {{- if eq .Values.cloudProvider "eks" }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: karpenter.k8s.aws/instance-family
+                operator: In
+                values:
+                - g4dn
+                - g5
+                - p3
+                - p4d
+      {{- else if eq .Values.cloudProvider "gke" }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-accelerator
+                operator: Exists
+      {{- end }}
+      hostNetwork: true
+      restartPolicy: Always
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: model-cache-sync
+        image: {{ include "straiker-inference.modelSyncImage" . }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          {{- include "straiker-inference.securityContext" . | nindent 10 }}
+        command:
+          - sh
+          - -c
+          - |
+            set -e
+            cache_dir="{{ .Values.modelCache.hostPath }}/{{ $storagePrefix }}"
+            marker_file="$cache_dir/.synced"
+
+            # Skip if this node already has it cached (survives pod restarts
+            # on the same node — Karpenter can replace/reschedule this
+            # DaemonSet pod without losing the hostPath data).
+            if [ -f "$marker_file" ]; then
+              echo "Model already cached at $cache_dir, skipping sync"
+            else
+              echo "Syncing model to node-local cache..."
+              mkdir -p "$cache_dir"
+              {{- if eq .Values.cloudProvider "gke" }}
+              gsutil -m rsync -r "{{ $bucket }}/models/{{ $storagePrefix }}" "$cache_dir/model"
+              {{- else }}
+              aws s3 sync --only-show-errors "{{ $bucket }}/models/{{ $storagePrefix }}" "$cache_dir/model"
+              {{- end }}
+              touch "$marker_file"
+              echo "Model sync complete"
+            fi
+
+            # Idle — matches Straiker's own production model-downloader
+            # pattern (one-shot sync, then a no-op holding container). No
+            # ongoing corruption-check loop: a pod/node restart already
+            # re-runs this whole script, and `aws s3 sync`/`gsutil rsync` are
+            # idempotent, so there's nothing an active poll buys beyond
+            # permanently reserving CPU/memory this container mostly isn't
+            # using.
+            sleep infinity
+        env:
+        - name: AWS_REGION
+          value: {{ .Values.modelCache.awsRegion | default "us-east-1" | quote }}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2
+            memory: 2Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: {{ .Values.modelCache.hostPath | quote }}
+      volumes:
+      - name: model-cache
+        hostPath:
+          path: {{ .Values.modelCache.hostPath | quote }}
+          type: DirectoryOrCreate
+{{- end }}

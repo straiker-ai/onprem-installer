@@ -1,0 +1,13 @@
+apiVersion: v2
+appVersion: 0.1.2
+description: >
+  vLLM inference server — serves a single LLM whose weights are synced
+  from global.modelBucket (S3/GCS) by an init container.
+name: straiker-inference
+type: application
+version: 1.0.3
+keywords:
+  - straiker
+  - inference
+  - vllm
+  - gpu

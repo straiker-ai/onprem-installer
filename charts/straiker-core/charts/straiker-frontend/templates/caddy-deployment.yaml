@@ -1,0 +1,59 @@
+{{- if .Values.caddy.enabled }}
+{{- $c := .Values.caddy }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caddy
+  namespace: {{ include "caddy.namespace" . }}
+  labels:
+    {{- include "caddy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caddy
+  template:
+    metadata:
+      labels:
+        app: caddy
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/caddy-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: caddy
+          image: {{ include "caddy.image" . | quote }}
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+              name: http
+            - containerPort: {{ $c.httpsPort }}
+              name: https
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: caddy-config
+        # Disposable — same framing as dex's sqlite storage: self-signed certs
+        # regenerate on restart rather than needing to persist across pods.
+        - name: data
+          emptyDir: {}
+        - name: config-dir
+          emptyDir: {}
+      nodeSelector:
+        {{- include "caddy.nodeSelector" . | nindent 8 }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,58 @@
+{{- if .Values.dex.enabled }}
+{{- $origin := include "frontend.origin" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: {{ include "dex.namespace" . }}
+  labels:
+    {{- include "dex.labels" . | nindent 4 }}
+data:
+  # Disposable local OIDC provider, LDAP-backed by glauth — bundled so a
+  # fresh install has working login without a customer-supplied IdP on day
+  # one. Enterprise customers replace this entirely by pointing frontend's
+  # OIDC_* values at their own IdP; dex/glauth are never a permanent identity
+  # store. staticClients.secret below is a plain demo credential (matching
+  # ~/straiker/frontend/onprem/docker-compose.yaml's own hardcoded value) —
+  # override .Values.dex.staticClient.secret for anything beyond quick testing.
+  config.yaml: |
+    issuer: {{ include "dex.issuerUrl" . }}
+
+    storage:
+      type: sqlite3
+      config:
+        file: /var/dex/dex.db
+
+    web:
+      http: 0.0.0.0:{{ .Values.dex.service.port }}
+
+    oauth2:
+      skipApprovalScreen: true
+      responseTypes:
+        - code
+
+    staticClients:
+      - id: {{ .Values.dex.staticClient.id | quote }}
+        secret: {{ .Values.dex.staticClient.secret | quote }}
+        name: 'Straiker'
+        redirectURIs:
+          - {{ printf "%s/login/oidc/callback" $origin | quote }}
+
+    connectors:
+      - type: ldap
+        id: glauth
+        name: GLAuth
+        config:
+          host: glauth-service.{{ include "glauth.namespace" . }}.svc.cluster.local:3893
+          insecureNoSSL: true
+          bindDN: cn=dex-service,ou=svcaccts,ou=users,dc=straiker,dc=local
+          bindPW: bc983793bdce9c8dc8a96a19a78dfa0a
+          usernamePrompt: Email
+          userSearch:
+            baseDN: ou=users,dc=straiker,dc=local
+            filter: '(objectClass=posixAccount)'
+            username: mail
+            idAttr: uid
+            emailAttr: mail
+            nameAttr: cn
+{{- end }}

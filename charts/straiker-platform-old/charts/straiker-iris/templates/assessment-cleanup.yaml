@@ -1,0 +1,62 @@
+{{- if .Values.assessmentCleanup.enabled }}
+{{- $ac := .Values.assessmentCleanup }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iris-assessment-cleanup
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: assessment-cleanup
+spec:
+  schedule: {{ $ac.schedule | quote }}
+  successfulJobsHistoryLimit: {{ $ac.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $ac.failedJobsHistoryLimit }}
+  concurrencyPolicy: {{ $ac.concurrencyPolicy }}
+  jobTemplate:
+    metadata:
+      labels:
+        app: iris-assessment-cleanup
+    spec:
+      ttlSecondsAfterFinished: {{ $ac.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ $ac.activeDeadlineSeconds }}
+      backoffLimit: {{ $ac.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app: iris-assessment-cleanup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: iris-sa
+          securityContext:
+            runAsNonRoot: {{ $ac.securityContext.runAsNonRoot }}
+            runAsUser: {{ $ac.securityContext.runAsUser }}
+          containers:
+          - name: cleanup
+            image: {{ include "iris.image" . }}
+            imagePullPolicy: {{ .Values.image.pullPolicy }}
+            command: ["python", "run_assessment_cleanup.py"]
+            securityContext:
+              allowPrivilegeEscalation: {{ $ac.securityContext.allowPrivilegeEscalation }}
+              readOnlyRootFilesystem: {{ $ac.securityContext.readOnlyRootFilesystem }}
+            resources:
+              {{- toYaml $ac.resources | nindent 14 }}
+            env:
+            - name: SYS__ENV
+              value: "production"
+            - name: SYS__SECRET_MANAGER_ENABLED
+              value: "false"
+            - name: SYS__REDIS_URL
+              value: {{ include "iris.redisUrl" . | quote }}
+            - name: SYS__LOGGING_LEVEL
+              value: {{ .Values.iris.logging.level | quote }}
+            - name: SYS__CLEANUP_DELAY_DAYS
+              value: {{ .Values.iris.cleanup.delayDays | quote }}
+            - name: SYS__CLEANUP_THROTTLE_SECONDS
+              value: {{ .Values.iris.cleanup.throttleSeconds | quote }}
+          {{- include "iris.nodeSelector" . | nindent 10 }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

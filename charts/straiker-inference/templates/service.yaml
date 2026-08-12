@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}
+  namespace: {{ include "straiker-inference.namespace" . }}
+  labels:
+    {{- include "straiker-inference.labels" . | nindent 4 }}
+  annotations:
+    k8s.grafana.com/scrape: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "straiker-inference.fullname" . }}
+  ports:
+    - port: 8000
+      protocol: TCP
+      targetPort: 8081

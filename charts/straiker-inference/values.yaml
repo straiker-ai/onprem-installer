@@ -1,0 +1,89 @@
+global:
+  # Same convention as every other chart in this repo: when set, the vLLM
+  # image (relative repository, no registry host) resolves against this
+  # instead of pulling directly from Straiker's own registry.
+  dockerRegistry: ""
+  # S3 (EKS) or GCS (GKE) bucket model weights are synced from — matches
+  # charts/straiker-artifact's own models_bucket output. The installer fills
+  # this in automatically; set it explicitly if installing this chart
+  # standalone.
+  modelBucket: ""
+
+# Model to run. One of: antman, hulk, quicksilver, thor, thanos, vision,
+# wanda. Everything else (storagePrefix, servedNames, default GPU tier) is
+# derived from this via the Straiker-managed lookup table in _helpers.tpl —
+# see straiker-inference.modelProfiles.
+modelProfile: antman
+
+# GPU tier. Leave empty to auto-select: on EKS this reads the instance-family
+# requirement off the "straiker-gpu" NodePool charts/straiker-system creates
+# (karpenter.gpu.nodePool.name); on GKE it inspects node accelerator labels.
+# EKS: g4dn (T4 16 GB), g5 (A10G 24 GB), p4d (A100 40 GB), p3 (V100 16 GB)
+# GKE: t4, l4, a100
+gpuProfile: ""
+
+# Cloud provider: eks or gke — matches charts/straiker-system's own
+# cloudProvider value. Only eks is exercised by install-straiker.sh today.
+cloudProvider: eks
+
+replicas: 1
+
+imagePullSecrets: []
+
+# vLLM image — Straiker's own build (not upstream vllm/vllm-openai), mirrored
+# by charts/straiker-artifact under onprem-base/straiker/vllm, matching the
+# same /straiker/ prefix convention as frontend/frontend-migrate.
+#
+# NOTE: bitsandbytes quantization moved out-of-tree on newer vLLM (needs the
+# separate vllm-bnb-plugin package baked into the image). Only relevant if you
+# override thanos's gpuProfile to g5/l4 for cheaper GPU cost (see
+# straiker-inference.modelProfiles' thanos entry in _helpers.tpl) — the
+# default gpuProfile (g6e) needs no quantization and is unaffected by this.
+image:
+  repository: straiker/vllm
+  # Must match the tag charts/straiker-artifact's imageMirror.images mirrors
+  # into ECR for straiker/vllm, or the pod can never pull it.
+  tag: v0.27.0
+  pullPolicy: IfNotPresent
+
+# Extra nodeSelector labels merged on top of the GPU profile's built-in
+# selector (see straiker-inference.gpuProfiles in _helpers.tpl).
+nodeSelector: {}
+# Must tolerate charts/straiker-system's GPU NodePool taint
+# (karpenter.gpu.nodePool.taints) or this pod can never schedule there.
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+# ServiceAccount granting S3 read access to global.modelBucket via EKS Pod
+# Identity (terraform/aws/artifacts's workload_role_arn, bound by
+# install-straiker.sh's aws-artifacts phase to this exact name). Needed by
+# both the fallback init container (modelCache.enabled=false) and the
+# node-local cache DaemonSet — the bare node IAM role has no S3 access to
+# Straiker's model bucket on its own (same class of gap the artifact-hauler
+# role already solves for image mirroring).
+serviceAccountName: straiker-inference
+
+# Node-local model cache (DaemonSet pre-warms models to a hostPath volume) —
+# dramatically speeds up pod startup by avoiding a re-download on reschedule.
+modelCache:
+  enabled: true
+  # Absolute path on the node where models are cached (should be an EBS gp3
+  # mount, or at least a disk with room for multi-GB model weights).
+  hostPath: /mnt/model-cache
+  # AWS region for the DaemonSet's `aws s3 sync` — only used when
+  # cloudProvider: eks.
+  awsRegion: ""
+
+inferenceService:
+  gpu_count: 1
+  # Override max_model_len when the model+GPU profile default needs adjusting.
+  max_model_len: ""
+
+# CPU/host-memory sizing (NOT GPU memory — see mem_fraction_static above)
+# defaults to the resolved GPU tier's own entry in straiker-inference.gpuProfiles
+# (16GB tier: 2 CPU/8Gi request; 24GB: 4/16Gi; 40GB: 8/32Gi) — bigger GPU tiers
+# imply bigger models, which need more host RAM to stage weights during load.
+# Set explicitly here to override that entirely for this release.
+resources: {}
