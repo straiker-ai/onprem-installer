@@ -1,0 +1,278 @@
+# Shared registry override — same convention as charts/straiker-system: when
+# set, every component's image (relative repository, no registry host)
+# resolves against this instead of pulling directly from its own upstream
+# registry.
+global:
+  dockerRegistry: ""
+  # Namespace charts/straiker-system is installed into — this chart's
+  # defaults (postgres/opensearch connection strings below) assume that
+  # chart's actual resource names (straiker-postgres, straiker-postgres-secret,
+  # opensearch-cluster-master). Override if straiker-system lives elsewhere.
+  infraNamespace: straiker-system
+
+# Node scheduling shared by every component in this chart — same convention
+# as charts/straiker-system's sharedNodeSelector (targets the untainted
+# "general" NodePool; see that chart for why this specific key/value).
+sharedNodeSelector: &sharedNodeSelector
+  purpose: general
+
+# Only used for glauth's seeded users' cosmetic `mail` fields today — not
+# load-bearing until admin-bootstrap seeding (deferred) needs to match it.
+appDomain: straiker.internal
+
+# ── Bifrost (Iris LLM gateway) ──────────────────────────────────────────
+bifrost:
+  enabled: true
+
+  image:
+    # Official upstream image (not a Straiker fork), mirrored by
+    # charts/straiker-artifact under this exact repository/tag
+    # (onprem-base/maximhq/bifrost).
+    repository: maximhq/bifrost
+    tag: v1.6.7
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets: []
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "512Mi"
+
+  service:
+    type: ClusterIP
+    port: 8090
+
+  # Enables the /metrics endpoint on the bifrost port.
+  telemetry:
+    metricsEnabled: true
+
+  # No semantic cache yet (deferred) — bifrost runs with just LLM provider
+  # routing, no vector-store-backed caching plugin configured.
+
+  # Read from secretRef.name (straiker-secrets, operator-supplied). xai/
+  # anthropic keys are optional — safe to leave the secret key absent if
+  # that provider isn't used.
+  secretRef:
+    name: straiker-secrets
+    openaiKey: SYS__OPENAI_API_KEY
+    xaiKey: SYS__XAI_API_KEY
+    anthropicKey: SYS__ANTHROPIC_API_KEY
+
+# ── glauth (disposable local LDAP directory backing dex) ────────────────
+glauth:
+  enabled: true
+
+  image:
+    repository: glauth/glauth
+    tag: v2.5.2
+    pullPolicy: IfNotPresent
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# ── dex (disposable local OIDC provider, LDAP-backed by glauth) ─────────
+dex:
+  enabled: true
+
+  image:
+    repository: dexidp/dex
+    tag: v2.45.1
+    pullPolicy: IfNotPresent
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  service:
+    port: 5556
+
+  # Demo credential matching ~/straiker/frontend/onprem/docker-compose.yaml's
+  # own hardcoded value — override for anything beyond quick testing. Not a
+  # chart-managed generated secret: dex's static-client config can't read
+  # from a Kubernetes Secret, so keeping this in sync between dex's config
+  # and frontend's OIDC_CLIENT_SECRET would need its own generation dance for
+  # what both sides are explicit is a disposable, non-production IdP anyway.
+  staticClient:
+    id: straiker
+    secret: "change-me-too"
+
+# ── Caddy (TLS termination + host-based routing to frontend/dex) ────────
+# A real reverse proxy rather than a K8s Ingress resource, since Ingress does
+# nothing without a pre-existing controller on the cluster (can't be assumed
+# for a bring-your-own customer cluster). Self-signed via `tls internal`,
+# matching docker-compose's own local-dev framing.
+caddy:
+  enabled: true
+
+  image:
+    repository: library/caddy
+    tag: 2-alpine
+    pullPolicy: IfNotPresent
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  service:
+    type: ClusterIP
+    # Only used when service.type: NodePort — leave null for Kubernetes to
+    # pick a random nodePort.
+    httpNodePort: null
+    httpsNodePort: null
+
+# ── Frontend (formerly "control" — renamed and rebuilt against
+# ~/straiker/frontend/onprem/docker-compose.yaml's "frontend" service as the
+# authoritative reference, not the old straiker-control chart) ────────────
+# First pass: Deployment + Service + DB connection + schema migration + OIDC
+# SSO (backed by the bundled dex/glauth above). Ingress and admin-bootstrap
+# seeding (docker-compose's "bootstrap" service, which seeds the initial
+# tenant + admin row) are still deferred — no public URL to reach this at
+# yet (port-forward only), and it's untested whether OIDC auto-provisioning
+# alone (frontend.oidc.autoProvision) works without an existing tenant row.
+frontend:
+  image:
+    # Straiker's own application image — unlike bifrost (an official upstream
+    # image), this lives under an extra "straiker/" segment in the same
+    # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
+    # since it's Straiker's own component, not third-party.
+    repository: straiker/frontend
+    tag: onprem-v2026.8.1
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets: []
+
+  nodeSelector: *sharedNodeSelector
+  tolerations: []
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+
+  # Defaults to the port-forward-friendly address docker-compose itself
+  # falls back to locally — there's no ingress yet (deferred), so port-forward
+  # is the only way to reach this today.
+  origin: ""
+  logLevel: info
+
+  # Defaults to charts/straiker-system's own postgres (platform database),
+  # in global.infraNamespace. Override host/name/user for external RDS/Cloud
+  # SQL, or a differently-configured postgres.
+  db:
+    host: ""
+    port: 5432
+    name: platform
+    user: platform
+    sslMode: disable
+    # Matches charts/straiker-system's postgres.yaml Secret exactly
+    # (straiker-postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
+    # separate operator-supplied secret.
+    passwordSecret:
+      name: straiker-postgres-secret
+      key: POSTGRES_PASSWORD_PLATFORM
+
+  # Liquibase schema migration (docker-compose's "migrate" service) —
+  # required for frontend to function at all (its tables don't exist
+  # otherwise). Admin-bootstrap seeding (docker-compose's "bootstrap" service:
+  # ADMIN_EMAIL/CUSTOMER_NAME) is deferred; this only runs the schema
+  # migration itself. Same image as frontend by default (built together —
+  # see cloudbuild.yaml's onprem-base/straiker/frontend-migrate), override
+  # repository/tag independently if that ever changes.
+  dbMigrate:
+    enabled: true
+    image:
+      repository: straiker/frontend-migrate
+      tag: onprem-v2026.8.1
+    backoffLimit: 2
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  # Defaults to charts/straiker-system's own opensearch, in global.infraNamespace.
+  opensearch:
+    url: ""
+
+  # Backed by the bundled dex/glauth stack above by default — every field
+  # left empty falls back to dex's own issuer/staticClient (see
+  # frontend.oidcIssuer and friends in _helpers.tpl). Override all of them
+  # together (and set dex.enabled/glauth.enabled: false) to point at a
+  # customer's own IdP instead — matching docker-compose's own framing that
+  # dex/glauth are never a permanent identity store.
+  oidc:
+    enabled: true
+    issuer: ""
+    clientId: ""
+    clientSecret: ""
+    authorizationEndpoint: ""
+    tokenEndpoint: ""
+    jwksUri: ""
+    displayName: ""
+    scopes: ""
+    autoProvision: true
+    defaultRole: viewer
+    allowedDomains: ""
+
+  # Not yet built in this chart family (argus/iris/scout) — left as explicit
+  # overrides rather than auto-derived, unlike the old umbrella chart where
+  # they lived in the same namespace by construction. Omitted entirely from
+  # the Deployment's env when unset, rather than pointing at a URL that
+  # resolves to nothing.
+  argusEndpoint: ""
+  irisControlPlaneAdminEndpoint: ""
+  # Service-to-service auth — both read from an operator-supplied secret
+  # (frontend.secretRef's straiker-secrets by default). Leave secretKey empty
+  # to omit the env var entirely (e.g. when argus/iris aren't deployed yet).
+  irisControlPlaneAdminApiKey:
+    secretName: ""
+    secretKey: ""
+  scoutEndpoint: ""
+  internalApiKey:
+    secretName: ""
+    secretKey: ""

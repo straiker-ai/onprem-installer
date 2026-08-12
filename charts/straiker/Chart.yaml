@@ -1,0 +1,20 @@
+apiVersion: v2
+name: straiker
+description: >
+  Straiker application umbrella chart — rebuilt from charts/straiker-platform-old
+  ground up. Install with product-specific values files (e.g. values-ascend.yaml),
+  then a customer values file for site-specific config, following the same
+  pattern as the old straiker-platform chart.
+type: application
+version: 0.1.3
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+dependencies:
+  # ── Core — always required: frontend + Bifrost LLM gateway ──────────────
+  - name: straiker-core
+    version: "0.1.4"
+    condition: straiker-core.enabled

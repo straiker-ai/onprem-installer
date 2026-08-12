@@ -1,0 +1,84 @@
+{{- if .Values.bifrost.enabled }}
+{{- $b := .Values.bifrost }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bifrost
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-gateway
+spec:
+  replicas: {{ $b.replicaCount }}
+  selector:
+    matchLabels:
+      app: bifrost
+  template:
+    metadata:
+      labels:
+        app: bifrost
+      annotations:
+        # Roll pods when the config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/bifrost-configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with $b.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bifrost
+          image: {{ include "bifrost.image" . | quote }}
+          imagePullPolicy: {{ $b.image.pullPolicy }}
+          command: ["/app/bifrost", "-host", "0.0.0.0", "-port", {{ $b.service.port | quote }}, "-app-dir", "/app"]
+          ports:
+            - containerPort: {{ $b.service.port }}
+              name: http
+          resources:
+            {{- toYaml $b.resources | nindent 12 }}
+          env:
+            # API keys — mapped from secretRef.name to the names bifrost reads via env.*
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $b.secretRef.name }}
+                  key: {{ $b.secretRef.openaiKey }}
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $b.secretRef.name }}
+                  key: {{ $b.secretRef.xaiKey }}
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $b.secretRef.name }}
+                  key: {{ $b.secretRef.anthropicKey }}
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.json
+              subPath: config.json
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: bifrost-config
+      nodeSelector:
+        {{- toYaml $b.nodeSelector | nindent 8 }}
+      {{- with $b.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,5 @@
+# Gates the straiker-core dependency in Chart.yaml. Core (control plane +
+# Bifrost) is always required, so this stays true — present as an explicit
+# toggle for consistency with how future product subcharts will be gated.
+straiker-core:
+  enabled: true

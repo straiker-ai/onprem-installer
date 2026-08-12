@@ -1,0 +1,6 @@
+dependencies:
+- name: straiker-core
+  repository: ""
+  version: 0.1.0
+digest: sha256:b9f52cddd7f2f91313095a08f00bbb72c67caff5bfddc274a2cd17da5d88f747
+generated: "2026-08-13T17:01:20.862614-07:00"

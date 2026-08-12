@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-frontend
+  namespace: {{ include "frontend.namespace" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-frontend
+  template:
+    metadata:
+      labels:
+        app: straiker-frontend
+    spec:
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.frontend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: straiker-frontend
+          image: {{ include "frontend.image" . | quote }}
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.frontend.service.targetPort }}
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.frontend.service.targetPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: {{ .Values.frontend.service.targetPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          # Operator-supplied platform secrets (internal API keys, etc.).
+          envFrom:
+            - secretRef:
+                name: {{ include "frontend.secretName" . }}
+                optional: true
+          env:
+            - name: PORT
+              value: {{ .Values.frontend.service.targetPort | quote }}
+            # On-prem mode is baked into the image (see docker-compose's
+            # PUBLIC_ENV: onprem) — not a runtime toggle.
+            - name: PUBLIC_ENV
+              value: "onprem"
+            - name: ORIGIN
+              value: {{ .Values.frontend.origin | default "http://localhost:8080" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.frontend.logLevel | default "info" | quote }}
+            # DB_USER and DB_PASSWORD must precede POSTGRES_URL so Kubernetes
+            # $(VAR) substitution works.
+            - name: DB_USER
+              value: {{ required "frontend.db.user is required" .Values.frontend.db.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "frontend.dbPasswordSecretName" . }}
+                  key: {{ include "frontend.dbPasswordSecretKey" . }}
+            - name: POSTGRES_URL
+              value: {{ printf "postgresql://$(DB_USER):$(DB_PASSWORD)@%s:%v/%s?sslmode=%s" (include "frontend.dbHost" .) .Values.frontend.db.port .Values.frontend.db.name .Values.frontend.db.sslMode | quote }}
+            - name: OPENSEARCH_URL
+              value: {{ include "frontend.opensearchUrl" . | quote }}
+            # Session signing — required, signs local JWTs. Chart-managed
+            # secret; preserved across helm upgrades (rotating invalidates
+            # every active session).
+            - name: SESSION_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "frontend.authSecretName" . }}
+                  key: SESSION_SIGNING_KEY
+            # OIDC SSO — backed by the bundled dex/glauth stack by default (see
+            # frontend.oidcIssuer and friends in _helpers.tpl), or a customer's
+            # own IdP if frontend.oidc.issuer etc. are overridden.
+            {{- if .Values.frontend.oidc.enabled }}
+            - name: OIDC_ENABLED
+              value: "true"
+            - name: OIDC_ISSUER
+              value: {{ include "frontend.oidcIssuer" . | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ include "frontend.oidcClientId" . | quote }}
+            - name: OIDC_CLIENT_SECRET
+              value: {{ include "frontend.oidcClientSecret" . | quote }}
+            - name: OIDC_AUTHORIZATION_ENDPOINT
+              value: {{ include "frontend.oidcAuthorizationEndpoint" . | quote }}
+            - name: OIDC_TOKEN_ENDPOINT
+              value: {{ include "frontend.oidcTokenEndpoint" . | quote }}
+            - name: OIDC_JWKS_URI
+              value: {{ include "frontend.oidcJwksUri" . | quote }}
+            - name: OIDC_DISPLAY_NAME
+              value: {{ .Values.frontend.oidc.displayName | default "Dex" | quote }}
+            - name: OIDC_SCOPES
+              value: {{ .Values.frontend.oidc.scopes | default "openid email profile" | quote }}
+            - name: OIDC_AUTO_PROVISION
+              value: {{ .Values.frontend.oidc.autoProvision | default true | quote }}
+            - name: OIDC_DEFAULT_ROLE
+              value: {{ .Values.frontend.oidc.defaultRole | default "viewer" | quote }}
+            - name: OIDC_ALLOWED_DOMAINS
+              value: {{ .Values.frontend.oidc.allowedDomains | default "" | quote }}
+            {{- end }}
+            # Internal services — optional, omitted entirely if unset (argus/
+            # iris/scout aren't built in this chart family yet).
+            {{- if .Values.frontend.argusEndpoint }}
+            - name: ARGUS_ENDPOINT
+              value: {{ .Values.frontend.argusEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.frontend.irisControlPlaneAdminEndpoint }}
+            - name: IRIS_CONTROL_PLANE_ADMIN_ENDPOINT
+              value: {{ .Values.frontend.irisControlPlaneAdminEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.frontend.irisControlPlaneAdminApiKey.secretKey }}
+            - name: IRIS_CONTROL_PLANE_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frontend.irisControlPlaneAdminApiKey.secretName | default (include "frontend.secretName" .) }}
+                  key: {{ .Values.frontend.irisControlPlaneAdminApiKey.secretKey }}
+            {{- end }}
+            {{- if .Values.frontend.scoutEndpoint }}
+            - name: SCOUT_ENDPOINT
+              value: {{ .Values.frontend.scoutEndpoint | quote }}
+            {{- end }}
+            # Internal API key for service-to-service calls (argus/iris -> frontend).
+            {{- if .Values.frontend.internalApiKey.secretKey }}
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frontend.internalApiKey.secretName | default (include "frontend.secretName" .) }}
+                  key: {{ .Values.frontend.internalApiKey.secretKey }}
+            {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.frontend.nodeSelector | nindent 8 }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

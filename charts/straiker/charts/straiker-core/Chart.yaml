@@ -1,0 +1,23 @@
+apiVersion: v2
+name: straiker-core
+description: >
+  Always-required Straiker application services: the control plane API and
+  the Bifrost LLM gateway. Rebuilt from charts/straiker-platform-old's
+  straiker-control and straiker-bifrost subcharts as one consolidated chart,
+  since both are needed regardless of which products (Ascend/Defend/...) are
+  installed. First pass: core deployment + DB connection only — ingress, OIDC
+  SSO, and admin-bootstrap seeding are deferred to a follow-up iteration.
+type: application
+version: 0.1.4
+appVersion: "1.0.0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - control-plane
+  - bifrost
+  - llm-gateway
