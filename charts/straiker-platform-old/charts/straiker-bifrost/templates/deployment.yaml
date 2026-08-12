@@ -1,0 +1,91 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bifrost
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-gateway
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: bifrost
+  template:
+    metadata:
+      labels:
+        app: bifrost
+      annotations:
+        # Roll pods when the config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: bifrost
+        image: {{ include "bifrost.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["/app/bifrost", "-host", "0.0.0.0", "-port", {{ .Values.service.port | quote }}, "-app-dir", "/app"]
+        ports:
+        - containerPort: {{ .Values.service.port }}
+          name: http
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        env:
+        # API keys — mapped from straiker-secrets to the names bifrost reads via env.*
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secretRef.name }}
+              key: {{ .Values.secretRef.openaiKey }}
+        - name: XAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secretRef.name }}
+              key: {{ .Values.secretRef.xaiKey }}
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secretRef.name }}
+              key: {{ .Values.secretRef.anthropicKey }}
+              optional: true
+        {{- if .Values.secretRef.redisPasswordKey }}
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secretRef.name }}
+              key: {{ .Values.secretRef.redisPasswordKey }}
+        {{- else }}
+        - name: REDIS_PASSWORD
+          value: ""
+        {{- end }}
+        volumeMounts:
+        - name: config
+          mountPath: /app/config.json
+          subPath: config.json
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: bifrost-config
+      {{- include "bifrost.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,52 @@
+{{- if .Values.modelSync.enabled }}
+{{- $s := .Values.modelSync }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-artifact-model-sync
+  namespace: {{ include "artifact-sync.namespace" . }}
+  labels:
+    {{- include "artifact-sync.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-sync
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: artifact-sync
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      restartPolicy: OnFailure
+      {{- include "artifact-sync.tolerations" . | nindent 6 }}
+      containers:
+        - name: sync
+          # Straiker's own tooling image, not the customer's — see the same note in
+          # image-mirror-job.yaml.
+          image: {{ printf "%s:%s" $s.image.repository $s.image.tag | quote }}
+          # rclone's connection-string remotes (":gcs,...:" / ":s3,...:") avoid needing
+          # a generated rclone.conf. env_auth=true picks up the ambient AWS credentials
+          # EKS Pod Identity injects into the pod automatically.
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              {{- range $model := $s.models }}
+              echo "Syncing {{ $s.sourceBucket }}/{{ $model.path }} -> {{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
+              rclone sync \
+                ":gcs,service_account_file=/var/secrets/source/key.json:{{ $s.sourceBucket }}/{{ $model.path }}" \
+                ":s3,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
+                --progress --transfers 8 --checkers 16
+              {{- end }}
+              echo "Model sync complete."
+          volumeMounts:
+            - name: straiker-credential
+              mountPath: /var/secrets/source
+              readOnly: true
+          resources:
+            {{- toYaml $s.resources | nindent 12 }}
+      volumes:
+        - name: straiker-credential
+          secret:
+            secretName: {{ .Values.straikerCredentialSecretName }}
+{{- end }}

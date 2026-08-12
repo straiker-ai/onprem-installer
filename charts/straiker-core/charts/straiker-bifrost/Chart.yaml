@@ -1,0 +1,21 @@
+apiVersion: v2
+name: straiker-bifrost
+description: >
+  Bifrost LLM gateway — nested under charts/straiker-core as a subchart (not a
+  standalone top-level chart) since it's always installed/upgraded together
+  with straiker-frontend as one release. Split out of straiker-core's own flat
+  templates/ for the same reason straiker-system's postgres.databases became a
+  list: isolate one component's config/templates from its siblings.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - bifrost
+  - llm-gateway

@@ -1,0 +1,34 @@
+apiVersion: v2
+name: straiker-system
+description: >
+  Straiker cluster + infrastructure chart — provisions everything app charts
+  need before they start: Karpenter NodePools, NVIDIA device plugin, EFS/Filestore
+  StorageClasses, and shared stateful infra (OpenSearch, optional Postgres/Redis).
+  Redpanda lives in its own chart. No in-cluster registry — see the
+  straiker-artifact chart for how container images and model artifacts reach
+  this cluster's ECR/S3 mirror before this chart's workloads pull from it.
+type: application
+version: 1.1.5
+appVersion: "1.0.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - infra
+  - karpenter
+  - nvidia
+  - efs
+  - opensearch
+  - postgres
+  - redis
+dependencies:
+  - name: opensearch
+    version: "3.6.0"
+    repository: "https://opensearch-project.github.io/helm-charts"
+    tags:
+      - opensearch
