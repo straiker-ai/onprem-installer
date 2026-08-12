@@ -5,10 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 STATE_DIR="${HOME}/.straiker"
-STATE_FILE="${STATE_DIR}/install.json"
 CACHE_ROOT_DEFAULT="${STATE_DIR}/installer"
-DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-68293dd}"
-DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-68293dd.tar.gz}"
+DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-854153d}"
+DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-854153d.tar.gz}"
 
 INSTALLER_VERSION="${STRAIKER_INSTALLER_VERSION:-}"
 INSTALLER_BUNDLE_URL="${STRAIKER_INSTALLER_BUNDLE_URL:-}"
@@ -61,21 +60,6 @@ sanitize_version() {
   echo "${value}"
 }
 
-read_state_metadata() {
-  local key=$1
-  if [[ ! -f "${STATE_FILE}" ]]; then
-    return 0
-  fi
-  python3 - "${STATE_FILE}" "${key}" <<'PY'
-import json, sys
-
-path, key = sys.argv[1:]
-with open(path, encoding="utf-8") as f:
-    data = json.load(f)
-print(data.get("install", {}).get("metadata", {}).get(key, ""))
-PY
-}
-
 resolve_local_bundle_source() {
   local candidate_root=$1
   if [[ -f "${candidate_root}/scripts/install-straiker.sh" && -d "${candidate_root}/terraform" ]]; then
@@ -123,15 +107,13 @@ parse_args() {
 }
 
 determine_installer_version() {
+  # Unlike launch-uninstall.sh, this deliberately does NOT fall back to
+  # ~/.straiker/install.json's recorded version: re-running install.sh should
+  # pick up whatever was just fetched (the latest published fix), not silently
+  # keep re-using whatever version a much earlier attempt happened to record.
   if [[ -n "${INSTALLER_VERSION}" ]]; then
     return
   fi
-
-  INSTALLER_VERSION="$(read_state_metadata installer_bundle_version)"
-  if [[ -n "${INSTALLER_VERSION}" ]]; then
-    return
-  fi
-
   INSTALLER_VERSION="${DEFAULT_INSTALLER_VERSION}"
 }
 
@@ -139,12 +121,6 @@ determine_installer_url() {
   if [[ -n "${INSTALLER_BUNDLE_URL}" ]]; then
     return
   fi
-
-  INSTALLER_BUNDLE_URL="$(read_state_metadata installer_bundle_url)"
-  if [[ -n "${INSTALLER_BUNDLE_URL}" ]]; then
-    return
-  fi
-
   INSTALLER_BUNDLE_URL="${DEFAULT_INSTALLER_BUNDLE_URL}"
 }
 
@@ -217,7 +193,6 @@ main() {
   parse_args "$@"
 
   require_command bash
-  require_command python3
 
   determine_installer_version
   determine_installer_url
