@@ -1,0 +1,39 @@
+{{- if .Values.bifrost.enabled }}
+{{- $b := .Values.bifrost }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bifrost-config
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+data:
+  # No semantic_cache/vector_store here yet (deferred) — just LLM provider
+  # routing and metrics, matching charts/straiker-platform-old's straiker-bifrost
+  # minus its caching plugin.
+  config.json: |
+    {
+      "$schema": "https://www.getbifrost.ai/schema",
+      "providers": {
+        "openai": {
+          "keys": [{ "name": "openai-primary", "value": "env.OPENAI_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        },
+        "xai": {
+          "keys": [{ "name": "xai-primary", "value": "env.XAI_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        },
+        "anthropic": {
+          "keys": [{ "name": "anthropic-primary", "value": "env.ANTHROPIC_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        }
+      },
+      "plugins": [
+        {
+          "name": "telemetry",
+          "enabled": {{ $b.telemetry.metricsEnabled | default true }},
+          "config": {}
+        }
+      ]
+    }
+{{- end }}

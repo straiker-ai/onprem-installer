@@ -1,0 +1,22 @@
+{{- if .Values.caddy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: caddy-config
+  namespace: {{ include "caddy.namespace" . }}
+  labels:
+    {{- include "caddy.labels" . | nindent 4 }}
+data:
+  # Same routing as ~/straiker/frontend/onprem/Caddyfile, targeting in-cluster
+  # Services instead of docker-compose's service names.
+  Caddyfile: |
+    app.{{ .Values.appDomain }} {
+      tls internal
+      reverse_proxy straiker-frontend-service:{{ .Values.frontend.service.port }}
+    }
+
+    dex.{{ .Values.appDomain }} {
+      tls internal
+      reverse_proxy dex-service:{{ .Values.dex.service.port }}
+    }
+{{- end }}

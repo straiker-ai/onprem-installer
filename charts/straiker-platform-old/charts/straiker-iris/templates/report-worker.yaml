@@ -1,0 +1,68 @@
+{{- if .Values.reportWorker.enabled }}
+{{- $rw := .Values.reportWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-report-worker
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+    app.kubernetes.io/component: report-worker
+spec:
+  replicas: {{ $rw.replicaCount }}
+  selector:
+    matchLabels:
+      app: iris-report-worker
+  template:
+    metadata:
+      labels:
+        app: iris-report-worker
+    spec:
+      terminationGracePeriodSeconds: 300
+      serviceAccountName: iris-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: iris-report-worker
+        image: {{ include "iris.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "run_report_worker.py"]
+        resources:
+          {{- toYaml $rw.resources | nindent 10 }}
+        env:
+          {{- include "iris.commonEnv" . | nindent 8 }}
+        - name: SYS__INTERNAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "iris.secretName" . }}
+              key: SYS__INTERNAL_API_KEY
+        - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+          value: {{ .Values.publishTestRunSummary | quote }}
+        - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+          value: {{ include "iris.controlPlaneEndpoint" . | quote }}
+      {{- include "iris.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $rw.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iris-report-worker-hpa
+  namespace: {{ include "iris.namespace" . }}
+  labels:
+    {{- include "iris.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $rw.hpa.minReplicas }}
+  maxReplicas: {{ $rw.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iris-report-worker
+  targetCPUUtilizationPercentage: {{ $rw.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,18 @@
+straiker-argus {{ .Chart.Version }} installed.
+
+Secret required (must exist before pod can start):
+
+  kubectl create secret generic straiker-secrets \
+    -n {{ .Release.Namespace }} \
+    --from-literal=SYS__INFERENCE_API_KEY=<inference-api-key> \
+    --from-literal=SYS__ARGUS_CONTROL_PLANE_API_KEY=<cp-api-key> \
+    --from-literal=SYS__ARGUS_CONTROL_PLANE_WEB_KEY=<cp-web-password>
+
+  SYS__INFERENCE_API_KEY        — must match VLLM_API_KEY in straiker-inference
+  SYS__ARGUS_CONTROL_PLANE_API_KEY — bearer token for /api/v1/cp/* REST API
+  SYS__ARGUS_CONTROL_PLANE_WEB_KEY — password for /cp/login web UI
+
+Session signing key is auto-generated and stored in "straiker-session-secret".
+
+Check pod status:
+  kubectl get pods -n {{ .Release.Namespace }} -l app=argus-app
