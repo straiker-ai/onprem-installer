@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 STATE_DIR="${HOME}/.straiker"
 STATE_FILE="${STATE_DIR}/install.json"
 CACHE_ROOT_DEFAULT="${STATE_DIR}/installer"
-DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-a5766bc}"
-DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-a5766bc.tar.gz}"
+DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-111f34f}"
+DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-111f34f.tar.gz}"
 
 INSTALLER_VERSION="${STRAIKER_INSTALLER_VERSION:-}"
 INSTALLER_BUNDLE_URL="${STRAIKER_INSTALLER_BUNDLE_URL:-}"
@@ -159,7 +159,7 @@ copy_local_bundle() {
   cp "${source_root}/scripts/install-straiker.sh" "${bundle_root}/scripts/"
   cp "${source_root}/scripts/uninstall-straiker.sh" "${bundle_root}/scripts/"
   cp "${source_root}/scripts/launch-straiker.sh" "${bundle_root}/scripts/"
-  cp "${source_root}/scripts/nuke-infra.sh" "${bundle_root}/scripts/"
+  cp "${source_root}/scripts/nuke-eks.sh" "${bundle_root}/scripts/"
   cp -R "${source_root}/terraform" "${bundle_root}/terraform"
 }
 
