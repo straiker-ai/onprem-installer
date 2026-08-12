@@ -1,0 +1,59 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bifrost-config
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "$schema": "https://www.getbifrost.ai/schema",
+      "providers": {
+        "openai": {
+          "keys": [{ "name": "openai-primary", "value": "env.OPENAI_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        },
+        "xai": {
+          "keys": [{ "name": "xai-primary", "value": "env.XAI_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        },
+        "anthropic": {
+          "keys": [{ "name": "anthropic-primary", "value": "env.ANTHROPIC_API_KEY", "models": ["*"], "weight": 1 }],
+          "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
+        }
+      },
+      "plugins": [
+        {
+          "name": "telemetry",
+          "enabled": {{ .Values.telemetry.metricsEnabled | default true }},
+          "config": {}
+        },
+        {
+          "name": "semantic_cache",
+          "enabled": {{ .Values.semanticCache.enabled | default true }},
+          "config": {
+            "provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "dimension": 1536,
+            "threshold": {{ .Values.semanticCache.threshold | default 0.85 }},
+            "ttl": {{ .Values.semanticCache.ttl | default "10m" | quote }},
+            "vector_store_namespace": "iris-cache",
+            "default_cache_key": {{ .Values.semanticCache.defaultCacheKey | default "iris" | quote }}
+          }
+        }
+      ],
+      "vector_store": {
+        "enabled": true,
+        "type": {{ .Values.vectorStore.type | default "sqlite" | quote }},
+        "config": {
+          {{- if eq (.Values.vectorStore.type | default "sqlite") "pgvector" }}
+          "dsn": {{ .Values.vectorStore.pgvector.dsn | quote }}
+          {{- else }}
+          "path": {{ .Values.vectorStore.sqlite.path | default "/app/vecstore.db" | quote }}
+          {{- end }}
+        }
+      }
+    }
+{{- end }}

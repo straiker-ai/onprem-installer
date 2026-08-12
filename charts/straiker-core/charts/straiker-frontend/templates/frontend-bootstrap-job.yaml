@@ -1,0 +1,78 @@
+{{- if .Values.frontend.bootstrap.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: frontend-bootstrap
+  namespace: {{ include "frontend.namespace" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    # Runs after frontend-migrate (hook-weight "0") — bootstrap.sql assumes
+    # the customers/onprem_users tables already exist.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.frontend.bootstrap.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.frontend.bootstrap.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.frontend.bootstrap.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: frontend-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.frontend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bootstrap
+          image: {{ include "frontend.bootstrapImage" . | quote }}
+          imagePullPolicy: {{ .Values.frontend.bootstrap.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.frontend.bootstrap.resources | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              psql -v ON_ERROR_STOP=1 \
+                -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                -v "admin_email=$ADMIN_EMAIL" \
+                -v "customer_name=$CUSTOMER_NAME" \
+                -f /bootstrap.sql
+          env:
+            - name: DB_HOST
+              value: {{ include "frontend.dbHost" . | quote }}
+            - name: DB_PORT
+              value: {{ .Values.frontend.db.port | quote }}
+            - name: DB_USER
+              value: {{ required "frontend.db.user is required" .Values.frontend.db.user | quote }}
+            - name: DB_NAME
+              value: {{ required "frontend.db.name is required" .Values.frontend.db.name | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "frontend.dbPasswordSecretName" . }}
+                  key: {{ include "frontend.dbPasswordSecretKey" . }}
+            - name: ADMIN_EMAIL
+              value: {{ include "frontend.bootstrapAdminEmail" . | quote }}
+            - name: CUSTOMER_NAME
+              value: {{ .Values.frontend.bootstrap.customerName | quote }}
+          volumeMounts:
+            - name: bootstrap-sql
+              mountPath: /bootstrap.sql
+              subPath: bootstrap.sql
+              readOnly: true
+      volumes:
+        - name: bootstrap-sql
+          configMap:
+            name: frontend-bootstrap
+      nodeSelector:
+        {{- include "frontend.nodeSelector" . | nindent 8 }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

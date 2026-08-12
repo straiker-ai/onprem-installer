@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-control
+  namespace: {{ include "cp.namespace" . }}
+  labels:
+    {{- include "cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-control
+  template:
+    metadata:
+      labels:
+        app: straiker-control
+    spec:
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: straiker-control
+        image: {{ include "cp.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.service.targetPort }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
+        # Operator-supplied platform secrets (DB password, internal API keys, etc.).
+        envFrom:
+          - secretRef:
+              name: {{ include "cp.secretName" . }}
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: {{ .Values.service.targetPort | quote }}
+        - name: PUBLIC_SELF_HOSTED
+          value: "true"
+        - name: PUBLIC_ENV
+          value: "onprem"
+        - name: ORIGIN
+          value: {{ .Values.origin | default "http://localhost:8080" | quote }}
+        - name: ALLOWED_ORIGINS
+          value: {{ .Values.allowedOrigins | default "http://localhost:8080" | quote }}
+        - name: LOG_LEVEL
+          value: {{ .Values.logLevel | default "info" | quote }}
+        # DB_USER and DB_PASSWORD must precede POSTGRES_URL so Kubernetes $(VAR) substitution works.
+        - name: DB_USER
+          value: {{ required "db.user is required" .Values.db.user | quote }}
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cp.dbPasswordSecretName" . }}
+              key: {{ include "cp.dbPasswordSecretKey" . }}
+        - name: POSTGRES_URL
+          value: {{ printf "postgresql://$(DB_USER):$(DB_PASSWORD)@%s:%v/%s?sslmode=%s" (include "cp.dbHost" .) .Values.db.port .Values.db.name .Values.db.sslMode | quote }}
+        # Session signing — required, signs local JWTs. Chart-managed secret;
+        # preserved across helm upgrades (rotating invalidates every session).
+        - name: SESSION_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cp.authSecretName" . }}
+              key: SESSION_SIGNING_KEY
+        # OIDC SSO — optional; rendered only when enabled. When unset, the
+        # login page shows only the email/password button.
+        {{- if .Values.oidc.enabled }}
+        - name: OIDC_ENABLED
+          value: "true"
+        - name: OIDC_ISSUER
+          value: {{ required "oidc.issuer is required when oidc.enabled" .Values.oidc.issuer | quote }}
+        - name: OIDC_CLIENT_ID
+          value: {{ required "oidc.clientId is required when oidc.enabled" .Values.oidc.clientId | quote }}
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.oidc.clientSecret.name | default (include "cp.secretName" .) | quote }}
+              key: {{ .Values.oidc.clientSecret.key | default "OIDC_CLIENT_SECRET" | quote }}
+        - name: OIDC_DISPLAY_NAME
+          value: {{ .Values.oidc.displayName | default "Sign in with SSO" | quote }}
+        - name: OIDC_SCOPES
+          value: {{ .Values.oidc.scopes | default "openid email profile" | quote }}
+        - name: OIDC_AUTO_PROVISION
+          value: {{ .Values.oidc.autoProvision | default false | quote }}
+        - name: OIDC_DEFAULT_ROLE
+          value: {{ .Values.oidc.defaultRole | default "viewer" | quote }}
+        - name: OIDC_ALLOWED_DOMAINS
+          value: {{ .Values.oidc.allowedDomains | default "" | quote }}
+        {{- end }}
+        - name: OPENSEARCH_URL
+          value: {{ include "cp.opensearchUrl" . | quote }}
+        - name: ARGUS_ENDPOINT
+          value: {{ include "cp.argusEndpoint" . | quote }}
+        - name: IRIS_CONTROL_PLANE_ADMIN_ENDPOINT
+          value: {{ include "cp.irisAdminEndpoint" . | quote }}
+        {{- if .Values.scoutEndpoint }}
+        - name: SCOUT_ENDPOINT
+          value: {{ .Values.scoutEndpoint | quote }}
+        {{- end }}
+      {{- include "cp.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-control-service
+  namespace: {{ include "cp.namespace" . }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    {{- include "cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: straiker-control
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      name: http
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: straiker-control
+  namespace: {{ include "cp.namespace" . }}
+  labels:
+    {{- include "cp.labels" . | nindent 4 }}
+  {{- with (include "cp.ingressAnnotations" . | trim) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with (include "cp.ingressClassName" .) }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          - path: {{ .path | default "/" }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: straiker-control-service
+                port:
+                  number: {{ $.Values.service.port }}
+    {{- end }}
+{{- end }}

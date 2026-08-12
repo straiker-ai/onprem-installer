@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────
+# Straiker Bifrost chart – default values
+# ─────────────────────────────────────────────────────────────
+
+enabled: false
+
+image:
+  # Auto-derived from global.registry when empty: <global.registry>/docker/platform/bifrost
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── Node scheduling ───────────────────────────────────────────
+arch: arm64
+nodeSelector:
+  karpenter.sh/nodepool: straiker-iris
+tolerations:
+  - key: purpose
+    operator: Equal
+    value: straiker-iris
+    effect: NoSchedule
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "128Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+
+service:
+  type: ClusterIP
+  port: 8090
+
+# ── Telemetry / Prometheus metrics ───────────────────────────
+# Enables the /metrics endpoint on the bifrost port (8090).
+# Exposes bifrost_cache_hits_total{cache_type="direct|semantic"} and other LLM metrics.
+telemetry:
+  metricsEnabled: true
+
+# ── Semantic cache ────────────────────────────────────────────
+semanticCache:
+  enabled: true
+  threshold: 0.85
+  ttl: "10m"
+  # default_cache_key is REQUIRED for caching to be active.
+  # Without it the plugin loads but silently skips all cache lookups and stores.
+  defaultCacheKey: "iris"
+
+# ── Vector store ──────────────────────────────────────────────
+# Default: sqlite (zero infra, brute-force cosine in Go, stored at /app/vecstore.db).
+# For customers with Postgres: set type=pgvector and provide dsn.
+vectorStore:
+  # "sqlite" (default) or "pgvector"
+  type: sqlite
+  sqlite:
+    path: "/app/vecstore.db"
+  pgvector:
+    # Override with Postgres DSN when type=pgvector, e.g.:
+    #   dsn: "postgres://iris:secret@postgres.straiker-infra.svc.cluster.local:5432/iris?sslmode=disable"
+    dsn: ""
+
+# ── Redis (legacy, no longer used by default) ─────────────────
+# Keeping for reference; not used when vectorStore.type=sqlite.
+redis:
+  address: ""
+
+# ── API keys ──────────────────────────────────────────────────
+# All keys are read from straiker-secrets.
+# The secret key names must match what is present in the secret.
+secretRef:
+  name: straiker-secrets
+  openaiKey: SYS__OPENAI_API_KEY
+  xaiKey: SYS__XAI_API_KEY
+  anthropicKey: SYS__ANTHROPIC_API_KEY
+  # redisPasswordKey: SYS__REDIS_PASSWORD  # uncomment if Redis requires auth

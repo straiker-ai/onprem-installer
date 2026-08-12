@@ -1,0 +1,113 @@
+# Shared defaults — all components disabled except straiker-control.
+# Overlay a tier file first, then a customer site file:
+#   helm install straiker-platform . \
+#     -f values-defend.yaml \
+#     -f values-customer.yaml
+
+global:
+  # REQUIRED — the customer's own registry that images were mirrored into
+  # (via `zarf package mirror-resources`, see zarf/README.md). No default:
+  # there is no in-cluster registry in onprem_v2.
+  #   EKS: <account-id>.dkr.ecr.<region>.amazonaws.com/straiker
+  #   GKE: <region>-docker.pkg.dev/<project>/straiker
+  registry: ""
+
+  # REQUIRED when straiker-argus or any inference-* component is enabled —
+  # the customer's own bucket that model weights + tokenizer artifacts were
+  # synced into. e.g. s3://<bucket>/straiker-models or gs://<bucket>/straiker-models
+  modelBucket: ""
+
+  # eks | gke
+  cloudProvider: eks
+
+  # Target node architecture for shared-node workloads (preflight, iris, argus).
+  # Supported: arm64 | amd64
+  arch: arm64
+
+  # Namespace where straiker-infra is installed.
+  # Used to construct cross-namespace service URLs (postgres, opensearch, redis).
+  infraNamespace: straiker-infra
+
+# ── Inference instances — all disabled by default ───────────────────────
+inference-antman:
+  enabled: false
+  modelProfile: antman
+
+inference-hulk:
+  enabled: false
+  modelProfile: hulk
+
+inference-quicksilver:
+  enabled: false
+  modelProfile: quicksilver
+
+inference-thor:
+  enabled: false
+  modelProfile: thor
+
+inference-thanos:
+  enabled: false
+  modelProfile: thanos
+
+# ── Control plane ────────────────────────────────────────────────────────
+# Enabled by default — the control plane is always deployed.
+# See values-demo.yaml for in-cluster postgres example.
+straiker-control:
+  enabled: true
+  image:
+    tag: v2026.5.2-44
+  db:
+    host: ""     # required
+    name: ""     # required
+    user: ""     # required
+    sslMode: require   # disable for in-cluster postgres
+
+# ── Argus ───────────────────────────────────────────────────────────────
+straiker-argus:
+  enabled: false
+  image:
+    tag: v0.1.25-11
+
+# ── Bifrost LLM gateway ───────────────────────────────────────
+straiker-bifrost:
+  enabled: false
+  image:
+    tag: 1.5.2-d391f0a-8
+
+# ── Iris ────────────────────────────────────────────────────────────────
+# See values-demo.yaml for in-cluster postgres example.
+straiker-iris:
+  enabled: false
+  image:
+    tag: v4.30.0-21
+  db:
+    host: ""     # required
+    name: ""     # required
+    user: ""     # required
+    sslMode: require   # disable for in-cluster postgres
+
+# ── Preflight secret key map ─────────────────────────────────────────────
+# Maps each sub-chart to the straiker-secrets keys it requires.
+# The preflight Job checks keys for all enabled components.
+# straiker-secrets existence is always verified regardless of keys.
+# When adding a new sub-chart, add its entry here — no changes to preflight.yaml.
+preflight:
+  # Image used by the preflight Job. Needs sh + kubectl + grep.
+  # alpine/k8s ships kubectl on top of alpine (MIT-licensed, on Docker Hub).
+  # Pinned by manifest-list digest (multi-arch amd64+arm64 preserved).
+  # For air-gapped installs, mirror this to your internal registry and override.
+  # Digest corresponds to alpine/k8s:1.32.3.
+  kubectlImage: alpine/k8s@sha256:eec3541331932d8613ce7b3283508063cba7f704302e9b4eda45e49b38a2a0f9
+  componentKeys:
+    # straiker-control: INTERNAL_API_KEY verified against Bearer <key> from iris/argus callers.
+    # IRIS_CONTROL_PLANE_ADMIN_API_KEY sent as Bearer <key> to iris and argus.
+    straiker-control:      ["SYS__PLATFORM_DB_PASSWORD", "INTERNAL_API_KEY", "IRIS_CONTROL_PLANE_ADMIN_API_KEY"]
+    inference-antman:      ["SYS__INFERENCE_API_KEY"]
+    inference-hulk:        ["SYS__INFERENCE_API_KEY"]
+    inference-quicksilver: ["SYS__INFERENCE_API_KEY"]
+    inference-thor:        ["SYS__INFERENCE_API_KEY"]
+    inference-thanos:      ["SYS__INFERENCE_API_KEY"]
+    straiker-argus:        ["SYS__INFERENCE_API_KEY", "SYS__FOUNDATION_API_KEY", "SYS__INTERNAL_ARGUS_API_KEY"]
+    straiker-iris:         ["SYS__ASCEND_RDS_PASSWORD", "SYS__IRIS_ADMIN_API_KEY", "SYS__INTERNAL_API_KEY", "SYS__ARGUS_API_KEY", "SYS__INFERENCE_API_KEY", "SYS__XAI_API_KEY", "SYS__OPENAI_API_KEY"]
+    straiker-bifrost:      ["SYS__OPENAI_API_KEY", "SYS__XAI_API_KEY"]  # SYS__ANTHROPIC_API_KEY is optional
+

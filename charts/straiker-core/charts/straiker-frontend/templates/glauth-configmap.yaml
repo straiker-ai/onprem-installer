@@ -1,0 +1,70 @@
+{{- if .Values.glauth.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glauth-config
+  namespace: {{ include "glauth.namespace" . }}
+  labels:
+    {{- include "glauth.labels" . | nindent 4 }}
+data:
+  # Disposable local LDAP directory backing the bundled Dex OIDC provider —
+  # not meant as a customer's permanent identity store (same content as
+  # ~/straiker/frontend/onprem/docker-compose.yaml's glauth-config, minus
+  # compose's ${STRAIKER_APP_DOMAIN} substitution).
+  config.cfg: |
+    debug = false
+
+    [ldap]
+      enabled = true
+      listen = "0.0.0.0:3893"
+      tls = false
+
+    [ldaps]
+      enabled = false
+
+    [backend]
+      datastore = "config"
+      baseDN = "dc=straiker,dc=local"
+
+    [behaviors]
+      IgnoreCapabilities = false
+      LimitFailedBinds = true
+      NumberOfFailedBinds = 5
+      PeriodOfFailedBinds = 10
+      BlockFailedBindsFor = 60
+      PruneSourceTableEvery = 600
+      PruneSourcesOlderThan = 600
+
+    # Service account Dex binds as to search the directory (not a login user).
+    [[users]]
+      name = "dex-service"
+      mail = "dex-service@{{ .Values.global.appDomain }}"
+      uidnumber = 5000
+      primarygroup = 5502
+      passsha256 = "7786d789f0a73e379dbc59179b0b26af70caa7ff851a74192d06736293825f50"
+        [[users.capabilities]]
+        action = "search"
+        object = "*"
+
+    # Default disposable admin login. This mail value must match
+    # frontend.bootstrapAdminEmail exactly (see frontend-bootstrap-job.yaml) —
+    # that's the seeded admin row's email, matched against the OIDC email
+    # claim dex returns on login.
+    [[users]]
+      name = "admin"
+      mail = "admin@{{ .Values.global.appDomain }}"
+      uidnumber = 5001
+      primarygroup = 5501
+      passsha256 = "d3da13950437239d04ab271f7a2d7c12535eda4e00171c5693c20c74be84aec4"
+
+    [[groups]]
+      name = "admins"
+      gidnumber = 5501
+
+    [[groups]]
+      name = "svcaccts"
+      gidnumber = 5502
+
+    [api]
+      enabled = false
+{{- end }}

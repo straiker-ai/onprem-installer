@@ -1,0 +1,80 @@
+{{- if .Values.dex.enabled }}
+{{- $d := .Values.dex }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: {{ include "dex.namespace" . }}
+  labels:
+    {{- include "dex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: identity
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/dex-configmap.yaml") . | sha256sum }}
+    spec:
+      # No init-container wait-for-glauth: that would need a separate image
+      # (e.g. busybox) not covered by the ECR mirror pipeline, breaking
+      # air-gapped installs. If dex starts before glauth's LDAP connector is
+      # reachable, it crashes and Kubernetes' normal restart backoff retries
+      # until glauth is up — a few restarts at first install is acceptable
+      # for this bundled demo IdP.
+      containers:
+        - name: dex
+          image: {{ include "dex.image" . | quote }}
+          imagePullPolicy: {{ $d.image.pullPolicy }}
+          # --grpc-addr: internal-only connector-management API (ClusterIP-only,
+          # never exposed beyond the cluster) — for a future on-prem SSO
+          # settings page to manage connectors dynamically.
+          command: ["dex", "serve", "--grpc-addr", "0.0.0.0:5557", "/etc/dex/config.yaml"]
+          env:
+            - name: DEX_API_CONNECTORS_CRUD
+              value: "true"
+          ports:
+            - containerPort: {{ $d.service.port }}
+              name: http
+            - containerPort: 5557
+              name: grpc
+          resources:
+            {{- toYaml $d.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /var/dex
+          readinessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: dex-config
+        # Disposable — sqlite storage doesn't need to survive pod restarts
+        # any more durably than the rest of this bundled demo IdP.
+        - name: data
+          emptyDir: {}
+      nodeSelector:
+        {{- include "dex.nodeSelector" . | nindent 8 }}
+      {{- with $d.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,77 @@
+{{- if .Values.dbMigrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cp-migrate
+  namespace: {{ include "cp.namespace" . }}
+  labels:
+    {{- include "cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.dbMigrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.dbMigrate.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.dbMigrate.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: cp-migrate
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: migrate
+        image: {{ include "cp.migrateImage" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        resources:
+          {{- toYaml .Values.dbMigrate.resources | nindent 10 }}
+        env:
+        # ── Liquibase ───────────────────────────────────────────
+        - name: LIQUIBASE_COMMAND_CHANGELOG_FILE
+          value: "master.json"
+        - name: LIQUIBASE_SEARCH_PATH
+          value: "/liquibase/changelog"
+        - name: LIQUIBASE_COMMAND_URL
+          value: {{ printf "jdbc:postgresql://%s:%v/%s?sslmode=%s" (include "cp.dbHost" .) .Values.db.port (required "db.name is required" .Values.db.name) .Values.db.sslMode | quote }}
+        - name: LIQUIBASE_COMMAND_USERNAME
+          value: {{ required "db.user is required" .Values.db.user | quote }}
+        - name: LIQUIBASE_COMMAND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cp.dbPasswordSecretName" . }}
+              key: {{ include "cp.dbPasswordSecretKey" . }}
+        # ── Bootstrap (skipped by entrypoint when ADMIN_EMAIL or CUSTOMER_NAME is absent) ──
+        - name: ADMIN_EMAIL
+          value: {{ .Values.bootstrap.adminEmail | default "" | quote }}
+        - name: CUSTOMER_NAME
+          value: {{ .Values.bootstrap.customerName | default "" | quote }}
+        # ADMIN_INVITE_TOKEN — chart-managed (auto-generated and preserved across
+        # upgrades). Admin redeems at ${ORIGIN}/invite/<token> on first install.
+        # bootstrap.sql is idempotent — once redeemed, subsequent migrate jobs
+        # skip the UPDATE and leave the admin row alone.
+        - name: ADMIN_INVITE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cp.authSecretName" . }}
+              key: ADMIN_INVITE_TOKEN
+        - name: ADMIN_INVITE_EXPIRES_AT
+          value: {{ .Values.bootstrap.inviteExpiresAt | default "" | quote }}
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cp.dbPasswordSecretName" . }}
+              key: {{ include "cp.dbPasswordSecretKey" . }}
+        - name: POSTGRES_URL
+          value: {{ printf "postgresql://%s@%s:%v/%s?sslmode=%s" (printf "%s:$(DB_PASSWORD)" (required "db.user is required" .Values.db.user)) (include "cp.dbHost" .) .Values.db.port (required "db.name is required" .Values.db.name) .Values.db.sslMode | quote }}
+      {{- include "cp.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: argus-app-pdb
+  namespace: {{ include "argus.namespace" . }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: argus-app

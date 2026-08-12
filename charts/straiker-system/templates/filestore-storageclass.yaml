@@ -1,0 +1,16 @@
+{{- if and (eq .Values.cloudProvider "gke") .Values.gke.filestore.enabled }}
+{{- $fs := .Values.gke.filestore }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $fs.storageClass.name }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+provisioner: filestore.csi.storage.gke.io
+reclaimPolicy: {{ $fs.storageClass.reclaimPolicy }}
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  tier: {{ $fs.tier }}
+  network: {{ $fs.network }}
+{{- end }}
