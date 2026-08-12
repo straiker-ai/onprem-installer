@@ -1,0 +1,248 @@
+# Only used by the parent chart's Chart.yaml dependency condition
+# (straiker-frontend.enabled) — frontend itself has no internal toggle
+# (unlike glauth/dex/caddy below, it's not optional within this subchart).
+enabled: true
+
+# ── glauth (disposable local LDAP directory backing dex) ────────────────
+glauth:
+  enabled: true
+
+  image:
+    repository: glauth/glauth
+    tag: v2.5.2
+    pullPolicy: IfNotPresent
+
+  # Defaults to the parent chart's global.sharedNodeSelector (see
+  # glauth.nodeSelector in _helpers.tpl) — set here only to schedule this
+  # component differently from everything else in the release.
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# ── dex (disposable local OIDC provider, LDAP-backed by glauth) ─────────
+dex:
+  enabled: true
+
+  image:
+    repository: dexidp/dex
+    tag: v2.45.1
+    pullPolicy: IfNotPresent
+
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  service:
+    port: 5556
+
+  # Demo credential matching ~/straiker/frontend/onprem/docker-compose.yaml's
+  # own hardcoded value — override for anything beyond quick testing. Not a
+  # chart-managed generated secret: dex's static-client config can't read
+  # from a Kubernetes Secret, so keeping this in sync between dex's config
+  # and frontend's OIDC_CLIENT_SECRET would need its own generation dance for
+  # what both sides are explicit is a disposable, non-production IdP anyway.
+  staticClient:
+    id: straiker
+    secret: "change-me-too"
+
+# ── Caddy (TLS termination + host-based routing to frontend/dex) ────────
+# A real reverse proxy rather than a K8s Ingress resource, since Ingress does
+# nothing without a pre-existing controller on the cluster (can't be assumed
+# for a bring-your-own customer cluster). Self-signed via `tls internal`,
+# matching docker-compose's own local-dev framing.
+caddy:
+  enabled: true
+
+  image:
+    repository: library/caddy
+    tag: 2-alpine
+    pullPolicy: IfNotPresent
+
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  # Not the standard 443 — there's no ingress yet, so port-forwarding straight
+  # to this Service is the only way to reach it today, and 8443 needs no sudo
+  # to bind locally (unlike 443). Drives the Caddyfile's site address,
+  # the container port, the Service port, and frontend.origin's default (see
+  # that helper in _helpers.tpl) — change this one value rather than any of
+  # those individually, so they can't drift out of sync with each other.
+  httpsPort: 8443
+
+  service:
+    type: ClusterIP
+    # Only used when service.type: NodePort — leave null for Kubernetes to
+    # pick a random nodePort.
+    httpNodePort: null
+    httpsNodePort: null
+
+# ── Frontend (formerly "control" — renamed and rebuilt against
+# ~/straiker/frontend/onprem/docker-compose.yaml's "frontend" service as the
+# authoritative reference, not the old straiker-control chart) ────────────
+# Deployment + Service + DB connection + schema migration + admin-bootstrap
+# seeding + OIDC SSO (backed by the bundled dex/glauth above).
+frontend:
+  image:
+    # Straiker's own application image — unlike bifrost (an official upstream
+    # image), this lives under an extra "straiker/" segment in the same
+    # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
+    # since it's Straiker's own component, not third-party.
+    repository: straiker/frontend
+    tag: onprem-v2026.8.1
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets: []
+
+  nodeSelector: {}
+  tolerations: []
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+
+  # Defaults to https://app.<global.appDomain> (Caddy's own routed host) — must
+  # match how the app is actually reached, since it drives both this env var
+  # and dex's OIDC redirect URI (see frontend.origin helper). Override when
+  # testing through a port-forward on a non-standard port (e.g.
+  # https://app.straiker.internal:8443), or the OIDC login flow will loop.
+  origin: ""
+  logLevel: info
+
+  # Defaults to charts/straiker-system's own postgres (platform database),
+  # in global.infraNamespace. Override host/name/user for external RDS/Cloud
+  # SQL, or a differently-configured postgres.
+  db:
+    host: ""
+    port: 5432
+    name: platform
+    user: platform
+    sslMode: disable
+    # Matches charts/straiker-system's postgres.yaml Secret exactly
+    # (straiker-postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
+    # separate operator-supplied secret.
+    passwordSecret:
+      name: straiker-postgres-secret
+      key: POSTGRES_PASSWORD_PLATFORM
+
+  # Liquibase schema migration (docker-compose's "migrate" service) —
+  # required for frontend to function at all (its tables don't exist
+  # otherwise). Same image as frontend by default (built together — see
+  # cloudbuild.yaml's onprem-base/straiker/frontend-migrate), override
+  # repository/tag independently if that ever changes.
+  dbMigrate:
+    enabled: true
+    image:
+      repository: straiker/frontend-migrate
+      tag: onprem-v2026.8.1
+    backoffLimit: 2
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  # Admin-bootstrap seeding (docker-compose's "bootstrap" service) — runs once,
+  # idempotently, right after dbMigrate: seeds the initial tenant + admin user
+  # row so the admin's first OIDC login (whichever IdP returns this email)
+  # logs in as admin instead of being JIT-provisioned as a viewer. adminEmail
+  # must match whatever identity is meant to be admin — defaults to
+  # admin@<global.appDomain>, matching glauth's own seeded admin user's `mail`
+  # field (see glauth-configmap.yaml) so the bundled local IdP logs in as
+  # admin out of the box.
+  bootstrap:
+    enabled: true
+    adminEmail: ""
+    customerName: "My Company"
+    image:
+      repository: library/postgres
+      tag: 16-alpine
+      pullPolicy: IfNotPresent
+    backoffLimit: 3
+    activeDeadlineSeconds: 300
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+
+  # Defaults to charts/straiker-system's own opensearch, in global.infraNamespace.
+  opensearch:
+    url: ""
+
+  # Backed by the bundled dex/glauth stack above by default — every field
+  # left empty falls back to dex's own issuer/staticClient (see
+  # frontend.oidcIssuer and friends in _helpers.tpl). Override all of them
+  # together (and set dex.enabled/glauth.enabled: false) to point at a
+  # customer's own IdP instead — matching docker-compose's own framing that
+  # dex/glauth are never a permanent identity store.
+  oidc:
+    enabled: true
+    issuer: ""
+    clientId: ""
+    clientSecret: ""
+    authorizationEndpoint: ""
+    tokenEndpoint: ""
+    jwksUri: ""
+    displayName: ""
+    scopes: ""
+    autoProvision: true
+    defaultRole: viewer
+    allowedDomains: ""
+
+  # Not yet built in this chart family (argus/iris/scout) — left as explicit
+  # overrides rather than auto-derived, unlike the old umbrella chart where
+  # they lived in the same namespace by construction. Omitted entirely from
+  # the Deployment's env when unset, rather than pointing at a URL that
+  # resolves to nothing.
+  argusEndpoint: ""
+  irisControlPlaneAdminEndpoint: ""
+  # Service-to-service auth — both read from an operator-supplied secret
+  # (frontend.secretRef's straiker-secrets by default). Leave secretKey empty
+  # to omit the env var entirely (e.g. when argus/iris aren't deployed yet).
+  irisControlPlaneAdminApiKey:
+    secretName: ""
+    secretKey: ""
+  scoutEndpoint: ""
+  internalApiKey:
+    secretName: ""
+    secretKey: ""

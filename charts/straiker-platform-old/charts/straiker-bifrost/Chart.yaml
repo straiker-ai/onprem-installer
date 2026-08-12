@@ -1,0 +1,5 @@
+apiVersion: v2
+name: straiker-bifrost
+description: Iris LLM gateway (Bifrost fork) — routes all LLM calls from iris workers
+type: application
+version: 0.1.0

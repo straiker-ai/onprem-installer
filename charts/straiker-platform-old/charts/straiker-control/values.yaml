@@ -1,0 +1,206 @@
+# ─────────────────────────────────────────────────────────────
+# Straiker control-plane chart – default values
+# ─────────────────────────────────────────────────────────────
+
+image:
+  # Auto-derived from global.registry when empty: <global.registry>/docker/onprem-frontend
+  repository: ""
+  tag: v2026.4.5
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+# ── Node scheduling ───────────────────────────────────────────
+# Target node architecture. Sets kubernetes.io/arch nodeSelector on all pods.
+# Supported: arm64 | amd64
+arch: arm64
+
+nodeSelector:
+  purpose: straiker-shared
+tolerations: []
+
+# ── Service ───────────────────────────────────────────────────
+# ClusterIP by default — use ingress for external access (production)
+# or port-forward for quick access during POV/testing:
+#   kubectl port-forward svc/straiker-control-service 8080:80 -n <namespace>
+#   open http://localhost:8080
+#
+# On-prem with direct node access, NodePort is also an option:
+#   service:
+#     type: NodePort
+#     nodePort: 30080   # http://<node-ip>:30080
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  nodePort: null
+  annotations: {}
+
+# ── On-prem identity ──────────────────────────────────────────
+# ORIGIN: public URL of this control plane — used by the app for
+# absolute URL construction and CORS. Set to your ingress host or
+# port-forward address for local testing.
+origin: ""      # e.g. https://straiker.example.com — defaults to http://localhost:8080
+# Comma-separated additional origins accepted by the CSRF check alongside ORIGIN.
+# Defaults to localhost so port-forward access always works.
+# The try-straiker.sh script extends this at runtime with the tunnel URL.
+allowedOrigins: "http://localhost:8080"
+logLevel: info  # debug | info | warn | error
+
+# ── Ingress ───────────────────────────────────────────────────
+# Disabled by default — use port-forward for POV, enable ingress for production.
+#
+# On EKS (global.cloudProvider: eks) the chart automatically uses
+# ingressClassName: alb and injects standard ALB annotations.
+# Supply alb.certificateArn for HTTPS; TLS is terminated at the ALB
+# so spec.tls is not needed on EKS.
+#
+# EKS example (minimal):
+#   ingress:
+#     enabled: true
+#     hosts:
+#       - host: straiker.example.com
+#     alb:
+#       certificateArn: arn:aws:acm:us-east-1:123456789:certificate/xxx
+#       scheme: internet-facing   # or: internal
+#
+# nginx-ingress / Traefik (on-prem):
+#   ingress:
+#     enabled: true
+#     ingressClassName: nginx     # or: traefik
+#     hosts:
+#       - host: straiker.example.com
+#     tls:
+#       - secretName: straiker-tls
+#         hosts: [straiker.example.com]
+#
+# Add extra or override annotations freely via ingress.annotations.
+# For Istio / NodePort setups set enabled: false.
+ingress:
+  enabled: false
+  ingressClassName: ""   # explicit override; auto-set to "alb" on EKS if empty
+  annotations: {}        # merged on top of auto-generated annotations (user wins)
+  hosts:
+    - host: ""           # REQUIRED when enabled — e.g. straiker.example.com
+      path: /
+      pathType: Prefix
+  tls: []
+  # EKS / ALB-specific — only used when ingressClassName resolves to "alb"
+  alb:
+    scheme: internal       # internal | internet-facing
+    certificateArn: ""     # REQUIRED for HTTPS on EKS
+
+# ── PostgreSQL database (platform database) ──────────────────
+# Defaults to straiker-infra in-cluster postgres, resolved via
+# global.infraNamespace: straiker-postgres.<infraNamespace>.svc.cluster.local
+# Override host for external RDS / Cloud SQL.
+db:
+  host: ""       # required — e.g. straiker-postgres.straiker-infra.svc.cluster.local or RDS endpoint
+  port: 5432
+  name: ""       # required — database name
+  user: ""       # required — database user
+  sslMode: require   # disable for in-cluster postgres; require for RDS/Cloud SQL
+
+  # Password read from straiker-secrets by default.
+  # Override when the password lives in a different secret.
+  passwordSecret:
+    name: straiker-secrets
+    key: SYS__PLATFORM_DB_PASSWORD
+
+# ── Database migration Job ────────────────────────────────────
+# Helm pre-install/pre-upgrade hook that runs Liquibase migrations and
+# (when bootstrap.enabled) seeds the initial admin user + tenant.
+# Uses the frontend-migrate image (liquibase + bootstrap.sql baked in).
+# Auto-derived when empty: <global.registry>/docker/onprem-frontend-migrate:<image.tag>
+dbMigrate:
+  enabled: true
+  image:
+    repository: ""   # leave empty to use <global.registry>/docker/onprem-frontend-migrate
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+# ── OpenSearch ────────────────────────────────────────────────
+# Defaults to the in-cluster OpenSearch deployed by straiker-infra.
+# Override when using managed OpenSearch.
+opensearch:
+  url: ""      # defaults to http://opensearch-cluster-master.straiker-infra.svc.cluster.local:9200
+
+# ── Bootstrap (runs inside the migrate job) ───────────────────
+# Seeds the initial admin user and tenant. Runs as part of the
+# pre-install migrate job — not a separate hook.
+# Bootstrap is skipped when adminEmail or customerName are empty.
+# Safe to re-run (idempotent).
+#
+# The admin row is created without a password. The chart auto-generates
+# ADMIN_INVITE_TOKEN and stores it in the chart-managed straiker-control-auth
+# Secret (preserved across upgrades). Admin redeems the invite at:
+#   ${ORIGIN}/invite/<token>
+# Retrieve the token after install with:
+#   kubectl -n <ns> get secret straiker-control-auth \
+#     -o jsonpath='{.data.ADMIN_INVITE_TOKEN}' | base64 -d
+bootstrap:
+  adminEmail: ""        # set to seed initial admin user; leave empty to skip bootstrap
+  customerName: ""      # set to seed initial tenant; leave empty to skip bootstrap
+  inviteToken: ""       # optional override — chart auto-generates if empty
+  inviteExpiresAt: ""   # ISO timestamp (e.g. "2027-01-01"); defaults to NOW()+30 days if empty
+
+# ── OIDC SSO (optional) ───────────────────────────────────────
+# Enables an "OIDC sign-in" button on the login page that federates to a
+# customer-provided IdP (Okta, Azure AD, Google Workspace, Keycloak, ...).
+# When disabled, only password login is available.
+oidc:
+  enabled: false
+  issuer: ""              # required when enabled; e.g. https://accounts.google.com
+  clientId: ""            # required when enabled
+  # OIDC client secret comes from a Kubernetes Secret. By default it's read
+  # from straiker-secrets under key OIDC_CLIENT_SECRET; override below.
+  clientSecret:
+    name: ""              # defaults to straiker-secrets
+    key: ""               # defaults to OIDC_CLIENT_SECRET
+  displayName: ""         # button label; defaults to "Sign in with SSO"
+  scopes: ""              # defaults to "openid email profile"
+  # JIT auto-provision: when true, any user the IdP authenticates whose email
+  # matches allowedDomains is auto-created in onprem_users with defaultRole.
+  # When false (default), admins must pre-add users via /settings/users.
+  autoProvision: false
+  defaultRole: ""         # defaults to "viewer"
+  allowedDomains: ""      # comma-separated email domains to allow for JIT
+
+
+# ── Service-to-service auth (straiker-secrets) ────────────────
+# All keys below must be present in straiker-secrets (picked up via envFrom).
+#
+# Inbound — iris/argus → straiker-control (/internal_api/*):
+#   INTERNAL_API_KEY         straiker-control verifies "Authorization: Bearer <value>"
+#   INTERNAL_API_KEY_2       optional; enables zero-downtime rotation
+#   SYS__INTERNAL_API_KEY    iris sends this verbatim → set to "Bearer <INTERNAL_API_KEY>"
+#   SYS__FOUNDATION_API_KEY  argus sends this verbatim → set to "Bearer <INTERNAL_API_KEY>"
+#
+# Outbound — straiker-control → iris & argus:
+#   IRIS_CONTROL_PLANE_ADMIN_API_KEY  straiker-control reads and sends as "Bearer <value>"
+#   SYS__IRIS_ADMIN_API_KEY           iris verifies inbound Bearer → same <value>
+#   SYS__INTERNAL_ARGUS_API_KEY       argus verifies inbound Bearer → same <value>
+
+# Leave empty to auto-derive from the same namespace:
+#   argusEndpoint:                http://argus-service.<ns>.svc.cluster.local
+#   irisControlPlaneAdminEndpoint: http://iris-control-plane-service.<ns>.svc.cluster.local
+argusEndpoint: ""
+irisControlPlaneAdminEndpoint: ""
+scoutEndpoint: ""
+# ── Resources ─────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "250m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"

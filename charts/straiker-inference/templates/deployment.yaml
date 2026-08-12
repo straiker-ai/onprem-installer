@@ -1,0 +1,302 @@
+{{- $modelProfiles := include "straiker-inference.modelProfiles" . | fromYaml }}
+{{- $gpuProfiles   := include "straiker-inference.gpuProfiles"   . | fromYaml }}
+{{- $mp  := index $modelProfiles (.Values.modelProfile | default "") | default dict }}
+{{- $storagePrefix := get $mp "storagePrefix" | default "" }}
+{{- $servedNames := get $mp "servedNames" }}
+{{- $bucket := required "global.modelBucket is required" .Values.global.modelBucket }}
+{{- $resolvedProfile := .Values.gpuProfile }}
+{{- if and (not $resolvedProfile) (eq .Values.cloudProvider "eks") }}
+  {{- /* EKS: read instance-family from the Karpenter NodePool */ -}}
+  {{- $nodePool := lookup "karpenter.sh/v1" "NodePool" "" (include "straiker-inference.gpuNodePool" .) }}
+  {{- if $nodePool }}
+    {{- range $nodePool.spec.template.spec.requirements }}
+      {{- if eq .key "karpenter.k8s.aws/instance-family" }}
+        {{- if eq (len .values) 1 }}
+          {{- $resolvedProfile = index .values 0 }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if not $resolvedProfile }}
+  {{- /* GKE: read accelerator type from cluster node labels */ -}}
+  {{- $nodes := lookup "v1" "Node" "" "" }}
+  {{- if and $nodes $nodes.items }}
+    {{- range $nodes.items }}
+      {{- if not $resolvedProfile }}
+        {{- $accel := index .metadata.labels "cloud.google.com/gke-accelerator" | default "" }}
+        {{- if eq $accel "nvidia-l4" }}{{- $resolvedProfile = "l4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-t4" }}{{- $resolvedProfile = "t4" -}}{{- end }}
+        {{- if eq $accel "nvidia-tesla-a100" }}{{- $resolvedProfile = "a100" -}}{{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $resolvedProfile = $resolvedProfile | default (get $mp "defaultGpuProfile") | default "g4dn" }}
+{{- $profile     := index $gpuProfiles $resolvedProfile | default dict }}
+{{- $gpuOverrides := get $mp "gpuOverrides" | default dict }}
+{{- $gpuSpecific  := get $gpuOverrides $resolvedProfile | default dict }}
+{{- $dtype        := coalesce (get $gpuSpecific "dtype")               (get $profile "dtype")               "half" }}
+{{- $maxModelLen  := coalesce .Values.inferenceService.max_model_len   (get $gpuSpecific "max_model_len")   (get $profile "max_model_len")   "16384" }}
+{{- $memFraction  := coalesce (get $gpuSpecific "mem_fraction_static") (get $profile "mem_fraction_static") "0.9" }}
+{{- $maxNumSeqs   := coalesce (get $gpuSpecific "max_num_seqs")       (get $profile "max_num_seqs")       "256" }}
+{{- $quantization := get $gpuSpecific "quantization" | default "" }}
+{{- $multimodal := get $mp "multimodal" | default dict }}
+{{- $enforceEager := get $mp "enforceEager" | default false }}
+{{- $defaultResources := dict "requests" (dict "cpu" "2" "memory" "8Gi") "limits" (dict "cpu" "4" "memory" "16Gi") }}
+{{- $tierResources := get $profile "resources" | default dict }}
+{{- $resources := mergeOverwrite (mergeOverwrite (deepCopy $defaultResources) $tierResources) (.Values.resources | default dict) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}
+  namespace: {{ include "straiker-inference.namespace" . }}
+  labels:
+    {{- include "straiker-inference.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  # Matches startupProbe's own ~30 min allowance below — the Deployment
+  # controller's default (600s) marks the rollout Failed well before a
+  # cold-start pod (fresh GPU node + multi-GB model sync + vLLM compile) can
+  # ever become ready, even though the pod itself goes on to succeed; `helm
+  # upgrade --wait` then reports a false failure despite a healthy rollout.
+  progressDeadlineSeconds: 1800
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "straiker-inference.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "straiker-inference.fullname" . }}
+        model: {{ .Values.modelProfile | quote }}
+        engine: vllm
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 180
+      runtimeClassName: nvidia
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $storagePrefix }}
+      {{- if .Values.modelCache.enabled }}
+      # Node-local cache: sync once per node (marker-gated) straight into the
+      # hostPath below, so a pod rescheduled onto the same node later skips
+      # the download entirely. No separate DaemonSet — that split the sync
+      # logic (S3 prefix, marker path, volumeMount) from this Deployment into
+      # a second resource that had to be kept in sync by hand, which is
+      # exactly what drifted and broke. One initContainer means there's only
+      # one place this can be wrong.
+      initContainers:
+        - name: model-cache-sync
+          image: {{ include "straiker-inference.modelSyncImage" . }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- include "straiker-inference.securityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              model_dir="/var/lib/models/model"
+              # Straiker's own export already drops a per-version marker file
+              # (e.g. .straiker.v2026.8.14) at the top of every model's
+              # bucket folder, and it gets synced down like any other file —
+              # so it doubles as a free cache-freshness check with no marker
+              # bookkeeping of our own to keep in sync across chart versions.
+              # Compare remote vs. local rather than pinning an expected
+              # version in this chart's values: the remote listing always
+              # reflects whatever charts/straiker-artifact last synced, so a
+              # model bump is picked up automatically the next time this
+              # initContainer runs, with nothing here to update by hand.
+              {{- if eq .Values.cloudProvider "gke" }}
+              remote_marker="$(gsutil ls "{{ $bucket }}/models/{{ $storagePrefix }}/" 2>/dev/null | xargs -n1 basename | grep '^\.straiker\.v' | head -1)"
+              {{- else }}
+              remote_marker="$(aws s3 ls "{{ $bucket }}/models/{{ $storagePrefix }}/" | awk '{print $NF}' | grep '^\.straiker\.v' | head -1)"
+              {{- end }}
+              local_marker=""
+              [ -d "$model_dir" ] && local_marker="$(ls "$model_dir" 2>/dev/null | grep '^\.straiker\.v' | head -1)"
+
+              if [ -n "$remote_marker" ] && [ "$remote_marker" = "$local_marker" ]; then
+                echo "Model already cached at the current version ($remote_marker), skipping sync"
+              else
+                echo "Syncing model to node-local cache (remote=${remote_marker:-none}, local=${local_marker:-none})..."
+                mkdir -p "$model_dir"
+                {{ include "straiker-inference.modelSyncCmd" (dict "root" . "src" (printf "models/%s" $storagePrefix) "dst" "/var/lib/models/model") }}
+                echo "Model sync complete"
+              fi
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.modelCache.awsRegion | default "us-east-1" | quote }}
+          volumeMounts:
+            - name: model-store
+              mountPath: /var/lib/models
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+      {{- else }}
+      # Fallback: download from S3/GCS on first pod run (emptyDir; not persistent)
+      initContainers:
+        - name: model-bucket-sync
+          image: {{ include "straiker-inference.modelSyncImage" . }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- include "straiker-inference.securityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - {{ include "straiker-inference.modelSyncCmd" (dict "root" . "src" (printf "models/%s" $storagePrefix) "dst" "/var/lib/models/model") | quote }}
+          volumeMounts:
+            - name: model-store
+              mountPath: /var/lib/models
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ include "straiker-inference.fullname" . }}
+          image: {{ include "straiker-inference.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "straiker-inference.securityContext" . | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 15
+          ports:
+            - containerPort: 8081
+          command:
+           - "vllm"
+           - "serve"
+           {{- if $storagePrefix }}
+           - "/var/lib/models/model"
+           {{- end }}
+           - "--port"
+           - "8081"
+           - "--trust-remote-code"
+           {{- if $enforceEager }}
+           - "--enforce-eager"
+           {{- end }}
+           - "--dtype"
+           - {{ $dtype | quote }}
+           - "--max-model-len"
+           - {{ $maxModelLen | quote }}
+           - "--gpu-memory-utilization"
+           - {{ $memFraction | quote }}
+           - "--max-num-seqs"
+           - {{ $maxNumSeqs | quote }}
+           {{- if $quantization }}
+           - "--quantization"
+           - {{ $quantization | quote }}
+           {{- end }}
+           {{- if $multimodal }}
+           - "--limit-mm-per-prompt.image"
+           - {{ get $multimodal "limitImage" | default 1 | quote }}
+           - "--limit-mm-per-prompt.video"
+           - {{ get $multimodal "limitVideo" | default 0 | quote }}
+           {{- end }}
+           {{- if $servedNames }}
+           - "--served-model-name"
+           {{- range $servedNames }}
+           - {{ . | quote }}
+           {{- end }}
+           {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "straiker-inference.secretName" . }}
+                optional: true
+            - configMapRef:
+                name: {{ include "straiker-inference.fullname" . }}-configmap
+          env:
+            - name: HF_TOKEN
+              value: "dummy"
+            - name: HUGGING_FACE_HUB_TOKEN
+              value: "dummy"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/.cache/huggingface
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+            {{- if $storagePrefix }}
+            - name: model-store
+              mountPath: /var/lib/models
+              readOnly: true
+            {{- end }}
+          # startupProbe gives vLLM up to 30 min to load the model before
+          # liveness kicks in — large models on cold nodes take 10-20 min.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 30
+            failureThreshold: 60
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: {{ $resources.requests.cpu | quote }}
+              memory: {{ $resources.requests.memory | quote }}
+            limits:
+              cpu: {{ $resources.limits.cpu | quote }}
+              memory: {{ $resources.limits.memory | quote }}
+              nvidia.com/gpu: {{ .Values.inferenceService.gpu_count }}
+      {{- $profileNodeSelector := get $profile "nodeSelector" | default dict }}
+      {{- $effectiveNodeSelector := merge (deepCopy .Values.nodeSelector) $profileNodeSelector }}
+      {{- if $effectiveNodeSelector }}
+      nodeSelector:
+        {{- toYaml $effectiveNodeSelector | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+        {{- if $storagePrefix }}
+        {{- if .Values.modelCache.enabled }}
+        - name: model-store
+          hostPath:
+            path: {{ printf "%s/%s" .Values.modelCache.hostPath $storagePrefix | quote }}
+            type: DirectoryOrCreate
+        {{- else }}
+        - name: model-store
+          emptyDir:
+            sizeLimit: 50Gi
+        {{- end }}
+        {{- end }}

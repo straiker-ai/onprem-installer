@@ -1,0 +1,170 @@
+{{/*
+Preflight check Job — runs as a pre-install, pre-upgrade Helm hook.
+Verifies that the single straiker-secrets Secret exists and contains the expected
+keys for every enabled component before any application pods are created. If any
+check fails the Job exits non-zero, Helm aborts, and a clear error message is printed.
+
+Checks performed (keys depend on which sub-charts are enabled):
+  straiker-secrets:
+    inference enabled:  SYS__INFERENCE_API_KEY
+    argus enabled:      SYS__ARGUS_CONTROL_PLANE_API_KEY, SYS__ARGUS_CONTROL_PLANE_WEB_KEY
+    iris enabled:       SYS__ASCEND_RDS_PASSWORD (or the override from db.passwordSecret.key)
+
+The Job uses kubectl (in-cluster via ServiceAccount) — no external dependencies.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: straiker-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: straiker-preflight
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: straiker-preflight
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: straiker-preflight
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: straiker-preflight
+subjects:
+  - kind: ServiceAccount
+    name: straiker-preflight
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-preflight
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: straiker-preflight
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: straiker-preflight
+    spec:
+      restartPolicy: Never
+      serviceAccountName: straiker-preflight
+      nodeSelector:
+        purpose: straiker-shared
+        {{- if .Values.global.arch }}
+        kubernetes.io/arch: {{ .Values.global.arch }}
+        {{- end }}
+      containers:
+        - name: preflight
+          image: {{ .Values.preflight.kubectlImage }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              NAMESPACE="{{ .Release.Namespace }}"
+              FAILED=0
+
+              check_secret_key() {
+                local secret="$1"
+                local key="$2"
+                if ! kubectl get secret "$secret" -n "$NAMESPACE" \
+                     -o jsonpath="{.data.${key}}" 2>/dev/null | grep -q .; then
+                  echo "  MISSING: secret '$secret' key '$key'"
+                  FAILED=1
+                else
+                  echo "  OK:      secret '$secret' key '$key'"
+                fi
+              }
+
+              check_secret() {
+                local secret="$1"
+                if ! kubectl get secret "$secret" -n "$NAMESPACE" >/dev/null 2>&1; then
+                  echo "  MISSING: secret '$secret' (secret does not exist)"
+                  FAILED=1
+                  return 1
+                fi
+                return 0
+              }
+
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo " Straiker preflight checks — namespace: $NAMESPACE"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+              {{- /* Collect the unique set of required keys across all enabled components. */ -}}
+              {{- $needed := dict }}
+              {{- range $component, $keys := .Values.preflight.componentKeys }}
+              {{- $vals := index $.Values $component | default dict }}
+              {{- if $vals.enabled }}
+              {{- range $keys }}{{- $_ := set $needed . true }}{{- end }}
+              {{- end }}
+              {{- end }}
+              {{- /* Honor straiker-iris DB password key override (replaces the default). */ -}}
+              {{- $irisVals := index .Values "straiker-iris" | default dict }}
+              {{- $irisKeyOverride := dig "db" "passwordSecret" "key" "" $irisVals }}
+              {{- if and (index $irisVals "enabled") $irisKeyOverride }}
+              {{- $_ := unset $needed "SYS__ASCEND_RDS_PASSWORD" }}
+              {{- $_ := set $needed $irisKeyOverride true }}
+              {{- end }}
+              echo ""
+              echo "── straiker-secrets ──────────────────────────────────────"
+              if check_secret "straiker-secrets"; then
+                {{- range $key, $_ := $needed }}
+                check_secret_key "straiker-secrets" "{{ $key }}"
+                {{- end }}
+                :
+              fi
+
+              echo ""
+              if [ "$FAILED" -eq 1 ]; then
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo " PREFLIGHT FAILED — create missing secrets then retry."
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo " To see details:"
+                echo "   kubectl logs -n {{ .Release.Namespace }} -l app=straiker-preflight --tail=50"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "PREFLIGHT FAILED — see above for missing secrets" > /dev/termination-log
+                exit 1
+              fi
+
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo " All preflight checks passed."
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

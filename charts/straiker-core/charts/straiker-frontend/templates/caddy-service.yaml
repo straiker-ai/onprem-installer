@@ -1,0 +1,30 @@
+{{- if .Values.caddy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: caddy-service
+  namespace: {{ include "caddy.namespace" . }}
+  labels:
+    {{- include "caddy.labels" . | nindent 4 }}
+spec:
+  # ClusterIP by default (port-forward for testing) — same reasoning as
+  # frontend's own service.type: don't assume the customer's cluster has a
+  # cloud LoadBalancer or is comfortable exposing a NodePort. Override to
+  # LoadBalancer/NodePort once real external access is wanted.
+  type: {{ .Values.caddy.service.type }}
+  selector:
+    app: caddy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      {{- if and (eq .Values.caddy.service.type "NodePort") .Values.caddy.service.httpNodePort }}
+      nodePort: {{ .Values.caddy.service.httpNodePort }}
+      {{- end }}
+    - name: https
+      port: {{ .Values.caddy.httpsPort }}
+      targetPort: https
+      {{- if and (eq .Values.caddy.service.type "NodePort") .Values.caddy.service.httpsNodePort }}
+      nodePort: {{ .Values.caddy.service.httpsNodePort }}
+      {{- end }}
+{{- end }}
