@@ -3,6 +3,31 @@ entries:
   straiker-artifact:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-13T08:21:29.019998239Z"
+    description: 'Mirrors container images from Straiker''s registry into the customer''s
+      ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
+      bucket, via in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+      since that chart''s workloads pull images through the ECR mirror this populates. '
+    digest: db8b87af03113a354005cb8667326b002a07186bcd717771f8b0526ee042747b
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - artifact-sync
+    - ecr
+    - s3
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-artifact
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.5/straiker-artifact-0.1.5.tgz
+    version: 0.1.5
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-13T07:57:42.7584767Z"
     description: 'Mirrors container images from Straiker''s registry into the customer''s
       ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
@@ -150,4 +175,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-13T07:57:42.990733282Z"
+generated: "2026-08-13T08:21:29.252681134Z"
