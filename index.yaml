@@ -3,6 +3,31 @@ entries:
   straiker-artifact:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-13T23:21:56.92265511Z"
+    description: 'Mirrors container images from Straiker''s registry into the customer''s
+      ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
+      bucket, via in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+      since that chart''s workloads pull images through the ECR mirror this populates. '
+    digest: e49c0b8c6cd22a8ab5dd496d0542113516ce18c71030f1bc556d0cc89f6866f9
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - artifact-sync
+    - ecr
+    - s3
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-artifact
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.7/straiker-artifact-0.1.7.tgz
+    version: 0.1.7
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-13T22:43:46.573184028Z"
     description: 'Mirrors container images from Straiker''s registry into the customer''s
       ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
@@ -127,6 +152,43 @@ entries:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.0/straiker-artifact-0.1.0.tgz
     version: 0.1.0
   straiker-system:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-08-13T23:21:57.113777256Z"
+    dependencies:
+    - name: opensearch
+      repository: https://opensearch-project.github.io/helm-charts
+      tags:
+      - opensearch
+      version: 3.6.0
+    description: 'Straiker cluster + infrastructure chart — provisions everything
+      app charts need before they start: Karpenter NodePools, NVIDIA device plugin,
+      EFS/Filestore StorageClasses, and shared stateful infra (OpenSearch, optional
+      Postgres/Redis). Redpanda lives in its own chart. No in-cluster registry — see
+      the straiker-artifact chart for how container images and model artifacts reach
+      this cluster''s ECR/S3 mirror before this chart''s workloads pull from it. '
+    digest: bc177ec84bd37b051d5c546e568b248acd95fdd39380c1d029d3a0b4ea7df3b7
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - infra
+    - karpenter
+    - nvidia
+    - efs
+    - opensearch
+    - postgres
+    - redis
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-system
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.1.4/straiker-system-1.1.4.tgz
+    version: 1.1.4
   - apiVersion: v2
     appVersion: 1.0.0
     created: "2026-08-13T22:43:46.835689413Z"
@@ -311,4 +373,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-13T22:43:46.835721964Z"
+generated: "2026-08-13T23:21:57.113831028Z"
