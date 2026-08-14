@@ -203,6 +203,32 @@ entries:
   straiker-core:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-14T08:21:19.970197408Z"
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/glauth/Caddy stack. Installed standalone (formerly
+      nested under a now-sunset charts/straiker umbrella — promoted to top-level so
+      it can be installed/upgraded/checked independently). Other products (Ascend/Defend/...)
+      will land as their own separate small charts rather than being folded back into
+      an umbrella. '
+    digest: 6b5fbbb79bba4a07c9136fb58847f375006cc9ae2463d57868f10a17d8b97771
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.10/straiker-core-0.1.10.tgz
+    version: 0.1.10
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-14T08:15:13.1340458Z"
     description: 'Always-required Straiker application services: frontend, Bifrost
       LLM gateway, and the bundled dex/glauth/Caddy stack. Installed standalone (formerly
@@ -581,4 +607,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-14T08:15:13.494048625Z"
+generated: "2026-08-14T08:21:20.280411371Z"
