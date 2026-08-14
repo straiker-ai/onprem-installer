@@ -6,8 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 STATE_DIR="${HOME}/.straiker"
 CACHE_ROOT_DEFAULT="${STATE_DIR}/installer"
-DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-054ac2c}"
-DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-054ac2c.tar.gz}"
+DEFAULT_INSTALLER_VERSION="${STRAIKER_DEFAULT_INSTALLER_VERSION:-4a0ce36}"
+DEFAULT_INSTALLER_BUNDLE_URL="${STRAIKER_DEFAULT_INSTALLER_BUNDLE_URL:-https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-4a0ce36.tar.gz}"
 
 INSTALLER_VERSION="${STRAIKER_INSTALLER_VERSION:-}"
 INSTALLER_BUNDLE_URL="${STRAIKER_INSTALLER_BUNDLE_URL:-}"
