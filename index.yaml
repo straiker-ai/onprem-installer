@@ -388,6 +388,43 @@ entries:
   straiker-system:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-14T16:38:19.805329227Z"
+    dependencies:
+    - name: opensearch
+      repository: https://opensearch-project.github.io/helm-charts
+      tags:
+      - opensearch
+      version: 3.6.0
+    description: 'Straiker cluster + infrastructure chart — provisions everything
+      app charts need before they start: Karpenter NodePools, NVIDIA device plugin,
+      EFS/Filestore StorageClasses, and shared stateful infra (OpenSearch, optional
+      Postgres/Redis). Redpanda lives in its own chart. No in-cluster registry — see
+      the straiker-artifact chart for how container images and model artifacts reach
+      this cluster''s ECR/S3 mirror before this chart''s workloads pull from it. '
+    digest: eccb1adabee652bc37710a7dc07a645c2242968e822ca352da3b57b69034d96e
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - infra
+    - karpenter
+    - nvidia
+    - efs
+    - opensearch
+    - postgres
+    - redis
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-system
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.1.5/straiker-system-1.1.5.tgz
+    version: 1.1.5
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-13T23:21:57.113777256Z"
     dependencies:
     - name: opensearch
@@ -607,4 +644,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-14T08:21:20.280411371Z"
+generated: "2026-08-14T16:38:19.80537772Z"
