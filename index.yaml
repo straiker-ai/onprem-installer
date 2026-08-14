@@ -27,6 +27,31 @@ entries:
   straiker-artifact:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-14T17:39:34.663836528Z"
+    description: 'Mirrors container images from Straiker''s registry into the customer''s
+      ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
+      bucket, via in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+      since that chart''s workloads pull images through the ECR mirror this populates. '
+    digest: 04518576009b9266d754dba036565ffc9b4e336c9fa90ed94aad4d068a18082e
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - artifact-sync
+    - ecr
+    - s3
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-artifact
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.12/straiker-artifact-0.1.12.tgz
+    version: 0.1.12
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-14T05:52:47.478152938Z"
     description: 'Mirrors container images from Straiker''s registry into the customer''s
       ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
@@ -370,6 +395,34 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.6/straiker-core-0.1.6.tgz
     version: 0.1.6
+  straiker-inference:
+  - apiVersion: v2
+    appVersion: 0.1.2
+    created: "2026-08-14T17:39:34.920034279Z"
+    description: 'vLLM inference server — serves a single LLM whose weights are synced
+      from global.modelBucket (S3/GCS) by an init container or node-local DaemonSet
+      cache. One release per model (set modelProfile; everything else — origin, GPU
+      tier, served names — is derived). Ported from charts/straiker-platform-old/charts/straiker-inference:
+      same chart, installed independently per model (install-straiker.sh loops over
+      whichever models the selected products need) rather than bundled into an umbrella
+      — consistent with this repo''s "small charts, independent apply/check" charts. '
+    digest: 7aa55c1c48060122a523122d2c3785abb873af2196c4a3b3872ba59933a76791
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - inference
+    - vllm
+    - gpu
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-inference
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-inference-0.1.0/straiker-inference-0.1.0.tgz
+    version: 0.1.0
   straiker-platform:
   - apiVersion: v2
     created: "2026-08-14T06:43:55.008501506Z"
@@ -683,4 +736,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-14T17:03:22.084506005Z"
+generated: "2026-08-14T17:39:35.151478191Z"
