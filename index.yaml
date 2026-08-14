@@ -203,6 +203,45 @@ entries:
   straiker-core:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-14T17:03:21.650270084Z"
+    dependencies:
+    - condition: straiker-bifrost.enabled
+      name: straiker-bifrost
+      repository: ""
+      version: 0.1.0
+    - condition: straiker-frontend.enabled
+      name: straiker-frontend
+      repository: ""
+      version: 0.1.0
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/glauth/Caddy stack. A small umbrella of its
+      own subcharts (straiker-bifrost, straiker-frontend) rather than one flat set
+      of templates — same "small charts" philosophy as this repo''s top-level charts,
+      just scoped one level down since these two are always installed/upgraded together
+      as a single release. Installed standalone at the top level (formerly nested
+      under a now-sunset charts/straiker umbrella — promoted to top-level so it can
+      be installed/upgraded/checked independently of straiker-system/straiker-artifact).
+      Other products (Ascend/Defend/...) will land as their own separate top-level
+      charts. '
+    digest: 1af9e2bc117ffd0cea9c19dde0107b7f022db1cad42d8b3c08add72340fe94dc
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.2.0/straiker-core-0.2.0.tgz
+    version: 0.2.0
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-14T08:21:19.970197408Z"
     description: 'Always-required Straiker application services: frontend, Bifrost
       LLM gateway, and the bundled dex/glauth/Caddy stack. Installed standalone (formerly
@@ -644,4 +683,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-14T16:38:19.80537772Z"
+generated: "2026-08-14T17:03:22.084506005Z"
