@@ -200,6 +200,87 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.0/straiker-artifact-0.1.0.tgz
     version: 0.1.0
+  straiker-core:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-08-14T06:43:54.858869979Z"
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/glauth/Caddy stack. Installed standalone (formerly
+      nested under a now-sunset charts/straiker umbrella — promoted to top-level so
+      it can be installed/upgraded/checked independently). Other products (Ascend/Defend/...)
+      will land as their own separate small charts rather than being folded back into
+      an umbrella. '
+    digest: 5d097d945038d5b48a98b3a5a4f052ddef3c79dd6913ae8200ce6684237491b7
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.6/straiker-core-0.1.6.tgz
+    version: 0.1.6
+  straiker-platform:
+  - apiVersion: v2
+    created: "2026-08-14T06:43:55.008501506Z"
+    dependencies:
+    - alias: inference-antman
+      condition: inference-antman.enabled
+      name: straiker-inference
+      repository: ""
+      version: 1.0.3
+    - alias: inference-hulk
+      condition: inference-hulk.enabled
+      name: straiker-inference
+      repository: ""
+      version: 1.0.3
+    - alias: inference-quicksilver
+      condition: inference-quicksilver.enabled
+      name: straiker-inference
+      repository: ""
+      version: 1.0.3
+    - alias: inference-thor
+      condition: inference-thor.enabled
+      name: straiker-inference
+      repository: ""
+      version: 1.0.3
+    - alias: inference-thanos
+      condition: inference-thanos.enabled
+      name: straiker-inference
+      repository: ""
+      version: 1.0.3
+    - condition: straiker-iris.enabled
+      name: straiker-iris
+      repository: ""
+      version: 1.0.3
+    - condition: straiker-argus.enabled
+      name: straiker-argus
+      repository: ""
+      version: 1.0.3
+    - condition: straiker-control.enabled
+      name: straiker-control
+      repository: ""
+      version: 1.0.0
+    - condition: straiker-bifrost.enabled
+      name: straiker-bifrost
+      repository: ""
+      version: 0.1.0
+    description: 'Straiker enterprise umbrella chart. Install with -f values-defend.yaml
+      or -f values-ascend.yaml, then -f values-customer.yaml to supply site-specific
+      config. '
+    digest: dbb1d09ec56a1276307be18fe587d0ee5e78b53db862feebe75bb6970806f098
+    name: straiker-platform
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-platform-1.0.6/straiker-platform-1.0.6.tgz
+    version: 1.0.6
   straiker-system:
   - apiVersion: v2
     appVersion: 1.0.0
@@ -422,4 +503,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-14T05:52:47.699634983Z"
+generated: "2026-08-14T06:43:55.161986749Z"
