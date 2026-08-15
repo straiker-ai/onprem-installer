@@ -498,6 +498,35 @@ entries:
   straiker-inference:
   - apiVersion: v2
     appVersion: 0.1.2
+    created: "2026-08-15T01:31:59.761151989Z"
+    description: 'vLLM inference server — serves a single LLM whose weights are synced
+      from global.modelBucket (S3/GCS) by an initContainer, either straight into a
+      node-local hostPath cache (marker-gated, so a later pod on the same node skips
+      the download) or into an emptyDir when node-local caching is off. One release
+      per model (set modelProfile; everything else — origin, GPU tier, served names
+      — is derived). Ported from charts/straiker-platform-old/charts/straiker-inference:
+      same chart, installed independently per model (install-straiker.sh loops over
+      whichever models the selected products need) rather than bundled into an umbrella
+      — consistent with this repo''s "small charts, independent apply/check" charts. '
+    digest: 86c6013a9f50597f3f0e92f6f9417697536fd88f91a14dd605c2a8f4ee21f02b
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - inference
+    - vllm
+    - gpu
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-inference
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-inference-0.1.11/straiker-inference-0.1.11.tgz
+    version: 0.1.11
+  - apiVersion: v2
+    appVersion: 0.1.2
     created: "2026-08-15T01:05:12.687877943Z"
     description: 'vLLM inference server — serves a single LLM whose weights are synced
       from global.modelBucket (S3/GCS) by an init container or node-local DaemonSet
@@ -998,4 +1027,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-15T01:05:13.014133128Z"
+generated: "2026-08-15T01:32:00.09148829Z"
