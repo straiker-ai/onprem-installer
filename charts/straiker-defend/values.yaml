@@ -13,7 +13,7 @@ cloudProvider: eks
 
 imagePullSecrets: []
 
-replicas: 3
+replicas: 1
 
 # Argus loads several tokenizers at startup (~400 MB) plus Python/runtime
 # overhead — matches straiker-platform-old's own sizing guidance.
