@@ -66,7 +66,11 @@ spec:
         - name: benthos
           image: {{ include "infra.benthosImage" . | quote }}
           imagePullPolicy: {{ .Values.benthos.image.pullPolicy }}
-          command: ["run", "/etc/redpanda-connect/archive-pipeline.yaml"]
+          # args, not command — the image's own entrypoint is /redpanda-connect
+          # (verified via `crane config redpandadata/connect:4.101.0`); setting
+          # this as `command` replaces that entrypoint entirely and tries to
+          # exec a literal binary named "run", which doesn't exist.
+          args: ["run", "/etc/redpanda-connect/archive-pipeline.yaml"]
           ports:
             - containerPort: 4195
           resources:
