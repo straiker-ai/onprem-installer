@@ -28,5 +28,6 @@ locals {
     "library/caddy",
     "straiker/vllm",
     "straiker/argus",
+    "redpandadata/connect",
   ]
 }
