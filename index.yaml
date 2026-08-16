@@ -495,6 +495,33 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.6/straiker-core-0.1.6.tgz
     version: 0.1.6
+  straiker-defend:
+  - apiVersion: v2
+    appVersion: 0.1.25
+    created: "2026-08-16T05:08:38.826335964Z"
+    description: 'Argus detection engine (Straiker''s "Defend" product) plus its settings-sync
+      daemon and an in-cluster Redpanda Connect (Benthos) pipeline that archives detection
+      turns into charts/straiker-system''s OpenSearch. Ported from charts/straiker-platform-old/charts/straiker-argus,
+      updated to match the current ~/argus/onprem/docker-compose.yml architecture:
+      HTTP-based Redpanda Connect archiving instead of a Kafka-broker cluster, straiker-system''s
+      existing Redis instead of a second one, and no External Secrets Operator dependency
+      (single-namespace on-prem install has no cross-namespace secret to sync). '
+    digest: d6cd7d081187a8c496e4a950728e4bc6e685e2ae748cca98718b7b1bafa957d0
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - argus
+    - defend
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-defend
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-defend-0.1.0/straiker-defend-0.1.0.tgz
+    version: 0.1.0
   straiker-inference:
   - apiVersion: v2
     appVersion: 0.1.2
@@ -829,6 +856,43 @@ entries:
   straiker-system:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-16T05:08:39.153429973Z"
+    dependencies:
+    - name: opensearch
+      repository: https://opensearch-project.github.io/helm-charts
+      tags:
+      - opensearch
+      version: 3.6.0
+    description: 'Straiker cluster + infrastructure chart — provisions everything
+      app charts need before they start: Karpenter NodePools, NVIDIA device plugin,
+      EFS/Filestore StorageClasses, and shared stateful infra (OpenSearch, optional
+      Postgres/Redis). Redpanda lives in its own chart. No in-cluster registry — see
+      the straiker-artifact chart for how container images and model artifacts reach
+      this cluster''s ECR/S3 mirror before this chart''s workloads pull from it. '
+    digest: 38b29368b62c97bcb558c67ec0918c605c6733e75672bd1af34cb7d9114c2bd8
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - infra
+    - karpenter
+    - nvidia
+    - efs
+    - opensearch
+    - postgres
+    - redis
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-system
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.1.6/straiker-system-1.1.6.tgz
+    version: 1.1.6
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-14T16:38:19.805329227Z"
     dependencies:
     - name: opensearch
@@ -1085,4 +1149,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-15T05:51:55.65998538Z"
+generated: "2026-08-16T05:08:39.15376894Z"
