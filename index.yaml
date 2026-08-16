@@ -522,6 +522,34 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-defend-0.1.0/straiker-defend-0.1.0.tgz
     version: 0.1.0
+  straiker-edge:
+  - apiVersion: v2
+    appVersion: 2-alpine
+    created: "2026-08-16T17:37:21.416900711Z"
+    description: 'Thin TLS edge (Caddy, self-signed "tls internal" certs) reverse-proxying
+      a values-driven list of subdomain routes to in-cluster Services. Extracted from
+      charts/straiker-core/charts/straiker-frontend''s formerly-nested "internal-edge"
+      component (frontend-only, one hardcoded route) into its own top-level chart
+      once a second real consumer showed up (charts/straiker-defend''s API), matching
+      this repo''s "small, independent charts" pattern (straiker-inference, straiker-artifact)
+      over nesting a new subchart under straiker-core. '
+    digest: d6d4bb0e14d6d1b85db1bbc5cf4222929a1de764bea604e2453ac60ad5c22680
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - edge
+    - caddy
+    - reverse-proxy
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-edge
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-edge-0.1.0/straiker-edge-0.1.0.tgz
+    version: 0.1.0
   straiker-inference:
   - apiVersion: v2
     appVersion: 0.1.2
@@ -1149,4 +1177,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-16T05:08:39.15376894Z"
+generated: "2026-08-16T17:37:22.055219146Z"
