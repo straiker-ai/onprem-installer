@@ -132,3 +132,55 @@ jobs:
             git -C "$worktree" commit -m "Publish installer bundle ${INSTALLER_VERSION}"
             git -C "$worktree" push origin HEAD:dist
           fi
+          git worktree remove --force "$worktree"
+
+      - name: Prune old chart releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # chart-releaser creates one GitHub Release + tag per published
+          # version, with no retention of its own — at this project's version
+          # churn (see e.g. straiker-artifact's 0.1.0 -> 0.1.18 in under a
+          # week) that grows unbounded. install-straiker.sh never pins an
+          # exact --version (always resolves latest), so nothing depends on
+          # old chart versions still existing; keeping this many of the most
+          # recent per chart is just a safety margin for manual rollback.
+          RETAIN: "5"
+        run: |
+          set -euo pipefail
+          worktree="$(mktemp -d)"
+          git fetch origin dist
+          git worktree add --detach "$worktree" origin/dist
+
+          index_changed=false
+          for chart_yaml in charts/*/Chart.yaml; do
+            chart_name="$(yq -r '.name' "$chart_yaml")"
+
+            # Tag/release name format is "<chart-name>-<version>" (chart-releaser's
+            # convention). Anchor on a semver-shaped suffix so a shorter chart name
+            # that's a prefix of another (e.g. "straiker" vs "straiker-artifact")
+            # doesn't also match that other chart's releases.
+            mapfile -t tags < <(
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+                --json tagName,createdAt \
+                --jq ".[] | select(.tagName | test(\"^${chart_name}-[0-9]+\\\\.[0-9]+\\\\.[0-9]+\")) | [.createdAt, .tagName] | @tsv" \
+                | sort -r | cut -f2
+            )
+            if (( ${#tags[@]} <= RETAIN )); then
+              continue
+            fi
+
+            for tag in "${tags[@]:RETAIN}"; do
+              version="${tag#${chart_name}-}"
+              echo "Pruning release '${tag}' (beyond the last ${RETAIN} for '${chart_name}')..."
+              gh release delete "${tag}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              yq -i "del(.entries.\"${chart_name}\"[] | select(.version == \"${version}\"))" "$worktree/index.yaml"
+              index_changed=true
+            done
+          done
+
+          if [[ "${index_changed}" == true ]]; then
+            git -C "$worktree" add index.yaml
+            git -C "$worktree" commit -m "Prune index entries for deleted chart releases"
+            git -C "$worktree" push origin HEAD:dist
+          fi
+          git worktree remove --force "$worktree"
