@@ -178,6 +178,44 @@ entries:
   straiker-core:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-17T04:25:06.70986461Z"
+    dependencies:
+    - condition: straiker-bifrost.enabled
+      name: straiker-bifrost
+      repository: ""
+      version: 0.1.0
+    - condition: straiker-frontend.enabled
+      name: straiker-frontend
+      repository: ""
+      version: 0.1.0
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/Caddy stack. A small umbrella of its own subcharts
+      (straiker-bifrost, straiker-frontend) rather than one flat set of templates
+      — same "small charts" philosophy as this repo''s top-level charts, just scoped
+      one level down since these two are always installed/upgraded together as a single
+      release. Installed standalone at the top level (formerly nested under a now-sunset
+      charts/straiker umbrella — promoted to top-level so it can be installed/upgraded/checked
+      independently of straiker-system/straiker-artifact). Other products (Ascend/Defend/...)
+      will land as their own separate top-level charts. '
+    digest: a69836ef3865b4272da5f5b0db5227a6bfece9d99af4c8fd4d03347416cc7d5c
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.2.3/straiker-core-0.2.3.tgz
+    version: 0.2.3
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-17T00:15:16.01457052Z"
     dependencies:
     - condition: straiker-bifrost.enabled
@@ -370,6 +408,32 @@ entries:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.7/straiker-core-0.1.7.tgz
     version: 0.1.7
   straiker-defend:
+  - apiVersion: v2
+    appVersion: 0.1.25
+    created: "2026-08-17T04:25:06.878393078Z"
+    description: 'Argus detection engine (Straiker''s "Defend" product) plus its settings-sync
+      daemon and an in-cluster Redpanda Connect (Benthos) pipeline that archives detection
+      turns into charts/straiker-system''s OpenSearch. Ported from charts/straiker-platform-old/charts/straiker-argus,
+      updated to match the current ~/argus/onprem/docker-compose.yml architecture:
+      HTTP-based Redpanda Connect archiving instead of a Kafka-broker cluster, straiker-system''s
+      existing Redis instead of a second one, and no External Secrets Operator dependency
+      (single-namespace on-prem install has no cross-namespace secret to sync). '
+    digest: c3d8172b9e84be107d8d44b123d2b793595baa97af1b40b2ed2d8a256e48ff7b
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - argus
+    - defend
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-defend
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-defend-0.1.3/straiker-defend-0.1.3.tgz
+    version: 0.1.3
   - apiVersion: v2
     appVersion: 0.1.25
     created: "2026-08-16T23:56:39.709588879Z"
@@ -702,6 +766,43 @@ entries:
   straiker-system:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-17T04:25:07.330489073Z"
+    dependencies:
+    - name: opensearch
+      repository: https://opensearch-project.github.io/helm-charts
+      tags:
+      - opensearch
+      version: 3.6.0
+    description: 'Straiker cluster + infrastructure chart — provisions everything
+      app charts need before they start: Karpenter NodePools, NVIDIA device plugin,
+      EFS/Filestore StorageClasses, and shared stateful infra (OpenSearch, optional
+      Postgres/Redis). Redpanda lives in its own chart. No in-cluster registry — see
+      the straiker-artifact chart for how container images and model artifacts reach
+      this cluster''s ECR/S3 mirror before this chart''s workloads pull from it. '
+    digest: 3c1772ebb15e3c7122f8100315ed4d4617d169206811cf6920c57346b6bc6514
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - infra
+    - karpenter
+    - nvidia
+    - efs
+    - opensearch
+    - postgres
+    - redis
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-system
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.1.10/straiker-system-1.1.10.tgz
+    version: 1.1.10
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-17T00:45:58.345655577Z"
     dependencies:
     - name: opensearch
@@ -921,4 +1022,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-17T01:23:47.034777925Z"
+generated: "2026-08-17T04:25:07.330574844Z"
