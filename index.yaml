@@ -27,6 +27,31 @@ entries:
   straiker-artifact:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-17T00:15:15.836708701Z"
+    description: 'Mirrors container images from Straiker''s registry into the customer''s
+      ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
+      bucket, via in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+      since that chart''s workloads pull images through the ECR mirror this populates. '
+    digest: 0c41519a29c11790896f30919b6c8d03b9efef8d52b54657158b3845cde7cbca
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - artifact-sync
+    - ecr
+    - s3
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-artifact
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.19/straiker-artifact-0.1.19.tgz
+    version: 0.1.19
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-16T23:20:57.34566469Z"
     description: 'Mirrors container images from Straiker''s registry into the customer''s
       ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
@@ -176,6 +201,44 @@ entries:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.0/straiker-artifact-0.1.0.tgz
     version: 0.1.0
   straiker-core:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-08-17T00:15:16.01457052Z"
+    dependencies:
+    - condition: straiker-bifrost.enabled
+      name: straiker-bifrost
+      repository: ""
+      version: 0.1.0
+    - condition: straiker-frontend.enabled
+      name: straiker-frontend
+      repository: ""
+      version: 0.1.0
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/Caddy stack. A small umbrella of its own subcharts
+      (straiker-bifrost, straiker-frontend) rather than one flat set of templates
+      — same "small charts" philosophy as this repo''s top-level charts, just scoped
+      one level down since these two are always installed/upgraded together as a single
+      release. Installed standalone at the top level (formerly nested under a now-sunset
+      charts/straiker umbrella — promoted to top-level so it can be installed/upgraded/checked
+      independently of straiker-system/straiker-artifact). Other products (Ascend/Defend/...)
+      will land as their own separate top-level charts. '
+    digest: 70dbdee1286b7604c34fdf2b3e3fd3f5a68ab0afca639e3082f7f2d061e486ef
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.2.2/straiker-core-0.2.2.tgz
+    version: 0.2.2
   - apiVersion: v2
     appVersion: 1.0.0
     created: "2026-08-16T23:20:57.455724964Z"
@@ -882,4 +945,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-16T23:56:39.709644963Z"
+generated: "2026-08-17T00:15:16.238249432Z"
