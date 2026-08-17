@@ -87,6 +87,14 @@ ARTIFACT_CHART_NAME="straiker-artifact"
 # Must match charts/straiker-artifact's default straikerCredentialSecretName.
 STRAIKER_CREDENTIAL_SECRET_NAME="straiker-credential"
 
+# Shared service-to-service credentials Secret — straiker-core (frontend),
+# straiker-inference, and straiker-defend all independently hardcode this
+# same name as where they read INTERNAL_API_KEY/VLLM_API_KEY/
+# SYS__FOUNDATION_API_KEY/SYS__INFERENCE_API_KEY from (see each chart's own
+# secrets.yaml, which documents the expected keys but creates nothing).
+# phase_shared_secrets is what actually creates it now.
+SHARED_SECRETS_NAME="straiker-secrets"
+
 # Application layer (frontend/bifrost/dex/caddy) — a standalone chart
 # (formerly nested under a now-sunset charts/straiker umbrella), installed
 # into the same INFRA_NAMESPACE, after straiker-system. Other products
@@ -185,7 +193,7 @@ STRAIKER_CREDENTIAL_FILE=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "straiker-core" "straiker-inference" "straiker-defend" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -524,22 +532,31 @@ Installer phases:
                              images through the ECR mirror these Jobs populate.
   7) straiker-system      - add the public straiker Helm repo and install/upgrade release
                              'straiker-system'. Runs only after artifacts-sync completes.
-  8) straiker-core        - install/upgrade release 'straiker-core' (frontend, bifrost,
+  8) shared-secrets       - create the 'straiker-secrets' K8s Secret (once — leaves it alone
+                             if it already exists) with freshly generated service-to-service
+                             credentials: INTERNAL_API_KEY / SYS__FOUNDATION_API_KEY (same
+                             value, Bearer-prefixed for argus since it sends the header
+                             verbatim) for argus's settings-sync calls into straiker-core's
+                             frontend, and VLLM_API_KEY / SYS__INFERENCE_API_KEY (same value)
+                             for argus calling straiker-inference. All three charts already
+                             hardcode this same Secret name; previously nothing ever created
+                             it; each chart's own secrets.yaml is documentation-only.
+  9) straiker-core        - install/upgrade release 'straiker-core' (frontend, bifrost,
                              dex, caddy — its own standalone chart). Runs after
                              straiker-system since frontend connects to that chart's
                              postgres/opensearch directly.
-  9) straiker-inference   - install/upgrade one release per GPU model the selected products
+ 10) straiker-inference   - install/upgrade one release per GPU model the selected products
                              need (charts/straiker-inference — Defend's argus needs antman/
                              hulk/quicksilver/thor/vision/wanda, Ascend's iris needs thanos).
                              Each model is its own release (named 'inference-<model>'), so one
                              model's GPU-capacity problem doesn't block the others. Skipped
                              entirely if no selected product needs a model.
- 10) straiker-defend      - install/upgrade release 'straiker-defend' (argus + its
+ 11) straiker-defend      - install/upgrade release 'straiker-defend' (argus + its
                              settings-sync daemon — charts/straiker-defend). Only when
                              'defend' is selected. Runs after straiker-inference (needs its
                              per-model Services) and straiker-system (needs its Redis/
                              OpenSearch/Benthos and shared NodePool).
- 11) straiker-edge        - install/upgrade release 'straiker-edge' (thin TLS edge —
+ 12) straiker-edge        - install/upgrade release 'straiker-edge' (thin TLS edge —
                              charts/straiker-edge). Always runs: routes app.<appDomain>
                              to straiker-core's frontend and defend-api.<appDomain> to
                              straiker-defend (502s until that's installed, if ever).
@@ -1817,6 +1834,52 @@ phase_straiker_system() {
   "${cmd[@]}"
 }
 
+# Creates SHARED_SECRETS_NAME once, idempotently — never regenerated or
+# patched on later runs (that would rotate credentials the frontend/inference/
+# defend releases already picked up, breaking their already-working
+# integrations). If the customer wants to rotate a key, that's a manual
+# `kubectl edit secret` followed by restarting the consumers, not something
+# this installer does automatically.
+#
+# INTERNAL_API_KEY / SYS__FOUNDATION_API_KEY share one underlying value: the
+# frontend app strips a "Bearer " prefix before comparing the inbound header
+# against INTERNAL_API_KEY, while argus sends SYS__FOUNDATION_API_KEY
+# verbatim as the whole header — so the same secret has to be stored twice,
+# once bare and once pre-prefixed, rather than templated at the chart level
+# (Kubernetes Secrets don't support computed values). Verified directly
+# against straiker/frontend's apps/web/src/lib/server/hooks/authorization.ts
+# and straiker/argus's argus/common/settings/settings.py.
+#
+# VLLM_API_KEY / SYS__INFERENCE_API_KEY share the other value verbatim (no
+# prefix games) — straiker-inference's vLLM server checks this key as a
+# plain bearer token, same as argus does.
+phase_shared_secrets() {
+  require_command kubectl
+  require_command openssl
+
+  if kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    log "Secret '${SHARED_SECRETS_NAME}' already exists in namespace '${INFRA_NAMESPACE}' — leaving its values as-is."
+    return
+  fi
+
+  ensure_k8s_ready_for_charts || return
+
+  # hex, not base64 — these end up in HTTP Authorization headers verbatim
+  # (see the phase's own comment above), and hex has no +/= characters to
+  # worry about there or in shell interpolation.
+  local internal_key inference_key
+  internal_key="$(openssl rand -hex 32)"
+  inference_key="$(openssl rand -hex 32)"
+
+  kubectl create secret generic "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" \
+    --from-literal="INTERNAL_API_KEY=${internal_key}" \
+    --from-literal="SYS__FOUNDATION_API_KEY=Bearer ${internal_key}" \
+    --from-literal="VLLM_API_KEY=${inference_key}" \
+    --from-literal="SYS__INFERENCE_API_KEY=${inference_key}" \
+    >/dev/null
+  log "Created Secret '${SHARED_SECRETS_NAME}' with freshly generated service-to-service credentials."
+}
+
 # Application layer — frontend/bifrost/dex/caddy (charts/straiker-core,
 # a standalone chart). Runs after straiker-system since frontend connects
 # to that chart's postgres/opensearch directly (see straiker-core's
@@ -1876,6 +1939,28 @@ phase_straiker_core() {
   # somewhere else.
   cmd+=(--set "global.infraNamespace=${INFRA_NAMESPACE}")
 
+  # phase_shared_secrets (runs earlier) creates this Secret/key — wire the
+  # chart's own (empty-by-default) references at it so argus's settings-sync
+  # calls into /internal_api/* actually authenticate. straiker-core is an
+  # umbrella chart with straiker-frontend as a subchart (see its Chart.yaml
+  # dependencies) — overriding a subchart's own values from the parent
+  # release needs the "<subchart-name>." prefix, unlike global.* above
+  # (which every subchart picks up automatically via Helm's global
+  # mechanism); a bare "frontend.internalApiKey...=" here would silently
+  # create an unused top-level key on the parent instead of reaching the
+  # subchart's values at all. Unconditional, unlike argusEndpoint below: the
+  # key exists regardless of which products are selected, so there's no
+  # reason to omit it.
+  cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
+  cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
+
+  # Only set when 'defend' is actually selected — straiker-defend's Service
+  # won't exist otherwise, and the chart already omits this env var entirely
+  # when unset rather than pointing at a URL that resolves to nothing.
+  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
+    cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
+  fi
+
   local values_file
   for values_file in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do
     cmd+=(-f "${values_file}")
@@ -1890,7 +1975,11 @@ phase_straiker_core() {
 inference_models_for_products() {
   local models=()
   if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    models+=("antman" "hulk" "quicksilver" "thor" "vision" "wanda")
+    # vision/wanda temporarily disabled (2026-08-16) -- re-add "vision"
+    # "wanda" here once ready. Argus's SYS__LLM_ENDPOINTS__VISION/
+    # IMAGE_DETECTION will just error for the categories that route to
+    # them until then.
+    models+=("antman" "hulk" "quicksilver" "thor")
   fi
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     models+=("thanos")
@@ -2457,6 +2546,7 @@ run_phase() {
     aws-artifacts) phase_aws_artifacts ;;
     artifacts-sync) phase_artifacts_sync ;;
     straiker-system) phase_straiker_system ;;
+    shared-secrets) phase_shared_secrets ;;
     straiker-core) phase_straiker_core ;;
     straiker-inference) phase_straiker_inference ;;
     straiker-defend) phase_straiker_defend ;;
