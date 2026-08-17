@@ -38,8 +38,8 @@ variable "workload_namespace" {
   default     = ""
 }
 
-variable "workload_service_account_name" {
-  description = "ServiceAccount name of the workload that reads models from GCS. Leave empty to skip the Workload Identity binding."
-  type        = string
-  default     = ""
+variable "workload_service_account_names" {
+  description = "ServiceAccount names (in workload_namespace) that read models from GCS — one binding per name, all to the same reader SA (e.g. straiker-inference's shared SA, straiker-defend's SA). Leave empty to skip Workload Identity bindings entirely."
+  type        = list(string)
+  default     = []
 }

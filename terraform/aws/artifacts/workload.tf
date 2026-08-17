@@ -41,11 +41,11 @@ resource "aws_iam_role_policy" "workload_s3_read" {
 }
 
 resource "aws_eks_pod_identity_association" "workload" {
-  count = (var.workload_namespace != "" && var.workload_service_account_name != "") ? 1 : 0
+  for_each = var.workload_namespace != "" ? toset(var.workload_service_account_names) : toset([])
 
   cluster_name    = var.cluster_name
   namespace       = var.workload_namespace
-  service_account = var.workload_service_account_name
+  service_account = each.value
   role_arn        = aws_iam_role.workload.arn
 
   tags = local.common_tags

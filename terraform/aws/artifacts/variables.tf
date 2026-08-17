@@ -33,8 +33,8 @@ variable "workload_namespace" {
   default     = ""
 }
 
-variable "workload_service_account_name" {
-  description = "ServiceAccount name of the workload that reads models from S3. Leave empty to skip the pod identity binding."
-  type        = string
-  default     = ""
+variable "workload_service_account_names" {
+  description = "ServiceAccount names (in workload_namespace) that read models from S3 — one binding per name, all to the same reader role (e.g. straiker-inference's shared SA, straiker-defend's SA). Leave empty to skip pod identity bindings entirely."
+  type        = list(string)
+  default     = []
 }

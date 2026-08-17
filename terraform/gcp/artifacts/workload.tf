@@ -16,9 +16,9 @@ resource "google_storage_bucket_iam_member" "workload_models_read" {
 }
 
 resource "google_service_account_iam_member" "workload_workload_identity" {
-  count = (var.workload_namespace != "" && var.workload_service_account_name != "") ? 1 : 0
+  for_each = var.workload_namespace != "" ? toset(var.workload_service_account_names) : toset([])
 
   service_account_id = google_service_account.workload.name
   role                = "roles/iam.workloadIdentityUser"
-  member              = "serviceAccount:${var.project_id}.svc.id.goog[${var.workload_namespace}/${var.workload_service_account_name}]"
+  member              = "serviceAccount:${var.project_id}.svc.id.goog[${var.workload_namespace}/${each.value}]"
 }

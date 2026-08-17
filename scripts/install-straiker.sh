@@ -105,6 +105,11 @@ APP_CHART_NAME="straiker-core"
 # binding (terraform/aws/artifacts's workload_role_arn) targets.
 INFERENCE_CHART_NAME="straiker-inference"
 INFERENCE_SERVICE_ACCOUNT="straiker-inference"
+# How many model releases phase_straiker_inference installs at once. Bounded
+# rather than unlimited: all of them provisioning GPU nodes simultaneously
+# risks tripping the account's actual GPU quota/capacity limits, and fully
+# sequential (1) means one slow cold-start blocks every model after it.
+INFERENCE_CONCURRENCY=3
 
 # Argus detection engine (charts/straiker-defend) — Straiker's "Defend"
 # product. Installed only when "defend" is in PRODUCTS_OPT, after
@@ -112,6 +117,11 @@ INFERENCE_SERVICE_ACCOUNT="straiker-inference"
 # straiker-system (its Redis/OpenSearch/Benthos and shared NodePool).
 DEFEND_RELEASE="straiker-defend"
 DEFEND_CHART_NAME="straiker-defend"
+# Matches charts/straiker-defend's default serviceAccountName — also needs
+# the models-reader pod identity/Workload Identity binding (its
+# tokenizer-pull initContainer reads from the same bucket straiker-inference
+# does), see phase_aws_artifacts(_gke)'s workload_service_account_names.
+DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
 # Thin TLS edge (charts/straiker-edge) — routes app.<appDomain> to
 # straiker-core's frontend and defend-api.<appDomain> to straiker-defend.
@@ -1414,7 +1424,7 @@ phase_aws_artifacts() {
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="namespace=${INFRA_NAMESPACE}" \
     -var="workload_namespace=${INFRA_NAMESPACE}" \
-    -var="workload_service_account_name=${INFERENCE_SERVICE_ACCOUNT}"
+    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]"
 
   local models_bucket ecr_registry hauler_role_arn workload_role_arn
   models_bucket="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw models_bucket_name)"
@@ -1467,7 +1477,7 @@ phase_aws_artifacts_gke() {
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="namespace=${INFRA_NAMESPACE}" \
     -var="workload_namespace=${INFRA_NAMESPACE}" \
-    -var="workload_service_account_name=${INFERENCE_SERVICE_ACCOUNT}"
+    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]"
 
   local models_bucket registry_host hauler_sa workload_sa
   models_bucket="$(tofu -chdir="${GCP_ARTIFACTS_DIR}" output -raw models_bucket_name)"
@@ -1948,34 +1958,79 @@ phase_straiker_inference() {
   local ecr_registry_prefixed
   ecr_registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
 
+  # Installed in batches of INFERENCE_CONCURRENCY rather than one at a time
+  # (each model's GPU cold-start can take a while, and they're independent
+  # releases with no reason to serialize) or all at once (which would fire
+  # every model's GPU node request simultaneously, risking the account's
+  # actual GPU quota/capacity limits). Bash 3.2 (this repo's floor — see the
+  # `mapfile` note above) has no `wait -n`, so a batch waits for its slowest
+  # member before the next batch starts rather than refilling slots as they
+  # free up — simpler to get right than a true worker pool, at the cost of
+  # some idle concurrency within a batch.
   local failed=()
   local model release
-  for model in "${models[@]}"; do
-    # "inference-<model>" — matches Straiker's own production release naming
-    # and, since .Values.modelProfile (not .Release.Name) drives resource
-    # names in this chart (see straiker-inference.fullname), keeps the K8s
-    # resource names consistent with the release name rather than bare.
-    release="inference-${model}"
-    log "Installing inference model '${model}' as release '${release}'..."
-    local cmd=(
-      helm upgrade --install "${release}" "${HELM_REPO_NAME}/${INFERENCE_CHART_NAME}"
-      --namespace "${INFRA_NAMESPACE}"
-      --create-namespace
-      --set "modelProfile=${model}"
-      --set "global.dockerRegistry=${ecr_registry_prefixed}"
-      --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
-      --wait
-      --timeout "${HELM_TIMEOUT}"
-    )
-    if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
-      cmd+=(--set "cloudProvider=gke")
-    fi
-    if [[ -n "${CHART_VERSION}" ]]; then
-      cmd+=(--version "${CHART_VERSION}")
-    fi
-    if ! "${cmd[@]}"; then
-      failed+=("${model}")
-    fi
+  local total=${#models[@]}
+  local i=0
+  while (( i < total )); do
+    local batch_models=()
+    local batch_pids=()
+    local batch_logs=()
+
+    local j=0
+    while (( j < INFERENCE_CONCURRENCY && i < total )); do
+      model="${models[i]}"
+      # "inference-<model>" — matches Straiker's own production release naming
+      # and, since .Values.modelProfile (not .Release.Name) drives resource
+      # names in this chart (see straiker-inference.fullname), keeps the K8s
+      # resource names consistent with the release name rather than bare.
+      release="inference-${model}"
+      log "Installing inference model '${model}' as release '${release}'..."
+      local cmd=(
+        helm upgrade --install "${release}" "${HELM_REPO_NAME}/${INFERENCE_CHART_NAME}"
+        --namespace "${INFRA_NAMESPACE}"
+        --create-namespace
+        --set "modelProfile=${model}"
+        --set "global.dockerRegistry=${ecr_registry_prefixed}"
+        --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
+        --wait
+        --timeout "${HELM_TIMEOUT}"
+      )
+      if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
+        cmd+=(--set "cloudProvider=gke")
+      fi
+      if [[ -n "${CHART_VERSION}" ]]; then
+        cmd+=(--version "${CHART_VERSION}")
+      fi
+
+      local logfile
+      logfile="$(mktemp)"
+      ( "${cmd[@]}" ) >"${logfile}" 2>&1 &
+      batch_models+=("${model}")
+      batch_pids+=("$!")
+      batch_logs+=("${logfile}")
+
+      i=$((i + 1))
+      j=$((j + 1))
+    done
+
+    # Collect this batch's results before starting the next one. Each
+    # backgrounded helm run's output was captured to its own logfile (rather
+    # than left to inherit stdout/stderr directly) so concurrent runs don't
+    # interleave into unreadable output — replayed here, one model at a time.
+    local k=0
+    while (( k < ${#batch_pids[@]} )); do
+      if wait "${batch_pids[k]}"; then
+        log "Inference model '${batch_models[k]}' installed successfully."
+      else
+        failed+=("${batch_models[k]}")
+        log "Inference model '${batch_models[k]}' FAILED."
+      fi
+      echo "----- ${batch_models[k]} output -----"
+      cat "${batch_logs[k]}"
+      echo "----- end ${batch_models[k]} output -----"
+      rm -f "${batch_logs[k]}"
+      k=$((k + 1))
+    done
   done
 
   if [[ ${#failed[@]} -gt 0 ]]; then
