@@ -2254,6 +2254,25 @@ show_access_info() {
     log "  2. kubectl -n ${INFRA_NAMESPACE} port-forward svc/straiker-edge ${app_port}:${app_port}"
     log "  3. open https://${app_addr}/ (a self-signed cert warning is expected)"
   fi
+
+  # Documentation only — not run automatically. The API key is a
+  # per-application credential (seeded into the customer's own tenant via
+  # settings-sync), so there's no value the installer itself could fill in
+  # here; add it to /etc/hosts the same way as app_host above if you want to
+  # actually run this.
+  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
+    local defend_addr
+    defend_addr="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null | grep -o 'defend\.[^ {]*' | head -1 || true)"
+    if [[ -n "${defend_addr}" ]]; then
+      log ""
+      log "Smoke test the Defend API (needs one of your application's API keys):"
+      log "  curl -sk -X POST https://${defend_addr}/api/v1/detect \\"
+      log "    -H \"Authorization: Bearer <your-application-api-key>\" \\"
+      log "    -H \"Content-Type: application/json\" \\"
+      log "    -H \"Straiker-Debug: true\" \\"
+      log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
+    fi
+  fi
 }
 
 # Prompts on /dev/tty (never stdin — this must work under `curl | bash`, which
