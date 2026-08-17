@@ -487,6 +487,69 @@ install_phase_for_release() {
   esac
 }
 
+# `helm uninstall` deletes a release's resources sequentially, in template
+# order -- not all at once, and with no awareness of cross-resource
+# dependencies. On straiker-system specifically, that means its NodePool/
+# ConfigMap can (and does) get deleted before its postgres StatefulSet, whose
+# helm.sh/resource-policy=keep annotation means helm never deletes it at all
+# (see delete_kept_resources above). Nothing stops the StatefulSet
+# controller from noticing its pod is gone and trying to recreate it in that
+# gap -- and since it has no idea an uninstall is in progress, it'll keep
+# retrying against now-missing dependencies indefinitely (a stray
+# replacement node, ConfigMap-not-found mount failures) rather than settling
+# on its own. Scaling every Deployment/StatefulSet in the release to 0
+# first removes any controller that could react to what gets deleted next,
+# regardless of ordering -- and leaves a kept StatefulSet parked at 0
+# replicas (clean) instead of stuck retrying forever.
+scale_down_release_workloads() {
+  local release=$1
+  local kind name
+  # (kind, name, selector) for each workload scaled down this call -- pods
+  # themselves carry no meta.helm.sh/release-name annotation (only the
+  # top-level Deployment/StatefulSet does), so the wait step below has to
+  # match pods the same way Kubernetes itself does: via each workload's own
+  # spec.selector.matchLabels, not by annotation or naming-convention guesses.
+  local -a selectors=()
+
+  for kind in deployment statefulset; do
+    while IFS=$'\t' read -r name selector; do
+      [[ -z "${name}" ]] && continue
+      log "Scaling ${kind} '${name}' to 0 before uninstalling '${release}'..."
+      kubectl -n "${NAMESPACE}" scale "${kind}" "${name}" --replicas=0 >/dev/null 2>&1 || true
+      [[ -n "${selector}" ]] && selectors+=("${selector}")
+    done <<< "$(kubectl -n "${NAMESPACE}" get "${kind}" -o json 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for item in data.get('items', []):
+    ann = item.get('metadata', {}).get('annotations', {}) or {}
+    if ann.get('meta.helm.sh/release-name') != '${release}':
+        continue
+    labels = item.get('spec', {}).get('selector', {}).get('matchLabels', {}) or {}
+    selector = ','.join(f'{k}={v}' for k, v in labels.items())
+    print(f\"{item['metadata']['name']}\t{selector}\")
+")"
+  done
+
+  # Best-effort wait for those pods to actually go away -- scale is only
+  # updating the spec; termination still takes a grace period. Not fatal if
+  # this times out (helm uninstall proceeds regardless), just narrows the
+  # window where a pod could still be terminating when the next resource
+  # gets deleted.
+  local sel waited=0
+  while (( waited < 60 )); do
+    local any_remaining=false
+    for sel in "${selectors[@]+"${selectors[@]}"}"; do
+      [[ -z "${sel}" ]] && continue
+      local count
+      count="$(kubectl -n "${NAMESPACE}" get pods --selector="${sel}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+      [[ "${count}" != "0" ]] && any_remaining=true
+    done
+    [[ "${any_remaining}" == false ]] && break
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
 phase_helm_uninstall() {
   local releases=("${ALL_RELEASES[@]}")
   [[ -n "${RELEASE_NAME}" ]] && releases=("${RELEASE_NAME}")
@@ -494,6 +557,7 @@ phase_helm_uninstall() {
   local release
   for release in "${releases[@]}"; do
     if helm status "${release}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+      scale_down_release_workloads "${release}"
       log "Uninstalling release '${release}'..."
       helm uninstall "${release}" -n "${NAMESPACE}" --wait --timeout "${HELM_TIMEOUT}"
       local install_phase
