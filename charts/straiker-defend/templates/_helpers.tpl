@@ -48,14 +48,15 @@ aws s3 sync --only-show-errors "{{ $bucket }}/{{ .src }}" "{{ .dst }}"
 {{- end }}
 
 {{/*
-Redis — reuses charts/straiker-system's own instance (service
-"straiker-redis") in this same namespace, rather than deploying a second one.
+Redis — reuses charts/straiker-system's own instance (service "valkey", a
+Redis-protocol-compatible fork) in this same namespace, rather than
+deploying a second one.
 */}}
 {{- define "defend.redisUrl" -}}
 {{- if .Values.redis.url -}}
 {{- .Values.redis.url -}}
 {{- else -}}
-{{- printf "redis://straiker-redis.%s.svc.cluster.local:6379" (include "defend.namespace" .) -}}
+{{- printf "redis://valkey.%s.svc.cluster.local:6379" (include "defend.namespace" .) -}}
 {{- end -}}
 {{- end }}
 

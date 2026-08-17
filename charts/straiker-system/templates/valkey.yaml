@@ -1,32 +1,32 @@
-{{- if .Values.redis }}
+{{- if .Values.valkey }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: straiker-redis
+  name: valkey
   namespace: {{ include "infra.namespace" . }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redis
+    app.kubernetes.io/component: valkey
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: straiker-redis
+      app: valkey
   template:
     metadata:
       labels:
-        app: straiker-redis
+        app: valkey
     spec:
       nodeSelector:
         {{- toYaml .Values.sharedNodeSelector | nindent 8 }}
       containers:
-        - name: redis
-          image: {{ include "infra.redisImage" . | quote }}
+        - name: valkey
+          image: {{ include "infra.valkeyImage" . | quote }}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 6379
           resources:
-            {{- toYaml .Values.redis.resources | nindent 12 }}
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
           readinessProbe:
             exec:
               command: ["valkey-cli", "ping"]
@@ -42,17 +42,17 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: straiker-redis
+  name: valkey
   namespace: {{ include "infra.namespace" . }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redis
+    app.kubernetes.io/component: valkey
 spec:
   type: ClusterIP
   selector:
-    app: straiker-redis
+    app: valkey
   ports:
-    - name: redis
+    - name: valkey
       port: 6379
       targetPort: 6379
 {{- end }}

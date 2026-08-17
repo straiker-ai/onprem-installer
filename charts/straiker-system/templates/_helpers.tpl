@@ -40,11 +40,11 @@ Usage: {{ include "infra.image" (dict "image" $someImage "global" .Values.global
 {{- end -}}
 {{- end }}
 
-{{- define "infra.redisImage" -}}
-{{ include "infra.image" (dict "image" .Values.redis.image "global" .Values.global) }}
+{{- define "infra.valkeyImage" -}}
+{{ include "infra.image" (dict "image" .Values.valkey.image "global" .Values.global) }}
 {{- end }}
 
-{{/* Mirrored via charts/straiker-artifact's imageMirror.images (destRepository redpandadata/connect) — resolves through global.dockerRegistry like the other mirrored third-party images (redis/opensearch). */}}
+{{/* Mirrored via charts/straiker-artifact's imageMirror.images (destRepository redpandadata/connect) — resolves through global.dockerRegistry like the other mirrored third-party images (valkey/opensearch). */}}
 {{- define "infra.benthosImage" -}}
 {{ include "infra.image" (dict "image" .Values.benthos.image "global" .Values.global) }}
 {{- end }}

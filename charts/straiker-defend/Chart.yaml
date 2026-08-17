@@ -11,7 +11,7 @@ description: >
   dependency (single-namespace on-prem install has no cross-namespace secret
   to sync).
 type: application
-version: 0.1.2
+version: 0.1.3
 appVersion: "0.1.25"
 home: https://github.com/straiker-ai/onprem
 sources:

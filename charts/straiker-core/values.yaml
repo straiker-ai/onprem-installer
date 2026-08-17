@@ -11,7 +11,7 @@ global:
 
   # Namespace charts/straiker-system is installed into — straiker-frontend's
   # defaults (postgres/opensearch connection strings) assume that chart's
-  # actual resource names (straiker-postgres, straiker-postgres-secret,
+  # actual resource names (postgres, postgres-secret,
   # opensearch-cluster-master). Override if straiker-system lives elsewhere.
   infraNamespace: straiker
 

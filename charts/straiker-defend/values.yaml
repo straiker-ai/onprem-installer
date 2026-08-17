@@ -70,9 +70,10 @@ foundation:
   # straiker-frontend-service in this same namespace.
   endpoint: ""
 
-# Redis — reuses charts/straiker-system's own instance (service
-# "straiker-redis", this same namespace) rather than deploying a second one
-# just for argus, unlike straiker-platform-old's per-app inClusterRedis.
+# Redis — reuses charts/straiker-system's own instance (service "valkey", a
+# Redis-protocol-compatible fork, this same namespace) rather than deploying
+# a second one just for argus, unlike straiker-platform-old's per-app
+# inClusterRedis.
 redis:
   url: ""
 

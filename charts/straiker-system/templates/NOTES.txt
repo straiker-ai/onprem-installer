@@ -55,16 +55,16 @@ If you install with a different release name, update all references above.
 
 PostgreSQL
 ----------
-  Host: straiker-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432
+  Host: postgres.{{ .Release.Namespace }}.svc.cluster.local:5432
   Database: {{ .Values.postgres.database }}
   User: {{ .Values.postgres.user }}
-  Password: kubectl get secret straiker-postgres-secret -n {{ .Release.Namespace }} \
+  Password: kubectl get secret postgres-secret -n {{ .Release.Namespace }} \
               -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
 {{- end }}
 
-{{- if .Values.redis }}
+{{- if .Values.valkey }}
 
-Redis
------
-  redis://straiker-redis.{{ .Release.Namespace }}.svc.cluster.local:6379
+Valkey
+------
+  redis://valkey.{{ .Release.Namespace }}.svc.cluster.local:6379
 {{- end }}

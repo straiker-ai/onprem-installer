@@ -12,7 +12,7 @@ description: >
   straiker-system/straiker-artifact). Other products (Ascend/Defend/...) will
   land as their own separate top-level charts.
 type: application
-version: 0.2.2
+version: 0.2.3
 appVersion: "1.0.0"
 home: https://github.com/straiker-ai/onprem
 sources:

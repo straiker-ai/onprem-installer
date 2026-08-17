@@ -2,17 +2,17 @@
 {{- $databases := .Values.postgres.databases }}
 {{- $primary := first $databases }}
 {{- $secondary := rest $databases }}
-{{- $secretName := .Values.postgres.existingSecret | default "straiker-postgres-secret" }}
+{{- $secretName := .Values.postgres.existingSecret | default "postgres-secret" }}
 {{- if not .Values.postgres.existingSecret }}
 {{- $existingData := dict }}
-{{- $existing := lookup "v1" "Secret" .Release.Namespace "straiker-postgres-secret" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "postgres-secret" }}
 {{- if $existing }}
   {{- $existingData = $existing.data }}
 {{- end }}
 apiVersion: v1
 kind: Secret
 metadata:
-  name: straiker-postgres-secret
+  name: postgres-secret
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/resource-policy: keep
@@ -36,7 +36,7 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: straiker-postgres-initdb
+  name: postgres-initdb
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
@@ -65,7 +65,7 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  name: straiker-postgres
+  name: postgres
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
@@ -73,7 +73,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: straiker-postgres
+    app: postgres
   ports:
     - name: postgres
       port: 5432
@@ -82,7 +82,7 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: straiker-postgres
+  name: postgres
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/resource-policy: keep
@@ -90,15 +90,15 @@ metadata:
     {{- include "infra.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres
 spec:
-  serviceName: straiker-postgres
+  serviceName: postgres
   replicas: 1
   selector:
     matchLabels:
-      app: straiker-postgres
+      app: postgres
   template:
     metadata:
       labels:
-        app: straiker-postgres
+        app: postgres
     spec:
       nodeSelector:
         {{- toYaml .Values.sharedNodeSelector | nindent 8 }}
@@ -152,7 +152,7 @@ spec:
       volumes:
         - name: initdb
           configMap:
-            name: straiker-postgres-initdb
+            name: postgres-initdb
             defaultMode: 0755
   volumeClaimTemplates:
     - metadata:
@@ -167,7 +167,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: straiker-postgres-sync-passwords
+  name: postgres-sync-passwords
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
@@ -180,7 +180,7 @@ spec:
   template:
     metadata:
       labels:
-        app: straiker-postgres-sync-passwords
+        app: postgres-sync-passwords
     spec:
       restartPolicy: OnFailure
       nodeSelector:
@@ -192,11 +192,11 @@ spec:
             - sh
             - -c
             - |
-              until pg_isready -h straiker-postgres.{{ .Release.Namespace }}.svc.cluster.local -U "$POSTGRES_USER"; do
+              until pg_isready -h postgres.{{ .Release.Namespace }}.svc.cluster.local -U "$POSTGRES_USER"; do
                 echo "waiting for postgres..."; sleep 3
               done
               psql -v ON_ERROR_STOP=1 \
-                -h straiker-postgres.{{ .Release.Namespace }}.svc.cluster.local \
+                -h postgres.{{ .Release.Namespace }}.svc.cluster.local \
                 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<-SQL
                   SET password_encryption = 'scram-sha-256';
                   ALTER USER "$POSTGRES_USER" PASSWORD '$POSTGRES_PASSWORD';
@@ -210,7 +210,7 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: straiker-postgres-secret
+                  name: postgres-secret
                   key: POSTGRES_PASSWORD_{{ $primary.name | upper | replace "-" "_" }}
             - name: POSTGRES_USER
               value: {{ $primary.user | quote }}
@@ -219,7 +219,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: straiker-postgres-secret
+                  name: postgres-secret
                   key: POSTGRES_PASSWORD_{{ $primary.name | upper | replace "-" "_" }}
             {{- range $db := $secondary }}
             {{- $name := $db.name | upper | replace "-" "_" }}
@@ -228,7 +228,7 @@ spec:
             - name: POSTGRES_PASSWORD_{{ $name }}
               valueFrom:
                 secretKeyRef:
-                  name: straiker-postgres-secret
+                  name: postgres-secret
                   key: POSTGRES_PASSWORD_{{ $name }}
             {{- end }}
 {{- end }}

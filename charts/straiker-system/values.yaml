@@ -369,12 +369,12 @@ postgres:
       cpu: 2
       memory: 4Gi
 
-# Redis (actually Valkey — see readinessProbe/livenessProbe in redis.yaml —
-# a Redis-protocol-compatible fork, mirrored by charts/straiker-artifact under
+# Valkey (a Redis-protocol-compatible fork — see readinessProbe/
+# livenessProbe in redis.yaml, mirrored by charts/straiker-artifact under
 # this exact repository/tag). Enabled by default: unlike postgres, it needs no
 # per-install config (no databases/users to provision), so there's no reason
 # to make it opt-in.
-redis:
+valkey:
   image:
     repository: valkey/valkey
     tag: "8-alpine"

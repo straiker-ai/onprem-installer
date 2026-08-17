@@ -8,7 +8,7 @@ description: >
   straiker-artifact chart for how container images and model artifacts reach
   this cluster's ECR/S3 mirror before this chart's workloads pull from it.
 type: application
-version: 1.1.9
+version: 1.1.10
 appVersion: "1.0.0"
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/straiker-ai/onprem

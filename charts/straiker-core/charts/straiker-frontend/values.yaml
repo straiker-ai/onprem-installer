@@ -94,10 +94,10 @@ frontend:
     user: platform
     sslMode: disable
     # Matches charts/straiker-system's postgres.yaml Secret exactly
-    # (straiker-postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
+    # (postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
     # separate operator-supplied secret.
     passwordSecret:
-      name: straiker-postgres-secret
+      name: postgres-secret
       key: POSTGRES_PASSWORD_PLATFORM
 
   # Liquibase schema migration (docker-compose's "migrate" service) —

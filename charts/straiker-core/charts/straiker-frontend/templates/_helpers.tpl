@@ -53,7 +53,7 @@ must match for the bundled local IdP's admin login to work out of the box. */}}
 {{- end }}
 
 {{- define "frontend.dbPasswordSecretName" -}}
-{{- .Values.frontend.db.passwordSecret.name | default "straiker-postgres-secret" -}}
+{{- .Values.frontend.db.passwordSecret.name | default "postgres-secret" -}}
 {{- end }}
 
 {{- define "frontend.dbPasswordSecretKey" -}}
@@ -65,7 +65,7 @@ must match for the bundled local IdP's admin login to work out of the box. */}}
 {{- if .Values.frontend.db.host -}}
 {{- .Values.frontend.db.host -}}
 {{- else -}}
-{{- printf "straiker-postgres.%s.svc.cluster.local" .Values.global.infraNamespace -}}
+{{- printf "postgres.%s.svc.cluster.local" .Values.global.infraNamespace -}}
 {{- end -}}
 {{- end }}
 
