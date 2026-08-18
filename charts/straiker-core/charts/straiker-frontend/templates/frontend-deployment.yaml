@@ -138,6 +138,12 @@ spec:
             {{- if .Values.frontend.irisControlPlaneAdminEndpoint }}
             - name: IRIS_CONTROL_PLANE_ADMIN_ENDPOINT
               value: {{ .Values.frontend.irisControlPlaneAdminEndpoint | quote }}
+            # Distinct from the in-cluster endpoint above -- this one is handed
+            # directly to the customer's browser for the live-assessment SSE
+            # stream (frontend's stream.remote.ts), which can't resolve
+            # *.svc.cluster.local. See _helpers.tpl's "frontend.irisPublicOrigin".
+            - name: IRIS_CONTROL_PLANE_PUBLIC_ENDPOINT
+              value: {{ include "frontend.irisPublicOrigin" . | quote }}
             {{- end }}
             {{- if .Values.frontend.irisControlPlaneAdminApiKey.secretKey }}
             - name: IRIS_CONTROL_PLANE_ADMIN_API_KEY

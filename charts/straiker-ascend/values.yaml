@@ -23,11 +23,7 @@ edgeHttpsPort: 8443
 # straiker-core/frontend has).
 image:
   repository: straiker/iris
-  # Known future tag -- confirmed with the iris team, not yet built/pushed
-  # as of this chart's authoring. Confirm this has actually landed at
-  # us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
-  # before relying on it (same caveat as before, tag name now finalized).
-  tag: onprem-v2026.8.13
+  tag: onprem-v2026.8.13.1
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -78,6 +74,10 @@ db:
 # assumed, confirmed against onprem/Dockerfile) before any ascend pods start.
 dbMigrate:
   enabled: true
+  # Leave empty so the pre-install hook job uses namespace's default ServiceAccount.
+  # This avoids a hook-ordering race where the chart's dedicated ServiceAccount
+  # may not exist yet when Helm runs pre-install hooks.
+  serviceAccountName: ""
   backoffLimit: 2
   activeDeadlineSeconds: 300
   ttlSecondsAfterFinished: 3600
@@ -107,9 +107,14 @@ bifrost:
 # straiker-system Redpanda Connect (Benthos), same as charts/straiker-defend.
 archive:
   enabled: true
-  # Any string works -- the shared benthos pipeline routes dynamically by
-  # this field's own value (see charts/straiker-system's benthos.yaml), not
-  # a fixed set of known streams.
+  # The shared benthos pipeline (charts/straiker-system's benthos.yaml)
+  # routes dynamically by this field's own value (index: '${! this.stream }'),
+  # not a fixed set of known streams -- but it must still match the "iris*"
+  # OpenSearch index pattern straiker-frontend's own iris-turns.ts queries
+  # against. Only load-bearing as of iris/common/analyzer/analysis_worker.py
+  # actually stamping this into every archive record's "stream" field --
+  # before that fix, records had no "stream" field at all and silently
+  # landed nowhere queryable.
   stream: iris
   endpoint: ""
 
@@ -119,12 +124,23 @@ archive:
 foundationEndpoint: ""
 
 # ── Argus detection endpoint — straiker-defend's Service, in this same
-# namespace, once that product is also selected. apiKey is the new
-# service-to-service key argus's own /api/v1/detect route accepts with no
-# real per-app tenant record (settings.argus_service_api_key on argus's side)
-# -- both charts must reference the same "ARGUS_SERVICE_API_KEY" key in
-# straiker-secrets, see templates/secrets.yaml.
+# namespace. install-straiker.sh now installs straiker-defend unconditionally
+# (regardless of product selection), since iris depends on Argus's own
+# /api/v1/detect directly for several detection categories -- so this should
+# be reachable in every real install. apiKey is the service-to-service key
+# argus's own /api/v1/detect route accepts with no real per-app tenant record
+# (settings.argus_service_api_key on argus's side) -- both charts must
+# reference the same "ARGUS_SERVICE_API_KEY" key in straiker-secrets, see
+# templates/secrets.yaml.
+#
+# enabled: manual safety valve, not the expected normal state -- flip false
+# only if straiker-defend is deliberately not deployed in this cluster (e.g.
+# a manually-assembled install that skips install-straiker.sh) or is down for
+# an extended maintenance window. When false, iris's own ArgusDetection.run()
+# skips the network call entirely instead of retrying a connection that can't
+# succeed (~12s/turn x up to 8 turns wasted per amt_attack_* probe otherwise).
 argus:
+  enabled: true
   endpoint: ""
 
 # ── Capture-callback target for the DataPoint/data-exfiltration probe

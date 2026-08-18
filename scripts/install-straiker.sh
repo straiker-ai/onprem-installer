@@ -90,9 +90,12 @@ INFERENCE_SERVICE_ACCOUNT="straiker-inference"
 # but high enough that one slow cold-start doesn't serialize every model.
 INFERENCE_CONCURRENCY=4
 
-# Argus detection engine (charts/straiker-defend) — Straiker's "Defend"
-# product. Installed only when "defend" is in PRODUCTS_OPT, after
-# straiker-inference and straiker-system.
+# Argus detection engine (charts/straiker-defend) — backs Straiker's "Defend"
+# product, but always installed regardless of PRODUCTS_OPT: charts/straiker-
+# ascend's own probe-worker/recon-worker call Argus's /api/v1/detect directly
+# for several detection categories (amt_attack_* and others), so an Ascend-
+# only install still needs it running. Runs after straiker-inference and
+# straiker-system.
 DEFEND_RELEASE="straiker-defend"
 DEFEND_CHART_NAME="straiker-defend"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
@@ -102,6 +105,7 @@ DEFEND_SERVICE_ACCOUNT="straiker-defend"
 # straiker-inference, straiker-system, and straiker-core.
 ASCEND_RELEASE="straiker-ascend"
 ASCEND_CHART_NAME="straiker-ascend"
+ASCEND_SERVICE_ACCOUNT="straiker-ascend"
 
 # Artifact broker's Bifrost-trial-config endpoint (AI_PROVIDER_MODE=trial-key
 # below) -- fixed, same for every install. Returns {"virtual_key": "...",
@@ -595,10 +599,13 @@ Installer phases:
                              model's GPU-capacity problem doesn't block the others. Skipped
                              entirely if no selected product needs a model.
  12) straiker-defend      - install/upgrade release 'straiker-defend' (argus + its
-                             settings-sync daemon — charts/straiker-defend). Only when
-                             'defend' is selected. Runs after straiker-inference (needs its
-                             per-model Services) and straiker-system (needs its Redis/
-                             OpenSearch/Benthos and shared NodePool).
+                             settings-sync daemon — charts/straiker-defend). Always runs,
+                             regardless of product selection — straiker-ascend's iris calls
+                             Argus's /api/v1/detect directly for several detection
+                             categories, so Ascend-only installs need this too. Runs after
+                             straiker-inference (needs its per-model Services) and
+                             straiker-system (needs its Redis/OpenSearch/Benthos and shared
+                             NodePool).
  13) straiker-ascend      - install/upgrade release 'straiker-ascend' (iris automated
                              red-teaming engine — charts/straiker-ascend: control-plane,
                              probe-worker, probe-shadow, recon-worker, report-worker, and a
@@ -610,7 +617,8 @@ Installer phases:
  14) straiker-edge        - install/upgrade release 'straiker-edge' (thin TLS edge —
                              charts/straiker-edge). Always runs: routes app.<appDomain>
                              to straiker-core's frontend and defend.<appDomain> to
-                             straiker-defend (502s until that's installed, if ever).
+                             straiker-defend (502s until that phase has run, since
+                             straiker-defend is now always installed too).
 
 Notes:
   - If a phase preflight is not met, the installer marks that phase BLOCKED and exits cleanly.
@@ -1934,6 +1942,13 @@ phase_straiker_system() {
   require_file_inputs "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"
   ensure_k8s_ready_for_charts || return
 
+  # charts/straiker-ascend runs db-migrate as a pre-install/pre-upgrade hook.
+  # Hooks run before plain resources, so ensure this SA exists first; otherwise
+  # the hook Job can fail with "serviceaccount ... not found" before the chart's
+  # own ServiceAccount manifest is applied.
+  kubectl create serviceaccount "${ASCEND_SERVICE_ACCOUNT}" \
+    -n "${INFRA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
   helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
@@ -2017,16 +2032,16 @@ phase_straiker_system() {
     cmd+=(--set "postgres.storage.storageClassName=${resolved_storage_class}")
   fi
 
-  # Product -> NodePool mapping: Ascend uses karpenter.iris, Defend uses
-  # karpenter.argus. Both are non-null (enabled) by default in the chart's own
-  # values.yaml, so an unselected product must be explicitly nulled to skip
-  # provisioning its NodePool. Shared system services (opensearch/postgres/redis)
-  # aren't gated by product selection at all.
+  # Product -> NodePool mapping: Ascend uses karpenter.iris. karpenter.argus
+  # is NOT gated by product selection — straiker-defend is always installed
+  # (see phase_straiker_defend), since Ascend's own iris depends on Argus's
+  # /api/v1/detect directly, regardless of whether 'defend' was selected.
+  # Both are non-null (enabled) by default in the chart's own values.yaml, so
+  # an unselected product must be explicitly nulled to skip provisioning its
+  # NodePool. Shared system services (opensearch/postgres/redis) aren't
+  # gated by product selection at all.
   if [[ ",${PRODUCTS_OPT}," != *",ascend,"* ]]; then
     cmd+=(--set "karpenter.iris=null")
-  fi
-  if [[ ",${PRODUCTS_OPT}," != *",defend,"* ]]; then
-    cmd+=(--set "karpenter.argus=null")
   fi
 
   local values_file
@@ -2232,12 +2247,9 @@ phase_straiker_core() {
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
 
-  # Only set when 'defend' is actually selected — straiker-defend's Service
-  # won't exist otherwise, and the chart already omits this env var entirely
-  # when unset rather than pointing at a URL that resolves to nothing.
-  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
-  fi
+  # Unconditional — straiker-defend is always installed now (see
+  # phase_straiker_defend), regardless of product selection.
+  cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
 
   # Same reasoning for 'ascend' — charts/straiker-ascend's control-plane
   # Service (frontend calls this to start/pause/stream assessment runs).
@@ -2432,18 +2444,16 @@ phase_straiker_inference() {
   fi
 }
 
-# Argus (Straiker's "Defend" product) — only when "defend" is selected.
-# Depends on straiker-system (Redis/OpenSearch/Benthos, shared NodePool) and
-# straiker-inference's per-model releases (SYS__LLM_ENDPOINTS__* targets)
-# already being up; checks straiker-system's live release status the same way
+# Argus — always installed, regardless of product selection: charts/
+# straiker-ascend's own iris calls Argus's /api/v1/detect directly for
+# several detection categories, so an Ascend-only install still needs this
+# running (not just customers who selected Defend as a product). Depends on
+# straiker-system (Redis/OpenSearch/Benthos, shared NodePool) and straiker-
+# inference's per-model releases (SYS__LLM_ENDPOINTS__* targets) already
+# being up; checks straiker-system's live release status the same way
 # phase_straiker_core does, since a phase that merely ran earlier isn't proof
 # it's still healthy.
 phase_straiker_defend() {
-  if [[ ",${PRODUCTS_OPT}," != *",defend,"* ]]; then
-    log "'defend' not selected — skipping straiker-defend."
-    return
-  fi
-
   require_command helm
   require_command kubectl
 
@@ -2624,19 +2634,18 @@ show_access_info() {
   # per-application credential (seeded into the customer's own tenant via
   # settings-sync), so there's no value the installer itself could fill in
   # here; add it to /etc/hosts the same way as app_host above if you want to
-  # actually run this.
-  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    local defend_addr
-    defend_addr="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null | grep -o 'defend\.[^ {]*' | head -1 || true)"
-    if [[ -n "${defend_addr}" ]]; then
-      log ""
-      log "Smoke test the Defend API (needs one of your application's API keys):"
-      log "  curl -sk -X POST https://${defend_addr}/api/v1/detect \\"
-      log "    -H \"Authorization: Bearer <your-application-api-key>\" \\"
-      log "    -H \"Content-Type: application/json\" \\"
-      log "    -H \"Straiker-Debug: true\" \\"
-      log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
-    fi
+  # actually run this. Unconditional — straiker-defend (Argus) is always
+  # installed now, regardless of product selection.
+  local defend_addr
+  defend_addr="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null | grep -o 'defend\.[^ {]*' | head -1 || true)"
+  if [[ -n "${defend_addr}" ]]; then
+    log ""
+    log "Smoke test the Defend API (needs one of your application's API keys):"
+    log "  curl -sk -X POST https://${defend_addr}/api/v1/detect \\"
+    log "    -H \"Authorization: Bearer <your-application-api-key>\" \\"
+    log "    -H \"Content-Type: application/json\" \\"
+    log "    -H \"Straiker-Debug: true\" \\"
+    log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
   fi
 }
 

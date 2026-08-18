@@ -53,7 +53,7 @@ frontend:
     # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
     # since it's Straiker's own component, not third-party.
     repository: straiker/frontend
-    tag: onprem-v2026.8.2.1
+    tag: onprem-v2026.8.2
     pullPolicy: IfNotPresent
 
   imagePullSecrets: []
@@ -109,7 +109,7 @@ frontend:
     enabled: true
     image:
       repository: straiker/frontend-migrate
-      tag: onprem-v2026.8.2.1
+      tag: onprem-v2026.8.2
     backoffLimit: 2
     activeDeadlineSeconds: 300
     ttlSecondsAfterFinished: 3600
@@ -181,6 +181,15 @@ frontend:
   # resolves to nothing.
   argusEndpoint: ""
   irisControlPlaneAdminEndpoint: ""
+  # Browser-reachable origin for the live-assessment SSE stream (the customer's
+  # own browser connects directly to charts/straiker-ascend's control-plane,
+  # NOT proxied through this frontend server) — see _helpers.tpl's
+  # "frontend.irisPublicOrigin" for the default (charts/straiker-edge's own
+  # routed "ascend" host). Empty here means "use the default", not "omit the
+  # env var" — unlike irisControlPlaneAdminEndpoint above, this one is always
+  # emitted since it's a plain string template, not an in-cluster DNS lookup
+  # that can point at nothing.
+  irisControlPlanePublicEndpoint: ""
   # Service-to-service auth — both read from an operator-supplied secret
   # (frontend.secretRef's straiker-secrets by default). Leave secretKey empty
   # to omit the env var entirely (e.g. when argus/iris aren't deployed yet).

@@ -149,7 +149,8 @@ read that chart's values directly -- independent top-level charts).
 
 {{/*
 Argus detection endpoint — charts/straiker-defend's Service, in this same
-namespace, once that product is also selected.
+namespace. install-straiker.sh installs straiker-defend unconditionally now
+(regardless of product selection), since iris depends on it directly.
 */}}
 {{- define "ascend.argusEndpoint" -}}
 {{- if .Values.argus.endpoint -}}

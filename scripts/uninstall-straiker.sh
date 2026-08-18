@@ -110,8 +110,11 @@ Usage:
 Options:
   --plan                         Show uninstaller phases and exit.
   --status                       Show state from ~/.straiker/install.json and exit.
-  --phase <name>                 Run only one phase.
-  --from-phase <name>            Run from phase through the end.
+  --phase <name>                 Run only one phase. Also accepts a managed release name
+                                  (for example: straiker-ascend), treated as
+                                  --phase helm-uninstall --release <name>.
+  --from-phase <name>            Run from phase through the end. Also accepts a managed
+                                  release name as an alias for helm-uninstall.
   --rerun-phase                  Re-run selected phases even if already marked done.
   --namespace <name>             Namespace to uninstall from (default: straiker).
   --release <name>               Uninstall only this one release, instead of every Straiker
@@ -298,6 +301,17 @@ is_valid_phase() {
   return 1
 }
 
+is_valid_release() {
+  local wanted=$1
+  local release
+  for release in "${ALL_RELEASES[@]}"; do
+    if [[ "${release}" == "${wanted}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 build_phase_list() {
   RUN_PHASES=()
   local phase
@@ -305,6 +319,24 @@ build_phase_list() {
   if [[ -n "${SELECT_PHASE}" && -n "${START_PHASE}" ]]; then
     echo "ERROR: --phase and --from-phase cannot be used together." >&2
     exit 1
+  fi
+
+  if [[ -n "${SELECT_PHASE}" ]] && is_valid_release "${SELECT_PHASE}"; then
+    if [[ -n "${RELEASE_NAME}" && "${RELEASE_NAME}" != "${SELECT_PHASE}" ]]; then
+      echo "ERROR: --phase '${SELECT_PHASE}' conflicts with --release '${RELEASE_NAME}'." >&2
+      exit 1
+    fi
+    RELEASE_NAME="${SELECT_PHASE}"
+    SELECT_PHASE="helm-uninstall"
+  fi
+
+  if [[ -n "${START_PHASE}" ]] && is_valid_release "${START_PHASE}"; then
+    if [[ -n "${RELEASE_NAME}" && "${RELEASE_NAME}" != "${START_PHASE}" ]]; then
+      echo "ERROR: --from-phase '${START_PHASE}' conflicts with --release '${RELEASE_NAME}'." >&2
+      exit 1
+    fi
+    RELEASE_NAME="${START_PHASE}"
+    START_PHASE="helm-uninstall"
   fi
 
   if [[ -n "${SELECT_PHASE}" ]]; then

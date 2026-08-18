@@ -95,6 +95,21 @@ routed host/port; override if reached differently (own ingress, etc). */}}
 {{- .Values.frontend.origin | default (printf "https://app.%s:%v" .Values.global.appDomain .Values.edgeHttpsPort) -}}
 {{- end }}
 
+{{/*
+Browser-reachable origin for charts/straiker-ascend's control-plane -- NOT the
+same as IRIS_CONTROL_PLANE_ADMIN_ENDPOINT (that one is the in-cluster Service
+DNS name, only reachable from other pods, set via irisControlPlaneAdminEndpoint
+below). The live-assessment SSE stream is opened directly by the customer's own
+browser (see frontend's stream.remote.ts), which can't resolve *.svc.cluster.local
+-- it needs charts/straiker-edge's own routed "ascend" host instead. Same
+computation as charts/straiker-ascend's own "ascend.externalUrl" helper (can't
+read that chart's values directly -- independent top-level charts), matching
+global.appDomain/edgeHttpsPort exactly.
+*/}}
+{{- define "frontend.irisPublicOrigin" -}}
+{{- .Values.frontend.irisControlPlanePublicEndpoint | default (printf "https://ascend.%s:%v" .Values.global.appDomain .Values.edgeHttpsPort) -}}
+{{- end }}
+
 {{/* ── dex (bundled local OIDC provider, builtin password-DB) ─────────────
 Proxied through the frontend app itself (/dex/*) rather than published on its
 own host. */}}
