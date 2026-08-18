@@ -572,9 +572,8 @@ Installer phases:
                              value, Bearer-prefixed for argus since it sends the header
                              verbatim) for argus's settings-sync calls into straiker-core's
                              frontend, and VLLM_API_KEY / SYS__INFERENCE_API_KEY (same value)
-                             for argus calling straiker-inference. All three charts already
-                             hardcode this same Secret name; previously nothing ever created
-                             it; each chart's own secrets.yaml is documentation-only.
+                             for argus calling straiker-inference. All three charts read
+                             this same Secret name; this phase is what creates it.
   9) ai-provider-secrets  - only when 'ascend' is selected. Writes whichever provider
                              credential(s) AI_PROVIDER_MODE needs into 'straiker-secrets'
                              (own-keys: OpenAI/Anthropic/xAI; bedrock: static AWS
@@ -2118,17 +2117,12 @@ patch_shared_secret() {
 }
 
 # Writes whichever provider-specific keys AI_PROVIDER_MODE needs into
-# straiker-secrets, using the AI_OPENAI_KEY/AI_ANTHROPIC_KEY/AI_XAI_KEY/
-# AI_BEDROCK_ACCESS_KEY/AI_BEDROCK_SECRET_KEY/AI_TRIAL_VIRTUAL_KEY values
-# capture_install_config already collected interactively (see its own
-# comment for why the actual prompting happens there, not here). This phase
-# just does the kubectl write, once the cluster/Secret are guaranteed ready
-# — nothing here is interactive. Only relevant when 'ascend' is selected.
-# Runs after shared-secrets (needs the base Secret to already exist) and
-# before straiker-core/straiker-ascend, since bifrost/ascend's pods only
-# read secretKeyRef env vars at container start — if you're re-running this
-# after already deploying either release (e.g. switching modes later), roll
-# the affected workloads afterward:
+# straiker-secrets, using values capture_install_config already collected
+# interactively. Only relevant when 'ascend' is selected. Runs after
+# shared-secrets and before straiker-core/straiker-ascend, since bifrost/
+# ascend's pods only read secretKeyRef env vars at container start — if
+# you're re-running this after already deploying either release, roll the
+# affected workloads afterward:
 #   kubectl rollout restart deployment/bifrost -n <namespace>
 #   kubectl rollout restart deployment -n <namespace> -l app.kubernetes.io/name=straiker-ascend
 phase_ai_provider_secrets() {
@@ -2240,18 +2234,10 @@ phase_straiker_core() {
   # somewhere else.
   cmd+=(--set "global.infraNamespace=${INFRA_NAMESPACE}")
 
-  # phase_shared_secrets (runs earlier) creates this Secret/key — wire the
-  # chart's own (empty-by-default) references at it so argus's settings-sync
-  # calls into /internal_api/* actually authenticate. straiker-core is an
-  # umbrella chart with straiker-frontend as a subchart (see its Chart.yaml
-  # dependencies) — overriding a subchart's own values from the parent
-  # release needs the "<subchart-name>." prefix, unlike global.* above
-  # (which every subchart picks up automatically via Helm's global
-  # mechanism); a bare "frontend.internalApiKey...=" here would silently
-  # create an unused top-level key on the parent instead of reaching the
-  # subchart's values at all. Unconditional, unlike argusEndpoint below: the
-  # key exists regardless of which products are selected, so there's no
-  # reason to omit it.
+  # straiker-frontend is a subchart of straiker-core — overriding its values
+  # from the parent release needs the "<subchart-name>." prefix (unlike
+  # global.* above); a bare "frontend.internalApiKey...=" would silently
+  # create an unused top-level key instead.
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
 
@@ -2913,20 +2899,11 @@ EOF
   set_metadata "straiker_customer_key" "${STRAIKER_CUSTOMER_KEY}"
 
   # AI provider mode + credential(s) for Ascend's recon-agent — only asked
-  # when 'ascend' is selected. See AI_PROVIDER_MODE's declaration up top for
-  # why mode selection follows PRODUCTS_OPT's "explicit flag overrides
-  # persisted value" pattern rather than CLOUD_PROVIDER/PROVISION_STRATEGY's
-  # hard first-run-only lock. Unlike those two, the actual credential VALUE
-  # is also collected right here (not deferred to the later
-  # 'ai-provider-secrets' phase) -- picking a mode should have a visible next
-  # step immediately, not silence until a much-later phase happens to run.
-  # phase_ai_provider_secrets just writes whatever got captured here, once
-  # the cluster/Secret actually exist. Best-effort checks the live Secret
-  # first (INFRA_NAMESPACE is already resolved by this point) to avoid
-  # re-prompting on a later run once a key's already stored; if the cluster
-  # isn't reachable yet (e.g. a from-scratch --install-eks run), that check
-  # just fails silently via secret_key_exists and this prompts anyway, same
-  # as a first-ever run.
+  # when 'ascend' is selected. The credential value is collected here (not
+  # deferred to the later 'ai-provider-secrets' phase) so picking a mode has
+  # an immediate next step; that phase just writes what got captured here
+  # once the cluster/Secret exist. Checks the live Secret first to avoid
+  # re-prompting once a key's already stored.
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     if [[ -z "${AI_PROVIDER_MODE}" ]]; then
       AI_PROVIDER_MODE="$(get_metadata "ai_provider_mode")"
