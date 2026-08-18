@@ -7,7 +7,7 @@ description: >
   templates/ for the same reason straiker-system's postgres.databases became a
   list: isolate one component's config/templates from its siblings.
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "1.0.0"
 home: https://github.com/straiker-ai/onprem
 sources:

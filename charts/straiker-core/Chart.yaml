@@ -12,7 +12,7 @@ description: >
   straiker-system/straiker-artifact). Other products (Ascend/Defend/...) will
   land as their own separate top-level charts.
 type: application
-version: 0.2.4
+version: 0.2.5
 appVersion: "1.0.0"
 home: https://github.com/straiker-ai/onprem
 sources:
@@ -27,7 +27,7 @@ keywords:
   - llm-gateway
 dependencies:
   - name: straiker-bifrost
-    version: "0.1.1"
+    version: "0.1.2"
     condition: straiker-bifrost.enabled
   - name: straiker-frontend
     version: "0.1.0"

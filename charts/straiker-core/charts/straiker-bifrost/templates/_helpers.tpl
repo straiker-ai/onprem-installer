@@ -19,6 +19,6 @@ values.yaml's nodeSelector field. */}}
 
 {{- define "bifrost.labels" -}}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
-app.kubernetes.io/name: bifrost
+app.kubernetes.io/name: straiker-bifrost
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}

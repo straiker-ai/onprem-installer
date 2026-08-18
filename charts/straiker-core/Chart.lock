@@ -1,9 +1,9 @@
 dependencies:
 - name: straiker-bifrost
   repository: ""
-  version: 0.1.0
+  version: 0.1.2
 - name: straiker-frontend
   repository: ""
   version: 0.1.0
-digest: sha256:f189687f7ca2da1401c833f2eedf900d864a18442ded400099d309888dd964e3
-generated: "2026-08-14T09:54:00.12104-07:00"
+digest: sha256:fa2a7f8d4e91a5d98ade5beb3842c4136c6fb8533340d0c7175bbf704ac75033
+generated: "2026-08-18T00:25:23.402905-07:00"

@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bifrost
+  name: straiker-bifrost
   namespace: {{ include "bifrost.namespace" . }}
   labels:
     {{- include "bifrost.labels" . | nindent 4 }}
@@ -11,11 +11,11 @@ spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: bifrost
+      app: straiker-bifrost
   template:
     metadata:
       labels:
-        app: bifrost
+        app: straiker-bifrost
       annotations:
         # Roll pods when the config changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
@@ -25,16 +25,12 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: bifrost
+        - name: straiker-bifrost
           image: {{ include "bifrost.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # No command/entrypoint override — this image's actual ENTRYPOINT
-          # (/app/docker-entrypoint.sh -> /app/main) is configured entirely via
-          # env vars (APP_PORT/APP_HOST/...), not CLI flags. An earlier
-          # version of this chart assumed a "/app/bifrost -host ... -port ..."
-          # CLI, which doesn't exist in this image (verified via `crane config`
-          # against the actual published image) and crash-looped with
-          # "stat /app/bifrost: no such file or directory".
+          # No command/entrypoint override — this image's ENTRYPOINT is
+          # configured entirely via env vars (APP_PORT/APP_HOST/...), not
+          # CLI flags.
           ports:
             - containerPort: {{ .Values.service.port }}
               name: http

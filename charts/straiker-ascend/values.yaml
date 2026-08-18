@@ -94,17 +94,12 @@ redis:
 
 # ── Bifrost LLM gateway override ──────────────────────────────────────────
 # Empty (default): iris calls its own in-cluster Bifrost (charts/straiker-
-# core/charts/straiker-bifrost) at bifrost-service:8090 -- whichever
-# providers that chart's own config.json has configured (bring-your-own
-# OpenAI/Anthropic/xAI keys, or AWS Bedrock creds) are invisible to iris,
-# it's the same in-cluster call either way.
+# core/charts/straiker-bifrost) at straiker-bifrost-service:8090, using
+# whichever providers that chart's own config.json has configured.
 #
-# Set baseUrl to route through a *different* Bifrost instead -- e.g. a
-# Straiker-hosted virtual-key gateway for PoC/trial use (matches onprem/
-# .env.onprem.example's "Mode 1" for the identical distinction in the local
-# docker-compose stack). BIFROST_API_KEY in straiker-secrets is the matching
-# virtual key for that case -- optional/unused for the default in-cluster
-# path, since that chart's own config.json has no virtual-key enforcement.
+# Set baseUrl to route through a different Bifrost instead — e.g. a
+# Straiker-hosted virtual-key gateway for PoC/trial use. BIFROST_API_KEY in
+# straiker-secrets is the matching virtual key for that case.
 bifrost:
   baseUrl: ""
 

@@ -11,7 +11,7 @@ description: >
   in-cluster-per-release ones, and the current inference-thanos service
   name (was a bare "thanos" guess in the old chart).
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "0.0.1"
 home: https://github.com/straiker-ai/onprem
 sources:

@@ -2,14 +2,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: bifrost-service
+  name: straiker-bifrost-service
   namespace: {{ include "bifrost.namespace" . }}
   labels:
     {{- include "bifrost.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   selector:
-    app: bifrost
+    app: straiker-bifrost
   ports:
     - name: http
       port: {{ .Values.service.port }}

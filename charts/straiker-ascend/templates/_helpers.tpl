@@ -9,7 +9,7 @@ override to route through a different Bifrost instead (e.g. a Straiker-
 hosted virtual-key gateway), see values.yaml's own comment.
 */}}
 {{- define "ascend.bifrostUrl" -}}
-{{- .Values.bifrost.baseUrl | default (printf "http://bifrost-service.%s.svc.cluster.local:8090/v1" (include "ascend.namespace" .)) -}}
+{{- .Values.bifrost.baseUrl | default (printf "http://straiker-bifrost-service.%s.svc.cluster.local:8090/v1" (include "ascend.namespace" .)) -}}
 {{- end }}
 
 {{/*
