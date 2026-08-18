@@ -80,16 +80,16 @@ imageMirror:
       tag: v0.27.0
       destRepository: straiker/vllm
     - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend
-      tag: onprem-v2026.8.2.1
+      tag: onprem-v2026.8.2
       destRepository: straiker/frontend
     - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend-migrate
-      tag: onprem-v2026.8.2.1
+      tag: onprem-v2026.8.2
       destRepository: straiker/frontend-migrate
     - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/argus
       tag: onprem-v2026.7.29
       destRepository: straiker/argus
     - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
-      tag: onprem-v2026.8.13
+      tag: onprem-v2026.8.13.1
       destRepository: straiker/iris
   image:
     repository: gcr.io/go-containerregistry/crane

@@ -21,7 +21,9 @@ spec:
         app: straiker-ascend-db-migrate
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- if .Values.dbMigrate.serviceAccountName }}
+      serviceAccountName: {{ .Values.dbMigrate.serviceAccountName }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
