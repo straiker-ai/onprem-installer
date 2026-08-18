@@ -18,15 +18,19 @@ under onprem-base/straiker/vllm (same /straiker/ prefix as frontend). */}}
 {{/*
 Image for the model-pull init container's cloud-storage sync — a small
 official CLI image, picked by cloud provider (no combined aws+gsutil image
-exists). Not mirrored through global.dockerRegistry since it's a third-party
-image pulled directly from its own public registry, same as upstream's own
-convention here.
+exists). On EKS, prefer the mirrored image in global.dockerRegistry when set;
+fall back to public ECR otherwise.
 */}}
 {{- define "straiker-inference.modelSyncImage" -}}
 {{- if eq .Values.cloudProvider "gke" -}}
 gcr.io/google.com/cloudsdktool/cloud-sdk:531.0.0-slim
 {{- else -}}
+{{- $registry := .Values.global.dockerRegistry -}}
+{{- if $registry -}}
+{{- printf "%s/aws-cli/aws-cli:2.24.24" ($registry | trimSuffix "/") -}}
+{{- else -}}
 public.ecr.aws/aws-cli/aws-cli:2.24.24
+{{- end -}}
 {{- end -}}
 {{- end }}
 

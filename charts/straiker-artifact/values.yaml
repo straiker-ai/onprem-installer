@@ -28,7 +28,13 @@ customerSku: "base"
 # endpoint, the same for every install. The mounted straiker-credential
 # file's api_key + customer_email are exchanged here for a short-lived
 # pull token (see image-mirror-job.yaml / model-sync-job.yaml).
-brokerUrl: "https://us-central1-prod-registry-447007.cloudfunctions.net/onprem-artifact-broker"
+brokerUrl: "https://2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws"
+# Source-side ECR registry (Straiker's own account) — the broker's assumed-role
+# credentials grant read access to this registry. Populated by the installer
+# from the broker's /whoami response or a known fixed value.
+sourceEcrRegistry: "631748089429.dkr.ecr.us-east-1.amazonaws.com"
+# AWS region for the source S3 models bucket (Straiker's account).
+sourceBucketRegion: "us-east-1"
 
 imageMirror:
   enabled: false
@@ -47,49 +53,55 @@ imageMirror:
   # (which just avoids attempting images we already know aren't granted), an
   # in-scope image failing to copy IS fatal — it fails the Job.
   images:
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/nvidia/k8s-device-plugin
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/nvidia/k8s-device-plugin
       tag: v0.17.0
       destRepository: nvidia/k8s-device-plugin
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/opensearchproject/opensearch
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/opensearchproject/opensearch
       tag: "3.6.0"
       destRepository: opensearchproject/opensearch
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/timberio/vector
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/timberio/vector
       tag: "0.55.0-distroless-libc"
       destRepository: timberio/vector
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/valkey/valkey
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/valkey/valkey
       tag: "8-alpine"
       destRepository: valkey/valkey
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/postgres
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/library/postgres
       tag: "16-alpine"
       destRepository: library/postgres
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/maximhq/bifrost
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/maximhq/bifrost
       tag: v1.6.7
       destRepository: maximhq/bifrost
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/dexidp/dex
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/dexidp/dex
       tag: v2.45.1
       destRepository: dexidp/dex
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/caddy
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/library/caddy
       tag: 2-alpine
       destRepository: library/caddy
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/redpandadata/connect
-      tag: 4.101.0
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/aws-cli/aws-cli 
+      tag: 2.24.24
+      destRepository: aws-cli/aws-cli
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/liquibase/liquibase
+      tag: "4.28"
+      destRepository: liquibase/liquibase
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/redpandadata/connect
+      tag: "4.101.0"
       destRepository: redpandadata/connect
     # Straiker's own apps — under onprem-base/straiker/* (an extra
     # segment vs the third-party images above) since it's not upstream.
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/vllm
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
       tag: v0.27.0
       destRepository: straiker/vllm
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend
-      tag: onprem-v2026.8.2.1
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
+      tag: onprem-v2026.8.2.6
       destRepository: straiker/frontend
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend-migrate
-      tag: onprem-v2026.8.2.1
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend-migrate
+      tag: onprem-v2026.8.2.6
       destRepository: straiker/frontend-migrate
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/argus
-      tag: onprem-v2026.7.29
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
+      tag: onprem-v2026.7.29.2
       destRepository: straiker/argus
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
-      tag: onprem-v2026.8.13
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
+      tag: onprem-v2026.8.13.3
       destRepository: straiker/iris
   image:
     repository: gcr.io/go-containerregistry/crane

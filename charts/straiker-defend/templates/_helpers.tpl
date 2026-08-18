@@ -21,33 +21,6 @@ every other chart in this repo.
 {{- end }}
 
 {{/*
-Image for the tokenizer-pull init container's cloud-storage sync — a small
-official CLI image, picked by cloud provider (no combined aws+gsutil image
-exists). Not mirrored through global.dockerRegistry since it's a third-party
-image pulled directly from its own public registry.
-*/}}
-{{- define "defend.modelSyncImage" -}}
-{{- if eq .Values.cloudProvider "gke" -}}
-gcr.io/google.com/cloudsdktool/cloud-sdk:531.0.0-slim
-{{- else -}}
-public.ecr.aws/aws-cli/aws-cli:2.24.24
-{{- end -}}
-{{- end }}
-
-{{/*
-Recursive sync command from a global.modelBucket subpath into a local dir.
-Usage: {{ include "defend.modelSyncCmd" (dict "root" . "src" "tokenizer/foo" "dst" "/tmp/tok") }}
-*/}}
-{{- define "defend.modelSyncCmd" -}}
-{{- $bucket := required "global.modelBucket is required" .root.Values.global.modelBucket -}}
-{{- if eq .root.Values.cloudProvider "gke" -}}
-gsutil -m rsync -r "{{ $bucket }}/{{ .src }}" "{{ .dst }}"
-{{- else -}}
-aws s3 sync --only-show-errors "{{ $bucket }}/{{ .src }}" "{{ .dst }}"
-{{- end -}}
-{{- end }}
-
-{{/*
 Redis — reuses charts/straiker-system's own instance (service "valkey", a
 Redis-protocol-compatible fork) in this same namespace, rather than
 deploying a second one.

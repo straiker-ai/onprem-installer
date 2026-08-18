@@ -10,6 +10,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export TF_REGISTRY_CLIENT_TIMEOUT="${TF_REGISTRY_CLIENT_TIMEOUT:-30}"
 export TF_PROVIDER_DOWNLOAD_RETRY="${TF_PROVIDER_DOWNLOAD_RETRY:-5}"
 
+# OpenTofu version installed by --install-tofu. Matches 1-bootstrap.sh.
+TOFU_VERSION="1.11.6"
+# Installation target — same as 1-bootstrap.sh, works on both CloudShell and
+# regular Linux environments without needing sudo.
+TOFU_INSTALL_DIR="${HOME}/.local/bin"
+TOFU_BIN="${TOFU_INSTALL_DIR}/tofu"
+
 STATE_DIR="${HOME}/.straiker"
 STATE_FILE="${STATE_DIR}/install.json"
 STATE_SECTION="install"
@@ -90,9 +97,12 @@ INFERENCE_SERVICE_ACCOUNT="straiker-inference"
 # but high enough that one slow cold-start doesn't serialize every model.
 INFERENCE_CONCURRENCY=4
 
-# Argus detection engine (charts/straiker-defend) — Straiker's "Defend"
-# product. Installed only when "defend" is in PRODUCTS_OPT, after
-# straiker-inference and straiker-system.
+# Argus detection engine (charts/straiker-defend) — backs Straiker's "Defend"
+# product, but always installed regardless of PRODUCTS_OPT: charts/straiker-
+# ascend's own probe-worker/recon-worker call Argus's /api/v1/detect directly
+# for several detection categories (amt_attack_* and others), so an Ascend-
+# only install still needs it running. Runs after straiker-inference and
+# straiker-system.
 DEFEND_RELEASE="straiker-defend"
 DEFEND_CHART_NAME="straiker-defend"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
@@ -102,15 +112,17 @@ DEFEND_SERVICE_ACCOUNT="straiker-defend"
 # straiker-inference, straiker-system, and straiker-core.
 ASCEND_RELEASE="straiker-ascend"
 ASCEND_CHART_NAME="straiker-ascend"
+ASCEND_SERVICE_ACCOUNT="straiker-ascend"
 
-# Artifact broker's Bifrost-trial-config endpoint (AI_PROVIDER_MODE=trial-key
-# below) -- fixed, same for every install. Returns {"virtual_key": "...",
-# "base_url": "..."} for the authenticated customer.
-ARTIFACT_BROKER_BIFROST_TRIAL_URL="https://us-central1-prod-registry-447007.cloudfunctions.net/onprem-artifact-broker/bifrost-trial"
-
-# Resolves the customer's own tier (base/pro) so detect_customer_sku doesn't
-# need it re-entered by hand.
-ARTIFACT_BROKER_WHOAMI_URL="https://us-central1-prod-registry-447007.cloudfunctions.net/onprem-artifact-broker/whoami"
+# Artifact broker Lambda Function URL — AWS counterpart to the former GCP Cloud
+# Function. Returns KEY=VALUE lines (eval-consumable AWS STS creds) from /token,
+# JSON from /bifrost-trial and /whoami. Fixed, same for every install.
+ARTIFACT_BROKER_BASE_URL="https://2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws"
+ARTIFACT_BROKER_BIFROST_TRIAL_URL="${ARTIFACT_BROKER_BASE_URL}/bifrost-trial"
+ARTIFACT_BROKER_WHOAMI_URL="${ARTIFACT_BROKER_BASE_URL}/whoami"
+# Default Bifrost base URL used when the broker's /bifrost-trial response does
+# not include a base_url (customer secret not yet seeded with one).
+DEFAULT_BIFROST_BASE_URL="https://bifrost.stage.straiker.ai/v1"
 
 # Thin TLS edge (charts/straiker-edge) — routes app.<appDomain> to
 # straiker-core's frontend and defend-api.<appDomain> to straiker-defend.
@@ -149,11 +161,12 @@ GCP_PROJECT_OPT="${GOOGLE_CLOUD_PROJECT:-}"
 PROVISION_STRATEGY="${PROVISION_STRATEGY:-min}"
 
 # How Ascend's recon-agent reaches an AI provider: own-keys (bring-your-own
-# OpenAI/Anthropic/xAI key(s)), bedrock (AWS Bedrock, static IAM user
-# credentials), or trial-key (a Straiker-hosted temporary virtual key,
+# OpenAI/Anthropic/xAI key(s)), bedrock (AWS Bedrock via Pod Identity — no
+# static keys), or trial-key (a Straiker-hosted temporary virtual key,
 # fetched automatically from the artifact broker). Only asked when 'ascend'
 # is selected. Unlike CLOUD_PROVIDER/PROVISION_STRATEGY, safe to change on a
-# later run via --ai-provider-mode — no Terraform state depends on it.
+# later run via --ai-provider-mode — Terraform will create/destroy the Bedrock
+# IAM role accordingly on the next aws-artifacts run.
 AI_PROVIDER_MODE="${AI_PROVIDER_MODE:-}"
 
 # Provider credential values, captured interactively right after
@@ -163,19 +176,21 @@ AI_PROVIDER_MODE="${AI_PROVIDER_MODE:-}"
 AI_OPENAI_KEY=""
 AI_ANTHROPIC_KEY=""
 AI_XAI_KEY=""
-AI_BEDROCK_ACCESS_KEY=""
-AI_BEDROCK_SECRET_KEY=""
-AI_BEDROCK_REGION=""
 AI_TRIAL_VIRTUAL_KEY=""
 # Fetched alongside AI_TRIAL_VIRTUAL_KEY from the same artifact-broker
 # response.
 AI_TRIAL_BIFROST_BASE_URL=""
+
+# ServiceAccount name this installer creates for bifrost — must match the
+# bifrost chart's own serviceAccountName value.
+BIFROST_SERVICE_ACCOUNT="straiker-bifrost"
 
 TF_PREFIX="s6r-onprem"
 CLUSTER_NAME=""
 INSTALL_EKS=false
 INSTALL_EKS_EXPLICIT=false
 PROVISION_STRATEGY_EXPLICIT=false
+INSTALL_TOFU=false
 AUTO_YES=false
 PLAN_ONLY=false
 STATUS_ONLY=false
@@ -218,6 +233,10 @@ Options:
   --rerun-phase                   Re-run selected phases even if already marked done.
   --install-eks                   Also provision an EKS cluster via Terraform (the AWS
                                    bootstrap phase runs regardless of this flag).
+  --install-tofu                  Download and install OpenTofu ${TOFU_VERSION} to
+                                   ~/.local/bin/tofu before running any phase that needs
+                                   it. No sudo required. Idempotent — skipped if the
+                                   correct version is already installed.
   --yes                           Skip the interactive resource-creation acknowledgement
                                    (for non-interactive/automated use).
   --cloud-provider <aws|gke>      Which cloud this install targets (default: aws). Determines
@@ -270,15 +289,16 @@ Options:
   --ai-provider-mode <own-keys|bedrock|trial-key>
                                    Only asked/used when 'ascend' is in --products. How Ascend's
                                    recon-agent reaches an AI provider: own-keys (bring your own
-                                   OpenAI/Anthropic/xAI key(s)), bedrock (AWS Bedrock — you'll be
-                                   shown the AWS CLI commands to set up IAM access), or trial-key
+                                   OpenAI/Anthropic/xAI key(s)), bedrock (AWS Bedrock via EKS Pod
+                                   Identity — installer creates the IAM role; AWS still requires
+                                   model entitlement for the selected Bedrock models), or trial-key
                                    (a Straiker-hosted temporary virtual key, up to 30 days,
                                    PoC/trial use only, fetched automatically — no separate key to
                                    hold). Unlike --cloud-provider/--provision-strategy, safe to
-                                   change on a later run — just pass this flag
-                                   again and re-run --phase ai-provider-secrets,straiker-core,
-                                   straiker-ascend --rerun-phase. If omitted, you'll be prompted
-                                   interactively the first time 'ascend' is selected.
+                                   change on a later run — just pass this flag again and re-run
+                                   --phase aws-artifacts,ai-provider-secrets,straiker-core
+                                   --rerun-phase. If omitted, you'll be prompted interactively
+                                   the first time 'ascend' is selected.
   --timeout <duration>            Helm wait timeout (default: 20m).
   -h, --help                      Show this help.
 EOF
@@ -299,9 +319,49 @@ log() {
 require_command() {
   local cmd=$1
   if ! command -v "${cmd}" >/dev/null 2>&1; then
+    # Auto-install tofu when --install-tofu was passed, rather than hard-exiting.
+    if [[ "${cmd}" == "tofu" && "${INSTALL_TOFU}" == true ]]; then
+      install_tofu
+      return
+    fi
     echo "ERROR: required command '${cmd}' is not installed or not on PATH." >&2
     exit 1
   fi
+}
+
+# Installs OpenTofu ${TOFU_VERSION} to ${TOFU_BIN} (no sudo required).
+# Matches the logic in 1-bootstrap.sh: arch-aware, idempotent, linux only.
+install_tofu() {
+  local current_version
+  current_version="$("${TOFU_BIN}" version -json 2>/dev/null \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["terraform_version"])' \
+    2>/dev/null || echo "none")"
+  if [[ "${current_version}" == "${TOFU_VERSION}" ]]; then
+    log "OpenTofu ${TOFU_VERSION} already installed at '${TOFU_BIN}'."
+    export PATH="${TOFU_INSTALL_DIR}:${PATH}"
+    return
+  fi
+
+  require_command curl
+  require_command unzip
+  require_command python3
+
+  local arch="amd64"
+  [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+
+  log "Installing OpenTofu ${TOFU_VERSION} (${arch}) to '${TOFU_BIN}'..."
+  mkdir -p "${TOFU_INSTALL_DIR}"
+  curl -fsSL \
+    "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${arch}.zip" \
+    -o /tmp/tofu.zip
+  unzip -oq /tmp/tofu.zip -d /tmp/tofu-extract
+  mv /tmp/tofu-extract/tofu "${TOFU_BIN}"
+  chmod +x "${TOFU_BIN}"
+  rm -rf /tmp/tofu.zip /tmp/tofu-extract
+
+  export PATH="${TOFU_INSTALL_DIR}:${PATH}"
+  log "OpenTofu installed: $(tofu version -json \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["terraform_version"])')"
 }
 
 # The broker identifies customers by a fixed <name>@straiker.ai header.
@@ -595,10 +655,13 @@ Installer phases:
                              model's GPU-capacity problem doesn't block the others. Skipped
                              entirely if no selected product needs a model.
  12) straiker-defend      - install/upgrade release 'straiker-defend' (argus + its
-                             settings-sync daemon — charts/straiker-defend). Only when
-                             'defend' is selected. Runs after straiker-inference (needs its
-                             per-model Services) and straiker-system (needs its Redis/
-                             OpenSearch/Benthos and shared NodePool).
+                             settings-sync daemon — charts/straiker-defend). Always runs,
+                             regardless of product selection — straiker-ascend's iris calls
+                             Argus's /api/v1/detect directly for several detection
+                             categories, so Ascend-only installs need this too. Runs after
+                             straiker-inference (needs its per-model Services) and
+                             straiker-system (needs its Redis/OpenSearch/Benthos and shared
+                             NodePool).
  13) straiker-ascend      - install/upgrade release 'straiker-ascend' (iris automated
                              red-teaming engine — charts/straiker-ascend: control-plane,
                              probe-worker, probe-shadow, recon-worker, report-worker, and a
@@ -610,7 +673,8 @@ Installer phases:
  14) straiker-edge        - install/upgrade release 'straiker-edge' (thin TLS edge —
                              charts/straiker-edge). Always runs: routes app.<appDomain>
                              to straiker-core's frontend and defend.<appDomain> to
-                             straiker-defend (502s until that's installed, if ever).
+                             straiker-defend (502s until that phase has run, since
+                             straiker-defend is now always installed too).
 
 Notes:
   - If a phase preflight is not met, the installer marks that phase BLOCKED and exits cleanly.
@@ -802,6 +866,10 @@ parse_args() {
       --install-eks)
         INSTALL_EKS=true
         INSTALL_EKS_EXPLICIT=true
+        shift
+        ;;
+      --install-tofu)
+        INSTALL_TOFU=true
         shift
         ;;
       --yes)
@@ -1636,18 +1704,22 @@ phase_aws_artifacts() {
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="namespace=${INFRA_NAMESPACE}" \
     -var="workload_namespace=${INFRA_NAMESPACE}" \
-    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]"
+    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]" \
+    -var="bedrock_mode=$([ "${AI_PROVIDER_MODE}" = "bedrock" ] && echo true || echo false)" \
+    -var="bifrost_service_account_name=${BIFROST_SERVICE_ACCOUNT}"
 
-  local models_bucket ecr_registry hauler_role_arn workload_role_arn
+  local models_bucket ecr_registry hauler_role_arn workload_role_arn bedrock_role_arn
   models_bucket="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw models_bucket_name)"
   ecr_registry="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw ecr_registry)"
   hauler_role_arn="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw hauler_role_arn)"
   workload_role_arn="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw workload_role_arn)"
+  bedrock_role_arn="$(tofu -chdir="${ARTIFACTS_DIR}" output -raw bedrock_role_arn 2>/dev/null || true)"
 
   set_metadata "models_bucket" "${models_bucket}"
   set_metadata "ecr_registry" "${ecr_registry}"
   set_metadata "hauler_role_arn" "${hauler_role_arn}"
   set_metadata "workload_role_arn" "${workload_role_arn}"
+  [[ -n "${bedrock_role_arn}" ]] && set_metadata "bedrock_role_arn" "${bedrock_role_arn}"
 }
 
 # GCP equivalent. Stores the Artifact Registry host under the SAME
@@ -2017,16 +2089,16 @@ phase_straiker_system() {
     cmd+=(--set "postgres.storage.storageClassName=${resolved_storage_class}")
   fi
 
-  # Product -> NodePool mapping: Ascend uses karpenter.iris, Defend uses
-  # karpenter.argus. Both are non-null (enabled) by default in the chart's own
-  # values.yaml, so an unselected product must be explicitly nulled to skip
-  # provisioning its NodePool. Shared system services (opensearch/postgres/redis)
-  # aren't gated by product selection at all.
+  # Product -> NodePool mapping: Ascend uses karpenter.iris. karpenter.argus
+  # is NOT gated by product selection — straiker-defend is always installed
+  # (see phase_straiker_defend), since Ascend's own iris depends on Argus's
+  # /api/v1/detect directly, regardless of whether 'defend' was selected.
+  # Both are non-null (enabled) by default in the chart's own values.yaml, so
+  # an unselected product must be explicitly nulled to skip provisioning its
+  # NodePool. Shared system services (opensearch/postgres/redis) aren't
+  # gated by product selection at all.
   if [[ ",${PRODUCTS_OPT}," != *",ascend,"* ]]; then
     cmd+=(--set "karpenter.iris=null")
-  fi
-  if [[ ",${PRODUCTS_OPT}," != *",defend,"* ]]; then
-    cmd+=(--set "karpenter.argus=null")
   fi
 
   local values_file
@@ -2143,13 +2215,21 @@ phase_ai_provider_secrets() {
       fi
       ;;
     bedrock)
-      if [[ -n "${AI_BEDROCK_ACCESS_KEY}" && -n "${AI_BEDROCK_SECRET_KEY}" ]]; then
-        patch_shared_secret "SYS__AWS_ACCESS_KEY_ID" "${AI_BEDROCK_ACCESS_KEY}"
-        patch_shared_secret "SYS__AWS_SECRET_ACCESS_KEY" "${AI_BEDROCK_SECRET_KEY}"
-        log "Stored Bedrock credentials in '${SHARED_SECRETS_NAME}' for bifrost (region: ${AI_BEDROCK_REGION})."
-      else
-        log "No new Bedrock credentials to store (already present in '${SHARED_SECRETS_NAME}', or none captured)."
-      fi
+      # Pod Identity handles auth — no static keys needed. Ensure the bifrost
+      # ServiceAccount exists (chart creates it on helm upgrade, but this phase
+      # runs before straiker-core) so the Pod Identity association Terraform
+      # already created has something to bind to.
+      kubectl create serviceaccount "${BIFROST_SERVICE_ACCOUNT}" \
+        -n "${INFRA_NAMESPACE}" --dry-run=client -o yaml \
+        | kubectl apply -f - >/dev/null
+      kubectl annotate serviceaccount "${BIFROST_SERVICE_ACCOUNT}" -n "${INFRA_NAMESPACE}" \
+        "meta.helm.sh/release-name=straiker-core" \
+        "meta.helm.sh/release-namespace=${INFRA_NAMESPACE}" \
+        --overwrite >/dev/null
+      kubectl label serviceaccount "${BIFROST_SERVICE_ACCOUNT}" -n "${INFRA_NAMESPACE}" \
+        "app.kubernetes.io/managed-by=Helm" \
+        --overwrite >/dev/null
+      log "Bedrock mode: bifrost ServiceAccount '${BIFROST_SERVICE_ACCOUNT}' ready for Pod Identity (no static keys stored)."
       ;;
     trial-key)
       if [[ -n "${AI_TRIAL_VIRTUAL_KEY}" ]]; then
@@ -2232,12 +2312,9 @@ phase_straiker_core() {
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
 
-  # Only set when 'defend' is actually selected — straiker-defend's Service
-  # won't exist otherwise, and the chart already omits this env var entirely
-  # when unset rather than pointing at a URL that resolves to nothing.
-  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
-  fi
+  # Unconditional — straiker-defend is always installed now (see
+  # phase_straiker_defend), regardless of product selection.
+  cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
 
   # Same reasoning for 'ascend' — charts/straiker-ascend's control-plane
   # Service (frontend calls this to start/pause/stream assessment runs).
@@ -2263,6 +2340,8 @@ phase_straiker_core() {
     if [[ -n "${bedrock_region}" ]]; then
       cmd+=(--set "straiker-bifrost.bedrock.region=${bedrock_region}")
     fi
+    # Pod Identity — no static keys; tell bifrost chart to skip injecting them.
+    cmd+=(--set "straiker-bifrost.bedrock.podIdentity=true")
   fi
 
   local values_file
@@ -2432,18 +2511,16 @@ phase_straiker_inference() {
   fi
 }
 
-# Argus (Straiker's "Defend" product) — only when "defend" is selected.
-# Depends on straiker-system (Redis/OpenSearch/Benthos, shared NodePool) and
-# straiker-inference's per-model releases (SYS__LLM_ENDPOINTS__* targets)
-# already being up; checks straiker-system's live release status the same way
+# Argus — always installed, regardless of product selection: charts/
+# straiker-ascend's own iris calls Argus's /api/v1/detect directly for
+# several detection categories, so an Ascend-only install still needs this
+# running (not just customers who selected Defend as a product). Depends on
+# straiker-system (Redis/OpenSearch/Benthos, shared NodePool) and straiker-
+# inference's per-model releases (SYS__LLM_ENDPOINTS__* targets) already
+# being up; checks straiker-system's live release status the same way
 # phase_straiker_core does, since a phase that merely ran earlier isn't proof
 # it's still healthy.
 phase_straiker_defend() {
-  if [[ ",${PRODUCTS_OPT}," != *",defend,"* ]]; then
-    log "'defend' not selected — skipping straiker-defend."
-    return
-  fi
-
   require_command helm
   require_command kubectl
 
@@ -2522,6 +2599,22 @@ phase_straiker_ascend() {
 
   ensure_k8s_ready_for_charts || return
 
+  # charts/straiker-ascend runs db-migrate as a pre-install/pre-upgrade hook.
+  # Hooks run before plain resources, so the chart's own ServiceAccount may not
+  # exist yet when the hook Job starts. Pre-create it here with the correct Helm
+  # ownership labels so Helm can adopt it without an "invalid ownership metadata"
+  # error on subsequent installs/upgrades.
+  kubectl create serviceaccount "${ASCEND_SERVICE_ACCOUNT}" \
+    -n "${INFRA_NAMESPACE}" --dry-run=client -o yaml \
+    | kubectl apply -f - >/dev/null
+  kubectl annotate serviceaccount "${ASCEND_SERVICE_ACCOUNT}" -n "${INFRA_NAMESPACE}" \
+    "meta.helm.sh/release-name=${ASCEND_RELEASE}" \
+    "meta.helm.sh/release-namespace=${INFRA_NAMESPACE}" \
+    --overwrite >/dev/null
+  kubectl label serviceaccount "${ASCEND_SERVICE_ACCOUNT}" -n "${INFRA_NAMESPACE}" \
+    "app.kubernetes.io/managed-by=Helm" \
+    --overwrite >/dev/null
+
   helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
@@ -2548,6 +2641,19 @@ phase_straiker_ascend() {
   # configured.
   if [[ "${AI_PROVIDER_MODE}" == "trial-key" ]]; then
     cmd+=(--set "bifrost.baseUrl=${AI_TRIAL_BIFROST_BASE_URL}")
+  fi
+
+  # bedrock: iris's resolver (iris/generators/llm/resolver.py) refuses to
+  # pick a (provider, model) not explicitly allow-listed in
+  # SYS__AVAILABLE_MODELS, even though bifrost itself would happily route
+  # to it — without this, every AI-driven feature (not just the recon
+  # agent) fails outright in bedrock mode. Pinned to the exact two model
+  # IDs the codebase ever asks for today. The installer grants pod IAM
+  # access; AWS still needs the selected Bedrock models enabled for the
+  # account.
+  if [[ "${AI_PROVIDER_MODE}" == "bedrock" ]]; then
+    cmd+=(--set "availableModels[0]=bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0")
+    cmd+=(--set "availableModels[1]=bedrock/global.anthropic.claude-sonnet-4-6")
   fi
 
   "${cmd[@]}"
@@ -2608,36 +2714,43 @@ phase_straiker_edge() {
 # was just installed, so it prints correctly whether this run did real work
 # or everything was already up from a previous one.
 show_access_info() {
-  local app_addr app_host app_port
-  app_addr="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null | grep -o 'app\.[^ {]*' | head -1 || true)"
-  if [[ -n "${app_addr}" ]]; then
-    app_host="${app_addr%%:*}"
-    app_port="${app_addr##*:}"
-    log ""
-    log "Straiker is installed. To reach it from your machine:"
-    log "  1. echo '127.0.0.1 ${app_host}' | sudo tee -a /etc/hosts"
-    log "  2. kubectl -n ${INFRA_NAMESPACE} port-forward svc/straiker-edge ${app_port}:${app_port}"
-    log "  3. open https://${app_addr}/ (a self-signed cert warning is expected)"
-  fi
+  local caddyfile edge_port
+  caddyfile="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null || true)"
 
-  # Documentation only — not run automatically. The API key is a
-  # per-application credential (seeded into the customer's own tenant via
-  # settings-sync), so there's no value the installer itself could fill in
-  # here; add it to /etc/hosts the same way as app_host above if you want to
-  # actually run this.
-  if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    local defend_addr
-    defend_addr="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null | grep -o 'defend\.[^ {]*' | head -1 || true)"
-    if [[ -n "${defend_addr}" ]]; then
-      log ""
-      log "Smoke test the Defend API (needs one of your application's API keys):"
-      log "  curl -sk -X POST https://${defend_addr}/api/v1/detect \\"
-      log "    -H \"Authorization: Bearer <your-application-api-key>\" \\"
-      log "    -H \"Content-Type: application/json\" \\"
-      log "    -H \"Straiker-Debug: true\" \\"
-      log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
-    fi
-  fi
+  # Extract the shared edge port from the first site block.
+  edge_port="$(printf '%s' "${caddyfile}" | grep -o '[^ {]*:[0-9]*' | head -1 | cut -d: -f2 || true)"
+  edge_port="${edge_port:-8443}"
+
+  # Collect routed hostnames; fall back to well-known defaults.
+  local app_host defend_host ascend_host
+  app_host="$(printf '%s'    "${caddyfile}" | grep -o 'app\.[^ {:]*'    | head -1 || true)"
+  defend_host="$(printf '%s' "${caddyfile}" | grep -o 'defend\.[^ {:]*' | head -1 || true)"
+  ascend_host="$(printf '%s' "${caddyfile}" | grep -o 'ascend\.[^ {:]*' | head -1 || true)"
+  [[ -n "${app_host}" ]]    || app_host="app.straiker.internal"
+  [[ -n "${defend_host}" ]] || defend_host="defend.straiker.internal"
+  [[ -n "${ascend_host}" ]] || ascend_host="ascend.straiker.internal"
+
+  log ""
+  log "Straiker is installed. To reach it from your machine:"
+  log ""
+  log "  1. Add all hosts to /etc/hosts (one line):"
+  log "       echo '127.0.0.1  ${app_host} ${defend_host} ${ascend_host}' | sudo tee -a /etc/hosts"
+  log ""
+  log "  2. Start a port-forward to the edge:"
+  log "       kubectl -n ${INFRA_NAMESPACE} port-forward svc/straiker-edge ${edge_port}:${edge_port}"
+  log ""
+  log "  3. Open the dashboard (self-signed cert warning expected):"
+  log "       https://${app_host}:${edge_port}/"
+  log ""
+  log "  Ascend : https://${ascend_host}:${edge_port}/"
+  log "  Defend : https://${defend_host}:${edge_port}/"
+  log ""
+  log "Smoke test the Defend API (needs one of your application's API keys):"
+  log "  curl -sk -X POST https://${defend_host}:${edge_port}/api/v1/detect \\"
+  log "    -H \"Authorization: <api-key>\" \\"
+  log "    -H \"Content-Type: application/json\" \\"
+  log "    -H \"Straiker-Debug: true\" \\"
+  log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
 }
 
 # Prompts on /dev/tty (never stdin — this must work under `curl | bash`, which
@@ -2908,9 +3021,13 @@ how it should reach one:
   1) own-keys  — bring your own OpenAI/Anthropic/xAI API key(s). Already
                  exported OPENAI_API_KEY/ANTHROPIC_API_KEY/XAI_API_KEY in
                  this shell are picked up automatically, no prompt needed.
-  2) bedrock   — use AWS Bedrock (needs an IAM identity with bedrock:InvokeModel
-                 — this installer will print the exact AWS CLI commands to set
-                 that up, then ask for the resulting access key)
+  2) bedrock   — use AWS Bedrock via EKS Pod Identity. The installer
+                 creates a dedicated IAM role with bedrock:InvokeModel and
+                 binds it to bifrost's ServiceAccount automatically — no
+                 static keys or prompts needed. You'll need to request
+                 access to these two models in the AWS Console:
+                   - anthropic.claude-haiku-4-5-20251001-v1:0
+                   - anthropic.claude-sonnet-4-6
   3) trial-key — use a Straiker-hosted temporary virtual key (up to 30 days,
                  PoC/trial use only), fetched automatically using your
                  Straiker customer name/key — ask your Straiker contact to
@@ -2966,36 +3083,34 @@ EOF
         fi
         ;;
       bedrock)
-        if secret_key_exists "SYS__AWS_ACCESS_KEY_ID"; then
-          log "Bedrock credentials are already present in '${SHARED_SECRETS_NAME}' — leaving as-is."
-        else
-          local default_region="${AWS_REGION:-us-east-1}"
+        if [[ -z "$(get_metadata "bedrock_region")" ]]; then
+          # Use the already-resolved AWS region — no need to ask.
+          local bedrock_region="${AWS_REGION:-us-east-1}"
           cat >&2 <<EOF
 
-Bedrock needs an IAM identity with bedrock:InvokeModel/InvokeModelWithResponseStream
-permission. If you don't already have one, create it with:
+Bedrock mode: the installer will create a dedicated IAM role with
+bedrock:InvokeModel/InvokeModelWithResponseStream and bind it to bifrost's
+ServiceAccount via EKS Pod Identity — no static keys needed.
 
-  aws iam create-user --user-name straiker-ascend-bedrock
-  aws iam put-user-policy --user-name straiker-ascend-bedrock \\
-    --policy-name straiker-ascend-bedrock-invoke \\
-    --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream"],"Resource":"arn:aws:bedrock:${default_region}::foundation-model/*"}]}'
-  aws iam create-access-key --user-name straiker-ascend-bedrock
+You'll still need to request access to these two specific models under
+Bedrock > Model access in the AWS Console (per-model, one-time,
+console-only — no CLI equivalent). Ascend is pinned to exactly these two
+model IDs and won't use any others, so there's no need to enable more:
+  - anthropic.claude-haiku-4-5-20251001-v1:0
+  - anthropic.claude-sonnet-4-6
 
-The last command prints an AccessKeyId/SecretAccessKey — enter them below.
-You'll also need to request access to whichever foundation models you want
-under Bedrock > Model access in the AWS Console (per-model, one-time,
-console-only — no CLI equivalent).
+Both are invoked through Bedrock's "global." cross-region inference profile
+(required for these models — the plain on-demand model ID is rejected),
+which dynamically routes to whichever region has capacity rather than
+staying pinned to the one you're installing into — Bedrock model
+availability still varies by region, so request access in whichever
+region(s) you expect traffic to land in, not just this one.
 
 EOF
-          AI_BEDROCK_ACCESS_KEY="$(prompt_line 'AWS access key ID (required): ' || true)"
-          AI_BEDROCK_SECRET_KEY="$(prompt_line 'AWS secret access key (required): ' || true)"
-          if [[ -z "${AI_BEDROCK_ACCESS_KEY}" || -z "${AI_BEDROCK_SECRET_KEY}" ]]; then
-            echo "ERROR: 'bedrock' mode needs both an AWS access key ID and secret access key. Re-run and provide both." >&2
-            exit 1
-          fi
-          AI_BEDROCK_REGION="$(prompt_line "Bedrock region (default: ${default_region}): " || true)"
-          [[ -z "${AI_BEDROCK_REGION}" ]] && AI_BEDROCK_REGION="${default_region}"
-          set_metadata "bedrock_region" "${AI_BEDROCK_REGION}"
+          log "Using AWS region '${bedrock_region}' for Bedrock."
+          set_metadata "bedrock_region" "${bedrock_region}"
+        else
+          log "Bedrock region already set: $(get_metadata "bedrock_region")."
         fi
         ;;
       trial-key)
@@ -3014,11 +3129,15 @@ EOF
             exit 1
           fi
           AI_TRIAL_VIRTUAL_KEY="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("virtual_key",""))' <<< "${bifrost_trial_response}" 2>/dev/null)"
-          AI_TRIAL_BIFROST_BASE_URL="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_url",""))' <<< "${bifrost_trial_response}" 2>/dev/null)"
-          if [[ -z "${AI_TRIAL_VIRTUAL_KEY}" || -z "${AI_TRIAL_BIFROST_BASE_URL}" ]]; then
+          if [[ -z "${AI_TRIAL_VIRTUAL_KEY}" ]]; then
             echo "ERROR: Unexpected response from the artifact broker's Bifrost trial endpoint: ${bifrost_trial_response}" >&2
             exit 1
           fi
+          # Use base_url from the broker response when present; fall back to the
+          # hardcoded default so installs work even when the customer secret
+          # doesn't include that field yet.
+          AI_TRIAL_BIFROST_BASE_URL="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_url",""))' <<< "${bifrost_trial_response}" 2>/dev/null)"
+          [[ -n "${AI_TRIAL_BIFROST_BASE_URL}" ]] || AI_TRIAL_BIFROST_BASE_URL="${DEFAULT_BIFROST_BASE_URL}"
           set_metadata "bifrost_trial_base_url" "${AI_TRIAL_BIFROST_BASE_URL}"
         fi
         ;;

@@ -62,6 +62,11 @@ Env vars common to every ascend component.
       name: {{ include "ascend.secretName" . }}
       key: BIFROST_API_KEY
       optional: true
+# See values.yaml's own availableModels comment — empty here resolves to
+# iris's code default (["openai", "grok"]), overridden explicitly by
+# install-straiker.sh for AI_PROVIDER_MODE=bedrock.
+- name: SYS__AVAILABLE_MODELS
+  value: {{ .Values.availableModels | default (list "openai" "grok") | toJson | quote }}
 - name: SYS__USE_SAQ_WORKERS
   value: "true"
 - name: SYS__RATE_LIMIT_CHECK
@@ -74,6 +79,15 @@ Env vars common to every ascend component.
 {{- printf "%s/%s:%s" ($registry | trimSuffix "/") .Values.image.repository .Values.image.tag -}}
 {{- else -}}
 {{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+{{- end -}}
+{{- end }}
+
+{{- define "ascend.liquibaseImage" -}}
+{{- $registry := .Values.global.dockerRegistry -}}
+{{- if $registry -}}
+{{- printf "%s/liquibase/liquibase:4.28" ($registry | trimSuffix "/") -}}
+{{- else -}}
+{{- printf "liquibase/liquibase:4.28" -}}
 {{- end -}}
 {{- end }}
 
@@ -149,7 +163,8 @@ read that chart's values directly -- independent top-level charts).
 
 {{/*
 Argus detection endpoint — charts/straiker-defend's Service, in this same
-namespace, once that product is also selected.
+namespace. install-straiker.sh installs straiker-defend unconditionally now
+(regardless of product selection), since iris depends on it directly.
 */}}
 {{- define "ascend.argusEndpoint" -}}
 {{- if .Values.argus.endpoint -}}
