@@ -2036,58 +2036,49 @@ phase_straiker_system() {
   "${cmd[@]}"
 }
 
-# Creates SHARED_SECRETS_NAME once, idempotently — never regenerated or
-# patched on later runs (that would rotate credentials the frontend/inference/
-# defend releases already picked up, breaking their already-working
-# integrations). If the customer wants to rotate a key, that's a manual
-# `kubectl edit secret` followed by restarting the consumers, not something
-# this installer does automatically.
+# Ensures SHARED_SECRETS_NAME exists with every key this installer expects,
+# backfilling any that are missing rather than skipping entirely once the
+# Secret exists — a key added to this list after a cluster's Secret was
+# first created would otherwise stay permanently missing there. Never
+# rotates a key that's already set (that would break consumers that already
+# picked up the old value); rotating one is a manual `kubectl patch secret`
+# followed by restarting the affected workloads.
 #
-# INTERNAL_API_KEY / SYS__FOUNDATION_API_KEY share one underlying value: the
-# frontend app strips a "Bearer " prefix before comparing the inbound header
-# against INTERNAL_API_KEY, while argus sends SYS__FOUNDATION_API_KEY
-# verbatim as the whole header — so the same secret has to be stored twice,
-# once bare and once pre-prefixed, rather than templated at the chart level
-# (Kubernetes Secrets don't support computed values). Verified directly
-# against straiker/frontend's apps/web/src/lib/server/hooks/authorization.ts
-# and straiker/argus's argus/common/settings/settings.py.
-#
-# VLLM_API_KEY / SYS__INFERENCE_API_KEY share the other value verbatim (no
-# prefix games) — straiker-inference's vLLM server checks this key as a
-# plain bearer token, same as argus does.
+# INTERNAL_API_KEY / SYS__FOUNDATION_API_KEY share one underlying value:
+# the frontend strips a "Bearer " prefix before comparing, while argus
+# sends it verbatim as the whole header — so the same value is stored
+# twice, once bare and once pre-prefixed. VLLM_API_KEY / SYS__INFERENCE_API_KEY
+# share their value with no prefix games.
 phase_shared_secrets() {
   require_command kubectl
   require_command openssl
 
-  if kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
-    log "Secret '${SHARED_SECRETS_NAME}' already exists in namespace '${INFRA_NAMESPACE}' — leaving its values as-is."
-    return
+  if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    ensure_k8s_ready_for_charts || return
+    kubectl create secret generic "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null
+  else
+    ensure_k8s_ready_for_charts || return
   fi
 
-  ensure_k8s_ready_for_charts || return
-
-  # hex, not base64 — these end up in HTTP Authorization headers verbatim
-  # (see the phase's own comment above), and hex has no +/= characters to
-  # worry about there or in shell interpolation.
-  local internal_key inference_key iris_admin_key
-  internal_key="$(openssl rand -hex 32)"
-  inference_key="$(openssl rand -hex 32)"
-  # charts/straiker-core's frontend sends this as "Authorization: Bearer
-  # <value>"; charts/straiker-ascend's control-plane compares it via
-  # FastAPI's HTTPBearer, which strips "Bearer " before comparing -- so
-  # unlike SYS__FOUNDATION_API_KEY above, the SAME raw value is stored on
-  # both sides, no prefix baked in. Verified against iris/iris.py's
-  # verify_api_key and frontend's iris/client.ts.
-  iris_admin_key="$(openssl rand -hex 32)"
-
-  kubectl create secret generic "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" \
-    --from-literal="INTERNAL_API_KEY=${internal_key}" \
-    --from-literal="SYS__FOUNDATION_API_KEY=Bearer ${internal_key}" \
-    --from-literal="VLLM_API_KEY=${inference_key}" \
-    --from-literal="SYS__INFERENCE_API_KEY=${inference_key}" \
-    --from-literal="IRIS_ADMIN_API_KEY=${iris_admin_key}" \
-    >/dev/null
-  log "Created Secret '${SHARED_SECRETS_NAME}' with freshly generated service-to-service credentials."
+  # hex, not base64 — these end up in HTTP Authorization headers verbatim,
+  # and hex has no +/= characters to worry about there or in shell
+  # interpolation.
+  if ! secret_key_exists "INTERNAL_API_KEY"; then
+    local internal_key
+    internal_key="$(openssl rand -hex 32)"
+    patch_shared_secret "INTERNAL_API_KEY" "${internal_key}"
+    patch_shared_secret "SYS__FOUNDATION_API_KEY" "Bearer ${internal_key}"
+  fi
+  if ! secret_key_exists "VLLM_API_KEY"; then
+    local inference_key
+    inference_key="$(openssl rand -hex 32)"
+    patch_shared_secret "VLLM_API_KEY" "${inference_key}"
+    patch_shared_secret "SYS__INFERENCE_API_KEY" "${inference_key}"
+  fi
+  if ! secret_key_exists "IRIS_ADMIN_API_KEY"; then
+    patch_shared_secret "IRIS_ADMIN_API_KEY" "$(openssl rand -hex 32)"
+  fi
+  log "Secret '${SHARED_SECRETS_NAME}' has all expected service-to-service credentials."
 }
 
 # $1=key name (e.g. "SYS__OPENAI_API_KEY"). True if that key already has a
