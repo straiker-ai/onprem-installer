@@ -1,15 +1,6 @@
 {{- if .Values.imageMirror.enabled }}
 {{- $m := .Values.imageMirror }}
-{{/*
-crane auth login takes a bare registry host, and its credential store is
-keyed by hostname only — so both logins below use just the host, even
-though ecrRegistry itself carries a "<host>/<prefix>" path.
-*/}}
-{{- $sourceHost := index (splitList "/" (index $m.images 0).source) 0 }}
 {{- $destHost := index (splitList "/" $.Values.ecrRegistry) 0 }}
-{{- if eq $sourceHost $destHost }}
-{{- fail (printf "imageMirror source and destination registries are both %q — crane's credential store is keyed by hostname only, so source and destination auth would overwrite each other. Use a different GCP region for terraform/gcp/artifacts." $destHost) }}
-{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -28,8 +19,8 @@ spec:
       serviceAccountName: {{ .Values.serviceAccountName }}
       restartPolicy: OnFailure
       {{- include "artifact-sync.tolerations" . | nindent 6 }}
-      # The main container needs aws-cli or gcloud for destination-registry
-      # auth, so crane is copied in from its own image instead.
+      # crane is copied in from its own init container so the main container
+      # only needs the aws-cli (for ECR login) -- crane itself has no aws-cli.
       initContainers:
         - name: crane
           image: {{ printf "%s:%s" $m.image.repository $m.image.tag | quote }}
@@ -40,36 +31,36 @@ spec:
       containers:
         - name: mirror
           image: {{ include "artifact-sync.mirrorToolImage" . }}
-          # Destination auth: ECR on eks, or Workload Identity on gke (this
-          # chart's ServiceAccount is bound to the hauler GCP SA).
-          # Source auth: exchanges the mounted credential's api_key +
-          # customer_email for a short-lived token from Straiker's artifact
-          # broker, instead of holding a long-lived GCP key.
+          # Token broker (Lambda Function URL) returns KEY=VALUE lines for
+          # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN.
+          # eval-sourcing them gives the assumed-role credentials needed to
+          # pull from the source ECR and push to the destination ECR without
+          # holding any long-lived keys in the cluster.
           command:
             - sh
             - -c
             - |
               set -euo pipefail
               export PATH="/shared:$PATH"
-              {{- if eq .Values.cloudProvider "gke" }}
-              crane auth login {{ $destHost | quote }} \
-                --username oauth2accesstoken --password "$(gcloud auth print-access-token)"
-              {{- else }}
-              crane auth login {{ $destHost | quote }} \
-                --username AWS --password "$(aws ecr get-login-password)"
-              {{- end }}
               source_api_key="$(sed -n 's/.*"api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
               source_customer_email="$(sed -n 's/.*"customer_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
-              source_token="$(curl -sf -H "Authorization: Bearer ${source_api_key}" -H "X-Customer-Email: ${source_customer_email}" {{ .Values.brokerUrl | quote }})"
-              crane auth login {{ $sourceHost | quote }} \
-                --username oauth2accesstoken --password "${source_token}"
+              eval "$(curl -sf \
+                -H "Authorization: Bearer ${source_api_key}" \
+                -H "X-Customer-Email: ${source_customer_email}" \
+                {{ printf "%s/token" .Values.brokerUrl | quote }})"
+              # Login to source ECR with assumed-role creds, dest ECR with Pod Identity.
+              SOURCE_HOST="{{ index (splitList "/" .Values.sourceEcrRegistry) 0 }}"
+              crane auth login "${SOURCE_HOST}" \
+                --username AWS --password "$(AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}" aws ecr get-login-password)"
+              crane auth login {{ $destHost | quote }} \
+                --username AWS --password "$(aws ecr get-login-password)"
               {{- range $img := $m.images }}
               {{- $imgSku := include "artifact-sync.imageSku" $img.source }}
               {{- if or (eq $imgSku "base") (eq $imgSku $.Values.customerSku) }}
-              echo "Mirroring {{ $img.source }}:{{ $img.tag }} -> {{ $img.destRepository }}:{{ $img.tag }}..."
+              echo "Mirroring {{ $img.source }}:{{ $img.tag }} -> {{ $.Values.ecrRegistry }}/{{ $img.destRepository }}:{{ $img.tag }}..."
               crane copy "{{ $img.source }}:{{ $img.tag }}" "{{ $.Values.ecrRegistry }}/{{ $img.destRepository }}:{{ $img.tag }}"
               {{- else }}
-              echo "Skipping {{ $img.source }}:{{ $img.tag }} (sku: {{ $imgSku }}) — not included for this customer's sku ({{ $.Values.customerSku }})."
+              echo "Skipping {{ $img.source }}:{{ $img.tag }} (sku: {{ $imgSku }}) -- not included for this customer's sku ({{ $.Values.customerSku }})."
               {{- end }}
               {{- end }}
               echo "Image mirror complete."

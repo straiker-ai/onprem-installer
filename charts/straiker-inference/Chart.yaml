@@ -12,7 +12,7 @@ description: >
   models the selected products need) rather than bundled into an umbrella —
   consistent with this repo's "small charts, independent apply/check" charts.
 type: application
-version: 0.1.13
+version: 0.1.14
 appVersion: "0.1.2"
 home: https://github.com/straiker-ai/onprem
 sources:

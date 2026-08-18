@@ -21,37 +21,32 @@ spec:
       containers:
         - name: sync
           image: {{ printf "%s:%s" $s.image.repository $s.image.tag | quote }}
-          # Destination auth: env_auth=true picks up EKS Pod Identity / GKE
-          # Workload Identity automatically. Source auth: exchanges the
-          # mounted credential's api_key + customer_email for a short-lived
-          # token from Straiker's artifact broker, re-minted before each
-          # model since a sync can run close to or past the token's 1-hour
-          # lifetime. This image only has BusyBox (no curl), hence wget.
-          #
-          # --gcs-token must be a top-level flag, not embedded in the source
-          # remote's own connection string — rclone's connection-string
-          # parser splits on commas, which the token JSON's body also
-          # contains.
+          # Token broker (Lambda Function URL) returns KEY=VALUE lines consumed
+          # via eval. Credentials are re-minted before each model so a
+          # multi-model sync that runs past 1 h never hits expired creds.
+          # Destination: S3 via EKS Pod Identity (env_auth=true on the rclone
+          # remote). Source: S3 with the assumed-role creds from the broker.
           command:
             - sh
             - -c
             - |
               set -euo pipefail
-              {{- range $model := $s.models }}
-              {{- if or (not $s.enabledModels) (has $model.destPath $s.enabledModels) }}
-              echo "Syncing {{ $s.sourceBucket }}/{{ $model.path }} -> {{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
               source_api_key="$(sed -n 's/.*"api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
               source_customer_email="$(sed -n 's/.*"customer_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
-              source_token="$(wget -qO- --header "Authorization: Bearer ${source_api_key}" --header "X-Customer-Email: ${source_customer_email}" {{ $.Values.brokerUrl | quote }})"
-              token_expiry="$(date -u -d "@$(( $(date +%s) + 3300 ))" +%Y-%m-%dT%H:%M:%SZ)"
+              {{- range $model := $s.models }}
+              {{- if or (not $s.enabledModels) (has $model.destPath $s.enabledModels) }}
+              echo "Syncing s3://{{ $s.sourceBucket }}/{{ $model.path }} -> s3://{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
+              eval "$(wget -qO- \
+                --header "Authorization: Bearer ${source_api_key}" \
+                --header "X-Customer-Email: ${source_customer_email}" \
+                {{ printf "%s/token" $.Values.brokerUrl | quote }})"
               rclone sync \
-                --gcs-token "{\"access_token\":\"${source_token}\",\"token_type\":\"Bearer\",\"expiry\":\"${token_expiry}\"}" \
-                ":gcs:{{ $s.sourceBucket }}/{{ $model.path }}" \
-                {{- if eq $.Values.cloudProvider "gke" }}
-                ":gcs,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
-                {{- else }}
+                --s3-access-key-id "${AWS_ACCESS_KEY_ID}" \
+                --s3-secret-access-key "${AWS_SECRET_ACCESS_KEY}" \
+                --s3-session-token "${AWS_SESSION_TOKEN}" \
+                --s3-region {{ $.Values.sourceBucketRegion | default "us-east-1" | quote }} \
+                ":s3:{{ $s.sourceBucket }}/{{ $model.path }}" \
                 ":s3,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
-                {{- end }}
                 --progress --transfers 8 --checkers 16
               {{- else }}
               echo "Skipping {{ $model.destPath }} (not in modelSync.enabledModels)."
