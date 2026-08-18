@@ -27,6 +27,31 @@ entries:
   straiker-artifact:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2026-08-18T09:15:32.24724372Z"
+    description: 'Mirrors container images from Straiker''s registry into the customer''s
+      ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
+      bucket, via in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+      since that chart''s workloads pull images through the ECR mirror this populates. '
+    digest: fba0ce745896b604e47cfa9a92205208ff12c5dfaf4364ee8d75566ea1939333
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - artifact-sync
+    - ecr
+    - s3
+    kubeVersion: '>=1.28.0-0'
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-artifact
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-artifact-0.1.26/straiker-artifact-0.1.26.tgz
+    version: 0.1.26
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2026-08-18T08:34:24.630542362Z"
     description: 'Mirrors container images from Straiker''s registry into the customer''s
       ECR and syncs model artifacts from Straiker''s bucket into the customer''s S3
@@ -178,6 +203,33 @@ entries:
   straiker-ascend:
   - apiVersion: v2
     appVersion: 0.0.1
+    created: "2026-08-18T09:15:32.39465147Z"
+    description: 'Iris automated red-teaming engine (Straiker''s "Ascend" product)
+      — control plane, probe worker/shadow, recon worker, report worker, and a daily
+      assessment-cleanup CronJob. Ported from charts/straiker-platform-old/charts/straiker-iris,
+      updated to match the current ~/straiker/iris/onprem/docker-compose.yml architecture:
+      HTTP-based Redpanda Connect archiving (the shared straiker-system benthos) instead
+      of a Kafka-broker cluster, straiker-system''s shared Postgres/Redis instead
+      of in-cluster-per-release ones, and the current inference-thanos service name
+      (was a bare "thanos" guess in the old chart). '
+    digest: 4d5e0cae57f46fb38f09890c93eb4c226f9baa66a87861e5f298ed248e4fb325
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - iris
+    - ascend
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-ascend
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-ascend-0.1.5/straiker-ascend-0.1.5.tgz
+    version: 0.1.5
+  - apiVersion: v2
+    appVersion: 0.0.1
     created: "2026-08-18T09:12:03.217055904Z"
     description: 'Iris automated red-teaming engine (Straiker''s "Ascend" product)
       — control plane, probe worker/shadow, recon worker, report worker, and a daily
@@ -312,6 +364,44 @@ entries:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-ascend-0.1.0/straiker-ascend-0.1.0.tgz
     version: 0.1.0
   straiker-core:
+  - apiVersion: v2
+    appVersion: 1.0.0
+    created: "2026-08-18T09:15:32.608416227Z"
+    dependencies:
+    - condition: straiker-bifrost.enabled
+      name: straiker-bifrost
+      repository: ""
+      version: 0.1.2
+    - condition: straiker-frontend.enabled
+      name: straiker-frontend
+      repository: ""
+      version: 0.1.0
+    description: 'Always-required Straiker application services: frontend, Bifrost
+      LLM gateway, and the bundled dex/Caddy stack. A small umbrella of its own subcharts
+      (straiker-bifrost, straiker-frontend) rather than one flat set of templates
+      — same "small charts" philosophy as this repo''s top-level charts, just scoped
+      one level down since these two are always installed/upgraded together as a single
+      release. Installed standalone at the top level (formerly nested under a now-sunset
+      charts/straiker umbrella — promoted to top-level so it can be installed/upgraded/checked
+      independently of straiker-system/straiker-artifact). Other products (Ascend/Defend/...)
+      will land as their own separate top-level charts. '
+    digest: b36951cbf7cc8c65f925bb7769017e03394dcafc02dc0ab0f5905c82e1401e20
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - control-plane
+    - bifrost
+    - llm-gateway
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-core
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.2.6/straiker-core-0.2.6.tgz
+    version: 0.2.6
   - apiVersion: v2
     appVersion: 1.0.0
     created: "2026-08-18T07:27:48.073943497Z"
@@ -529,6 +619,32 @@ entries:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-core-0.1.7/straiker-core-0.1.7.tgz
     version: 0.1.7
   straiker-defend:
+  - apiVersion: v2
+    appVersion: 0.1.25
+    created: "2026-08-18T09:15:32.809037865Z"
+    description: 'Argus detection engine (Straiker''s "Defend" product) plus its settings-sync
+      daemon and an in-cluster Redpanda Connect (Benthos) pipeline that archives detection
+      turns into charts/straiker-system''s OpenSearch. Ported from charts/straiker-platform-old/charts/straiker-argus,
+      updated to match the current ~/argus/onprem/docker-compose.yml architecture:
+      HTTP-based Redpanda Connect archiving instead of a Kafka-broker cluster, straiker-system''s
+      existing Redis instead of a second one, and no External Secrets Operator dependency
+      (single-namespace on-prem install has no cross-namespace secret to sync). '
+    digest: b8cab9e4ed5159569d97ffa28be6a75919af1f90e88171302589d13abe4ea3bb
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - argus
+    - defend
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-defend
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-defend-0.1.4/straiker-defend-0.1.4.tgz
+    version: 0.1.4
   - apiVersion: v2
     appVersion: 0.1.25
     created: "2026-08-17T04:25:06.878393078Z"
@@ -1106,4 +1222,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-18T09:12:03.340855231Z"
+generated: "2026-08-18T09:15:32.809144194Z"
