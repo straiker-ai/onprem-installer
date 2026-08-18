@@ -25,6 +25,8 @@ locals {
     "dexidp/dex",
     "library/caddy",
     "redpandadata/connect",
+    "aws-cli/aws-cli",
+    "liquibase/liquibase",
     "straiker/frontend",
     "straiker/frontend-migrate",
     "straiker/vllm",

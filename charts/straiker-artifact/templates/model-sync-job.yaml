@@ -10,6 +10,7 @@ metadata:
     app.kubernetes.io/component: artifact-sync
 spec:
   backoffLimit: 3
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
@@ -21,37 +22,67 @@ spec:
       containers:
         - name: sync
           image: {{ printf "%s:%s" $s.image.repository $s.image.tag | quote }}
-          # Destination auth: env_auth=true picks up EKS Pod Identity / GKE
-          # Workload Identity automatically. Source auth: exchanges the
-          # mounted credential's api_key + customer_email for a short-lived
-          # token from Straiker's artifact broker, re-minted before each
-          # model since a sync can run close to or past the token's 1-hour
-          # lifetime. This image only has BusyBox (no curl), hence wget.
-          #
-          # --gcs-token must be a top-level flag, not embedded in the source
-          # remote's own connection string — rclone's connection-string
-          # parser splits on commas, which the token JSON's body also
-          # contains.
           command:
             - sh
             - -c
             - |
               set -euo pipefail
-              {{- range $model := $s.models }}
-              {{- if or (not $s.enabledModels) (has $model.destPath $s.enabledModels) }}
-              echo "Syncing {{ $s.sourceBucket }}/{{ $model.path }} -> {{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
               source_api_key="$(sed -n 's/.*"api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
               source_customer_email="$(sed -n 's/.*"customer_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
-              source_token="$(wget -qO- --header "Authorization: Bearer ${source_api_key}" --header "X-Customer-Email: ${source_customer_email}" {{ $.Values.brokerUrl | quote }})"
-              token_expiry="$(date -u -d "@$(( $(date +%s) + 3300 ))" +%Y-%m-%dT%H:%M:%SZ)"
+              if [[ -z "${source_api_key}" || -z "${source_customer_email}" ]]; then
+                echo "Missing broker credentials in /var/secrets/source/key.json" >&2
+                exit 1
+              fi
+              {{- range $model := $s.models }}
+              {{- if or (not $s.enabledModels) (has $model.destPath $s.enabledModels) }}
+              source_path="{{ $model.path }}"
+              resolved_source_path="${source_path}"
+              if ! token_env="$(wget -qO- \
+                --header "Authorization: Bearer ${source_api_key}" \
+                --header "X-Customer-Email: ${source_customer_email}" \
+                {{ printf "%s/token" $.Values.brokerUrl | quote }})"; then
+                echo "Token broker request failed (HTTP error). Check STRAIKER_CUSTOMER_KEY / customer email entitlement." >&2
+                exit 1
+              fi
+              eval "${token_env}"
+              if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || -z "${AWS_SESSION_TOKEN:-}" ]]; then
+                echo "Broker token response missing AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN." >&2
+                exit 1
+              fi
+              if ! rclone lsf \
+                --s3-access-key-id "${AWS_ACCESS_KEY_ID}" \
+                --s3-secret-access-key "${AWS_SECRET_ACCESS_KEY}" \
+                --s3-session-token "${AWS_SESSION_TOKEN}" \
+                --s3-provider AWS \
+                --s3-region {{ $.Values.sourceBucketRegion | default "us-east-1" | quote }} \
+                ":s3:{{ $s.sourceBucket }}/${source_path}" >/dev/null 2>&1; then
+                source_parent="${source_path%/*}"
+                if [[ "${source_parent}" == "${source_path}" ]]; then
+                  echo "Source path not found: s3://{{ $s.sourceBucket }}/${source_path}" >&2
+                  exit 1
+                fi
+                fallback_dirs="$(rclone lsf \
+                  --s3-access-key-id "${AWS_ACCESS_KEY_ID}" \
+                  --s3-secret-access-key "${AWS_SECRET_ACCESS_KEY}" \
+                  --s3-session-token "${AWS_SESSION_TOKEN}" \
+                  --s3-provider AWS \
+                  --s3-region {{ $.Values.sourceBucketRegion | default "us-east-1" | quote }} \
+                  --dirs-only \
+                  ":s3:{{ $s.sourceBucket }}/${source_parent}" 2>/dev/null | sed '/^[[:space:]]*$/d')"
+                fallback_count="$(printf '%s\n' "${fallback_dirs}" | wc -l | tr -d ' ')"
+                if [[ "${fallback_count}" != "1" ]]; then
+                  echo "Source path missing: s3://{{ $s.sourceBucket }}/${source_path}. Fallback parent s3://{{ $s.sourceBucket }}/${source_parent} has ${fallback_count} version directories; update charts/straiker-artifact/values.yaml." >&2
+                  exit 1
+                fi
+                resolved_source_path="${source_parent}/$(printf '%s' "${fallback_dirs}" | sed 's:/*$::')"
+                echo "Source path s3://{{ $s.sourceBucket }}/${source_path} not found; using discovered path s3://{{ $s.sourceBucket }}/${resolved_source_path}."
+              fi
+              echo "Syncing s3://{{ $s.sourceBucket }}/${resolved_source_path} -> s3://{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
+              source_remote=":s3,provider=AWS,access_key_id=${AWS_ACCESS_KEY_ID},secret_access_key=${AWS_SECRET_ACCESS_KEY},session_token=${AWS_SESSION_TOKEN},region={{ $.Values.sourceBucketRegion | default "us-east-1" }}:{{ $s.sourceBucket }}/${resolved_source_path}"
+              dest_remote=":s3,provider=AWS,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}"
               rclone sync \
-                --gcs-token "{\"access_token\":\"${source_token}\",\"token_type\":\"Bearer\",\"expiry\":\"${token_expiry}\"}" \
-                ":gcs:{{ $s.sourceBucket }}/{{ $model.path }}" \
-                {{- if eq $.Values.cloudProvider "gke" }}
-                ":gcs,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
-                {{- else }}
-                ":s3,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
-                {{- end }}
+                "${source_remote}" \
+                "${dest_remote}" \
                 --progress --transfers 8 --checkers 16
               {{- else }}
               echo "Skipping {{ $model.destPath }} (not in modelSync.enabledModels)."

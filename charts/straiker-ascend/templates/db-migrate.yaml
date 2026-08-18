@@ -21,23 +21,16 @@ spec:
         app: straiker-ascend-db-migrate
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- if .Values.dbMigrate.serviceAccountName }}
+      serviceAccountName: {{ .Values.dbMigrate.serviceAccountName }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: liquibase
-          # Straiker's own image, not liquibase/liquibase -- the changelog
-          # files are entirely supplied via the ConfigMaps below now (the
-          # current onprem image doesn't bundle
-          # packages/database/src/rds/liquibase the way the old chart's
-          # db-migrate assumed, confirmed against onprem/Dockerfile), so
-          # there's no need for the old chart's copy-migrations initContainer
-          # either -- this container just needs a liquibase binary, and
-          # Straiker's own image already has one (same one iris itself runs
-          # migrations with in other environments).
-          image: liquibase/liquibase:4.28
+          image: {{ include "ascend.liquibaseImage" . }}
           imagePullPolicy: IfNotPresent
           args: ["update"]
           resources:

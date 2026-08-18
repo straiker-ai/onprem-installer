@@ -38,3 +38,15 @@ variable "workload_service_account_names" {
   type        = list(string)
   default     = []
 }
+
+variable "bedrock_mode" {
+  description = "When true, create a dedicated IAM role for Bedrock access and bind it to bifrost's ServiceAccount via Pod Identity. Set only when AI_PROVIDER_MODE=bedrock."
+  type        = bool
+  default     = false
+}
+
+variable "bifrost_service_account_name" {
+  description = "Kubernetes ServiceAccount name for the bifrost pod (used for Bedrock Pod Identity binding). Only relevant when bedrock_mode=true."
+  type        = string
+  default     = "straiker-bifrost"
+}

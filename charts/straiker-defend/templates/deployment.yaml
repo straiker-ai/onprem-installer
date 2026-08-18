@@ -26,101 +26,6 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      initContainers:
-        - name: tokenizer-pull
-          image: {{ include "defend.modelSyncImage" . }}
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              set -e
-              HUB="/models/hub"
-              FAKE_HASH="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-              {{- $root := . }}
-              {{- range .Values.tokenizers }}
-              {{- $cacheDir := printf "models--%s" (.hfModelId | replace "/" "--") }}
-              if [ -f "${HUB}/{{ $cacheDir }}/refs/main" ]; then
-                echo "Already cached: {{ .hfModelId }}"
-              else
-                echo "Pulling tokenizer for {{ .hfModelId }}..."
-                mkdir -p /tmp/tok
-                {{ include "defend.modelSyncCmd" (dict "root" $root "src" (printf "tokenizer/%s" .destPath) "dst" "/tmp/tok") }}
-                mkdir -p "${HUB}/{{ $cacheDir }}/snapshots/${FAKE_HASH}" \
-                         "${HUB}/{{ $cacheDir }}/refs"
-                cp -r /tmp/tok/. "${HUB}/{{ $cacheDir }}/snapshots/${FAKE_HASH}/"
-                printf '%s' "${FAKE_HASH}" > "${HUB}/{{ $cacheDir }}/refs/main"
-                rm -rf /tmp/tok
-                echo "Done: {{ .hfModelId }}"
-              fi
-              {{- end }}
-              echo "All tokenizers ready."
-          volumeMounts:
-            - name: model-cache
-              mountPath: /models
-          resources:
-            requests:
-              cpu: 500m
-              memory: 512Mi
-            limits:
-              memory: 1Gi
-
-        # Converts synced tokenizer files for sentence-transformers models to
-        # the proper HF hub cache layout (blobs + symlinks) snapshot_download
-        # expects — the plain file copy tokenizer-pull does above isn't enough
-        # for this specific loader.
-        - name: st-cache-fix
-          image: {{ include "defend.image" . | quote }}
-          imagePullPolicy: IfNotPresent
-          command:
-            - python3
-            - -c
-            - |
-              import os, shutil, hashlib
-              HUB = "/models/hub"
-              FAKE_HASH = "a" * 40
-              models = ["sentence-transformers/all-MiniLM-L6-v2"]
-              for hf_model_id in models:
-                  model_dir = "models--" + hf_model_id.replace("/", "--")
-                  storage = os.path.join(HUB, model_dir)
-                  snap = os.path.join(storage, "snapshots", FAKE_HASH)
-                  blobs = os.path.join(storage, "blobs")
-                  if not os.path.isdir(snap):
-                      print(f"SKIP {hf_model_id}: snapshot dir missing")
-                      continue
-                  if os.path.isdir(blobs):
-                      print(f"SKIP {hf_model_id}: already converted")
-                      continue
-                  os.makedirs(blobs, exist_ok=True)
-                  entries = []
-                  for dirpath, _, filenames in os.walk(snap):
-                      for fn in filenames:
-                          fpath = os.path.join(dirpath, fn)
-                          if not os.path.islink(fpath):
-                              rel = os.path.relpath(fpath, snap)
-                              with open(fpath, "rb") as f:
-                                  sha = hashlib.sha256(f.read()).hexdigest()
-                              entries.append((fpath, rel, sha))
-                  for fpath, rel, sha in entries:
-                      blob = os.path.join(blobs, sha)
-                      if not os.path.exists(blob):
-                          shutil.copy2(fpath, blob)
-                      os.remove(fpath)
-                      depth = len(rel.split(os.sep)) + 1
-                      os.symlink(os.path.join(*(['..'] * depth), "blobs", sha), fpath)
-                  print(f"OK {hf_model_id}: converted to blob cache")
-          env:
-            - name: HF_HOME
-              value: /models
-          volumeMounts:
-            - name: model-cache
-              mountPath: /models
-          resources:
-            requests:
-              cpu: 200m
-              memory: 256Mi
-            limits:
-              memory: 512Mi
       containers:
         - name: argus
           lifecycle:
@@ -199,12 +104,6 @@ spec:
                   optional: true
             - name: SYS__ATTACHMENTS_S3_ENABLED
               value: "false"
-            - name: HF_HOME
-              value: /models
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: SENTENCE_TRANSFORMERS_HOME
-              value: /models/hub
           ports:
             - containerPort: {{ .Values.service.targetPort }}
           startupProbe:
@@ -236,13 +135,6 @@ spec:
               memory: {{ .Values.resources.requests.memory | quote }}
             limits:
               memory: {{ .Values.resources.limits.memory | quote }}
-          volumeMounts:
-            - name: model-cache
-              mountPath: /models
-      volumes:
-        - name: model-cache
-          emptyDir:
-            sizeLimit: 500Mi
       {{- include "defend.nodeSelector" . | nindent 6 }}
       {{- with .Values.tolerations }}
       tolerations:
