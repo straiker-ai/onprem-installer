@@ -1,0 +1,22 @@
+apiVersion: v2
+name: straiker-artifact
+description: >
+  Mirrors container images from Straiker's registry into the customer's ECR and
+  syncs model artifacts from Straiker's bucket into the customer's S3 bucket, via
+  in-cluster Jobs. Installed and polled to completion before charts/straiker-system,
+  since that chart's workloads pull images through the ECR mirror this populates.
+type: application
+version: 0.1.25
+appVersion: "1.0.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/straiker-ai/onprem
+sources:
+  - https://github.com/straiker-ai/onprem
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai
+keywords:
+  - straiker
+  - artifact-sync
+  - ecr
+  - s3

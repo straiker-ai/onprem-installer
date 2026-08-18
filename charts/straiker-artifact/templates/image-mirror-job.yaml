@@ -1,0 +1,90 @@
+{{- if .Values.imageMirror.enabled }}
+{{- $m := .Values.imageMirror }}
+{{/*
+crane auth login takes a bare registry host, and its credential store is
+keyed by hostname only — so both logins below use just the host, even
+though ecrRegistry itself carries a "<host>/<prefix>" path.
+*/}}
+{{- $sourceHost := index (splitList "/" (index $m.images 0).source) 0 }}
+{{- $destHost := index (splitList "/" $.Values.ecrRegistry) 0 }}
+{{- if eq $sourceHost $destHost }}
+{{- fail (printf "imageMirror source and destination registries are both %q — crane's credential store is keyed by hostname only, so source and destination auth would overwrite each other. Use a different GCP region for terraform/gcp/artifacts." $destHost) }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-artifact-image-mirror
+  namespace: {{ include "artifact-sync.namespace" . }}
+  labels:
+    {{- include "artifact-sync.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-sync
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: artifact-sync
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      restartPolicy: OnFailure
+      {{- include "artifact-sync.tolerations" . | nindent 6 }}
+      # The main container needs aws-cli or gcloud for destination-registry
+      # auth, so crane is copied in from its own image instead.
+      initContainers:
+        - name: crane
+          image: {{ printf "%s:%s" $m.image.repository $m.image.tag | quote }}
+          command: ["sh", "-c", "cp \"$(command -v crane)\" /shared/crane"]
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      containers:
+        - name: mirror
+          image: {{ include "artifact-sync.mirrorToolImage" . }}
+          # Destination auth: ECR on eks, or Workload Identity on gke (this
+          # chart's ServiceAccount is bound to the hauler GCP SA).
+          # Source auth: exchanges the mounted credential's api_key +
+          # customer_email for a short-lived token from Straiker's artifact
+          # broker, instead of holding a long-lived GCP key.
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              export PATH="/shared:$PATH"
+              {{- if eq .Values.cloudProvider "gke" }}
+              crane auth login {{ $destHost | quote }} \
+                --username oauth2accesstoken --password "$(gcloud auth print-access-token)"
+              {{- else }}
+              crane auth login {{ $destHost | quote }} \
+                --username AWS --password "$(aws ecr get-login-password)"
+              {{- end }}
+              source_api_key="$(sed -n 's/.*"api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
+              source_customer_email="$(sed -n 's/.*"customer_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
+              source_token="$(curl -sf -H "Authorization: Bearer ${source_api_key}" -H "X-Customer-Email: ${source_customer_email}" {{ .Values.brokerUrl | quote }})"
+              crane auth login {{ $sourceHost | quote }} \
+                --username oauth2accesstoken --password "${source_token}"
+              {{- range $img := $m.images }}
+              {{- $imgSku := include "artifact-sync.imageSku" $img.source }}
+              {{- if or (eq $imgSku "base") (eq $imgSku $.Values.customerSku) }}
+              echo "Mirroring {{ $img.source }}:{{ $img.tag }} -> {{ $img.destRepository }}:{{ $img.tag }}..."
+              crane copy "{{ $img.source }}:{{ $img.tag }}" "{{ $.Values.ecrRegistry }}/{{ $img.destRepository }}:{{ $img.tag }}"
+              {{- else }}
+              echo "Skipping {{ $img.source }}:{{ $img.tag }} (sku: {{ $imgSku }}) — not included for this customer's sku ({{ $.Values.customerSku }})."
+              {{- end }}
+              {{- end }}
+              echo "Image mirror complete."
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: straiker-credential
+              mountPath: /var/secrets/source
+              readOnly: true
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+      volumes:
+        - name: shared
+          emptyDir: {}
+        - name: straiker-credential
+          secret:
+            secretName: {{ .Values.straikerCredentialSecretName }}
+{{- end }}

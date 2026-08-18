@@ -1,0 +1,17 @@
+{{- if .Values.efs.enabled }}
+{{- $fsId := required "efs.fileSystemId is required when efs.enabled=true" .Values.efs.fileSystemId }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.efs.storageClass.name }}
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+provisioner: efs.csi.aws.com
+reclaimPolicy: {{ .Values.efs.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.efs.storageClass.volumeBindingMode }}
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: {{ $fsId }}
+  directoryPerms: "755"
+  basePath: /dynamic
+{{- end }}

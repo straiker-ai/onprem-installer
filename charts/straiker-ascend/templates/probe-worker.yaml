@@ -1,0 +1,127 @@
+{{- if .Values.probeWorker.enabled }}
+{{- $pw := .Values.probeWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ascend-probe-worker
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-worker
+spec:
+  replicas: {{ $pw.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-ascend-probe-worker
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-probe-worker
+    spec:
+      terminationGracePeriodSeconds: 600
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: probe-worker
+          image: {{ include "ascend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "run_probe_worker.py"]
+          resources:
+            {{- toYaml $pw.resources | nindent 12 }}
+          env:
+            {{- include "ascend.commonEnv" . | nindent 12 }}
+            - name: SYS__INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: INTERNAL_API_KEY
+            # Service-to-service key argus's own /api/v1/detect accepts with
+            # no real per-app tenant record -- see templates/secrets.yaml.
+            # Same ARGUS_SERVICE_API_KEY secret key charts/straiker-defend
+            # reads as SYS__ARGUS_SERVICE_API_KEY. Left empty (argus falls
+            # through to normal per-tenant auth, 401s, probe-worker just
+            # logs/records the detection failure) until the operator
+            # supplies one.
+            - name: SYS__ARGUS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: ARGUS_SERVICE_API_KEY
+                  optional: true
+            # Shared bearer secret this sends (http_request_handler.py) and
+            # probe-shadow's own identical secretKeyRef verifies -- only load-
+            # bearing once probeShadow.enabled is flipped back on. See
+            # probe-shadow.yaml's copy of this same key for the full note.
+            - name: SYS__IRIS_PRIVATELINK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: IRIS_PRIVATELINK_API_KEY
+                  optional: true
+            - name: SYS__INFERENCE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: SYS__INFERENCE_API_KEY
+            - name: SYS__IRIS_URL
+              value: {{ include "ascend.controlPlaneUrl" . | quote }}
+            - name: SYS__ARGUS_ENDPOINT
+              value: {{ include "ascend.argusEndpoint" . | quote }}
+            - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+              value: {{ include "ascend.foundationEndpoint" . | quote }}
+            - name: SYS__PROBE_RESPONSES_STREAM_ENABLED
+              value: "false"
+            - name: SYS__PROBE_DISPATCH_CONCURRENCY
+              value: {{ $pw.dispatchConcurrency | quote }}
+            - name: SYS__IRIS_PRIVATELINK_ENDPOINT
+              value: {{ include "ascend.privatelinkEndpoint" . | quote }}
+            # Without this, escalation-driven pauses (target_health,
+            # credential_error, probe_delivery_failures) never reach
+            # straiker-frontend/the customer-facing UI - a real bug fixed in
+            # iris/deploy/helm/probe_worker's own SaaS chart, since
+            # probe_worker is the process that actually fires these
+            # escalations for the v2 engine.
+            - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+              value: {{ .Values.publishTestRunSummary | quote }}
+            - name: SYS__DATA_EXFILTRATION_ENDPOINT
+              value: {{ include "ascend.externalUrl" . | quote }}
+            - name: SYS__DB_HOST
+              value: {{ required "db.host is required" .Values.db.host | quote }}
+            - name: SYS__DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: SYS__DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: SYS__DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: SYS__ASCEND_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $pw.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: straiker-ascend-probe-worker
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $pw.hpa.minReplicas }}
+  maxReplicas: {{ $pw.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: straiker-ascend-probe-worker
+  targetCPUUtilizationPercentage: {{ $pw.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

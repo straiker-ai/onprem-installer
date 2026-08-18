@@ -1,0 +1,59 @@
+enabled: true
+
+image:
+  # Official upstream image (not a Straiker fork), mirrored by
+  # charts/straiker-artifact under this exact repository/tag
+  # (onprem-base/maximhq/bifrost).
+  repository: maximhq/bifrost
+  tag: v1.6.7
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Defaults to the parent chart's global.sharedNodeSelector (see
+# bifrost.nodeSelector in _helpers.tpl) — set here only to schedule this
+# component differently from everything else in the release.
+nodeSelector: {}
+tolerations: []
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "128Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+
+service:
+  type: ClusterIP
+  port: 8090
+
+# Enables the /metrics endpoint on the bifrost port.
+telemetry:
+  metricsEnabled: true
+
+# No semantic cache yet (deferred) — bifrost runs with just LLM provider
+# routing, no vector-store-backed caching plugin configured.
+
+# Read from secretRef.name (straiker-secrets, operator-supplied). All keys
+# are optional — the secret itself (or any individual key) may not exist yet
+# when this chart is first installed, and bifrost should still start (just
+# unable to route to that provider until the operator adds it).
+secretRef:
+  name: straiker-secrets
+  openaiKey: SYS__OPENAI_API_KEY
+  xaiKey: SYS__XAI_API_KEY
+  anthropicKey: SYS__ANTHROPIC_API_KEY
+  bedrockAccessKeyId: SYS__AWS_ACCESS_KEY_ID
+  bedrockSecretAccessKey: SYS__AWS_SECRET_ACCESS_KEY
+
+# AWS Bedrock — only load-bearing once a customer picks "bedrock" as a
+# recon-agent provider (see iris/config/recon/agents_config.py's
+# PROVIDER_MODELS) and populates the two secretRef keys above. Region isn't
+# a secret, so it's a plain value (embedded directly into configmap.yaml's
+# config.json) rather than a third secretRef key — override per-install if
+# the customer's Bedrock access isn't in us-east-1.
+bedrock:
+  region: us-east-1

@@ -1,0 +1,309 @@
+# global.dockerRegistry: same convention as every other chart in this repo —
+# when set, iris's image (relative repository, no registry host) resolves
+# against this instead of pulling directly from Straiker's own registry.
+# global.appDomain: must match charts/straiker-core's and charts/straiker-edge's
+# own global.appDomain — this chart's own externally-routed hostname
+# (ascend.<appDomain>, once added to charts/straiker-edge's routes list) and
+# straiker-frontend's (app.<appDomain>, for CORS) both depend on agreeing here.
+global:
+  dockerRegistry: ""
+  appDomain: straiker.internal
+
+# Same independent-top-level-charts caveat as charts/straiker-core/charts/
+# straiker-frontend's own edgeHttpsPort: must match charts/straiker-edge's
+# httpsPort — used here to compute this chart's own externally-reachable URL
+# (SYS__DATA_EXFILTRATION_ENDPOINT) and straiker-frontend's origin (CORS).
+edgeHttpsPort: 8443
+
+# One image for every component below (control-plane/probe-worker/probe-
+# shadow/recon-worker/report-worker/assessment-cleanup/db-migrate all run
+# the same image with a different `command`) — matches
+# ~/straiker/iris/onprem/Dockerfile and cloudbuild.yaml exactly (single
+# `straiker/iris:<tag>` image, no separate migrate variant the way
+# straiker-core/frontend has).
+image:
+  repository: straiker/iris
+  # Known future tag -- confirmed with the iris team, not yet built/pushed
+  # as of this chart's authoring. Confirm this has actually landed at
+  # us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
+  # before relying on it (same caveat as before, tag name now finalized).
+  tag: onprem-v2026.8.13
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccountName: straiker-ascend
+
+replicas: 1
+
+logging:
+  level: INFO
+
+nodeSelector: {}
+# Matches charts/straiker-system's karpenter.iris NodeClass taint.
+tolerations:
+  - key: purpose
+    operator: Equal
+    value: straiker-iris
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────
+# Defaults to charts/straiker-system's own shared postgres, in
+# global.infraNamespace -- that chart's postgres.databases list already has
+# an "iris"/"iris" entry (name/user) provisioned for this.
+db:
+  host: ""
+  port: 5432
+  name: iris
+  user: iris
+  sslMode: disable
+  # Matches charts/straiker-system's postgres.yaml Secret exactly
+  # (postgres-secret / POSTGRES_PASSWORD_IRIS) -- not a separate
+  # operator-supplied secret.
+  passwordSecret:
+    name: ""
+    key: ""
+
+# Pre-install/pre-upgrade Helm hook Job that applies this project's
+# Liquibase migrations (embedded as ConfigMaps from
+# packages/database/src/rds/liquibase in the iris repo -- the current
+# onprem image no longer bundles them the way the old chart's db-migrate
+# assumed, confirmed against onprem/Dockerfile) before any ascend pods start.
+dbMigrate:
+  enabled: true
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+# ── Redis (shared straiker-system valkey instance) ───────────────────────
+redis:
+  url: ""
+
+# ── Bifrost LLM gateway override ──────────────────────────────────────────
+# Empty (default): iris calls its own in-cluster Bifrost (charts/straiker-
+# core/charts/straiker-bifrost) at bifrost-service:8090 -- whichever
+# providers that chart's own config.json has configured (bring-your-own
+# OpenAI/Anthropic/xAI keys, or AWS Bedrock creds) are invisible to iris,
+# it's the same in-cluster call either way.
+#
+# Set baseUrl to route through a *different* Bifrost instead -- e.g. a
+# Straiker-hosted virtual-key gateway for PoC/trial use (matches onprem/
+# .env.onprem.example's "Mode 1" for the identical distinction in the local
+# docker-compose stack). BIFROST_API_KEY in straiker-secrets is the matching
+# virtual key for that case -- optional/unused for the default in-cluster
+# path, since that chart's own config.json has no virtual-key enforcement.
+bifrost:
+  baseUrl: ""
+
+# ── Archive pipeline: iris posts events over HTTP to the shared
+# straiker-system Redpanda Connect (Benthos), same as charts/straiker-defend.
+archive:
+  enabled: true
+  # Any string works -- the shared benthos pipeline routes dynamically by
+  # this field's own value (see charts/straiker-system's benthos.yaml), not
+  # a fixed set of known streams.
+  stream: iris
+  endpoint: ""
+
+# ── Foundation (tenant/app/settings control plane) — straiker-core's
+# frontend serves this. Auto-derives to straiker-frontend-service in this
+# same namespace.
+foundationEndpoint: ""
+
+# ── Argus detection endpoint — straiker-defend's Service, in this same
+# namespace, once that product is also selected. apiKey is the new
+# service-to-service key argus's own /api/v1/detect route accepts with no
+# real per-app tenant record (settings.argus_service_api_key on argus's side)
+# -- both charts must reference the same "ARGUS_SERVICE_API_KEY" key in
+# straiker-secrets, see templates/secrets.yaml.
+argus:
+  endpoint: ""
+
+# ── Capture-callback target for the DataPoint/data-exfiltration probe
+# technique -- needs iris's own control-plane reachable from outside its own
+# pod. Empty here defaults to https://ascend.<global.appDomain>:<edgeHttpsPort>
+# (see _helpers.tpl's "ascend.externalUrl") once an "ascend" route is added
+# to charts/straiker-edge; override only if routing that traffic elsewhere.
+dataExfiltrationEndpoint: ""
+
+# ── CORS origin allowed to call control-plane's browser-facing API -- the
+# customer's own dashboard, i.e. straiker-frontend's routed origin. Empty
+# defaults to https://app.<global.appDomain>:<edgeHttpsPort> (see
+# _helpers.tpl's "ascend.frontendOrigin"), matching straiker-frontend's own
+# "frontend.origin" computation exactly.
+corsAllowOrigins: ""
+
+# Publish assessment progress/results to straiker-core's frontend -- must be
+# true for on-prem, the UI depends on these callbacks to show progress.
+publishTestRunSummary: true
+
+# Enforce rate limiting against the target application endpoint (floor: 60 QPM).
+rateLimitCheck: true
+
+systemPrompt:
+  maxLength: 5000
+
+unalignedLLM:
+  throttle:
+    enabled: false
+    rpm: 300
+
+cleanup:
+  delayDays: 30
+  throttleSeconds: 60
+
+# ── Component: control-plane ──────────────────────────────────────────────
+controlPlane:
+  enabled: true
+  replicaCount: 1
+  # Allow in-flight start_run probe-generation tasks to finish before the
+  # pod is killed during a rolling update -- must be > the longest expected
+  # probe-generation cycle.
+  terminationGracePeriodSeconds: 300
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8081
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+  # Internal-only diagnostic MCP server (iris/opsai/mcp_server.py) -- runs in
+  # this same process on its own port, no separate Ingress/Service, reachable
+  # only via kubectl port-forward. On by default, matching iris/deploy/helm/
+  # control_plane's own SaaS default -- there's no on-prem-specific reason to
+  # lock this down further (diagnostic-only, no external exposure either way).
+  mcp:
+    enabled: true
+    port: 8181
+
+# ── Component: probe-shadow ───────────────────────────────────────────────
+# Disabled by default on-prem: this is a bridge, backing two distinct
+# use cases (see iris/prober/target_session.py's own comments) --
+# (1) a network bridge for targets probe-worker can't route to directly
+# (mostly a SaaS problem: on-prem, probe-worker already sits inside the
+# customer's own network), and (2) the Munir browser extension, which
+# relays probes through an analyst's own authenticated browser session for
+# SSO/session-gated targets -- independent of network topology, but a
+# narrower need than on the SaaS side. Customers who need (2) can flip this
+# back on; nothing else in the chart depends on it (opt-in per-application
+# via the app's own endpoint config, see iris_privatelink_endpoint).
+probeShadow:
+  enabled: false
+  replicaCount: 1
+  # How long (s) probe-shadow waits for a bridge response before returning
+  # 504 -- matches ~/straiker/iris/onprem/docker-compose.yml's own default.
+  # Raise for on-prem deployments with slow target apps.
+  bridgeResponseTimeoutSeconds: 120
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8005
+    sessionAffinity: ClientIP
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# ── Component: probe-worker ───────────────────────────────────────────────
+probeWorker:
+  enabled: true
+  replicaCount: 1
+  # Max concurrent in-flight probe dispatches per pod -- matches
+  # iris/deploy/helm/probe_worker's own SaaS default (dev/stage; prod there
+  # runs a more conservative 10 while watching target-side error rates).
+  dispatchConcurrency: 20
+  resources:
+    requests:
+      cpu: 500m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# ── Component: report-worker ──────────────────────────────────────────────
+reportWorker:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# ── Component: recon-worker ───────────────────────────────────────────────
+# Processes reconnaissance assessment tasks from the Redis queue. Requires
+# PostgreSQL -- stores recon turns, tasks, and results.
+reconWorker:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# ── Component: assessment-cleanup (daily CronJob) ────────────────────────
+assessmentCleanup:
+  enabled: true
+  schedule: "0 2 * * *"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  ttlSecondsAfterFinished: 21600
+  activeDeadlineSeconds: 14400
+  backoffLimit: 2
+  concurrencyPolicy: Forbid
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false

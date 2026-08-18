@@ -1,0 +1,71 @@
+{{- if .Values.modelSync.enabled }}
+{{- $s := .Values.modelSync }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-artifact-model-sync
+  namespace: {{ include "artifact-sync.namespace" . }}
+  labels:
+    {{- include "artifact-sync.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-sync
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: artifact-sync
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      restartPolicy: OnFailure
+      {{- include "artifact-sync.tolerations" . | nindent 6 }}
+      containers:
+        - name: sync
+          image: {{ printf "%s:%s" $s.image.repository $s.image.tag | quote }}
+          # Destination auth: env_auth=true picks up EKS Pod Identity / GKE
+          # Workload Identity automatically. Source auth: exchanges the
+          # mounted credential's api_key + customer_email for a short-lived
+          # token from Straiker's artifact broker, re-minted before each
+          # model since a sync can run close to or past the token's 1-hour
+          # lifetime. This image only has BusyBox (no curl), hence wget.
+          #
+          # --gcs-token must be a top-level flag, not embedded in the source
+          # remote's own connection string — rclone's connection-string
+          # parser splits on commas, which the token JSON's body also
+          # contains.
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              {{- range $model := $s.models }}
+              {{- if or (not $s.enabledModels) (has $model.destPath $s.enabledModels) }}
+              echo "Syncing {{ $s.sourceBucket }}/{{ $model.path }} -> {{ $.Values.modelsBucket }}/models/{{ $model.destPath }}..."
+              source_api_key="$(sed -n 's/.*"api_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
+              source_customer_email="$(sed -n 's/.*"customer_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /var/secrets/source/key.json)"
+              source_token="$(wget -qO- --header "Authorization: Bearer ${source_api_key}" --header "X-Customer-Email: ${source_customer_email}" {{ $.Values.brokerUrl | quote }})"
+              token_expiry="$(date -u -d "@$(( $(date +%s) + 3300 ))" +%Y-%m-%dT%H:%M:%SZ)"
+              rclone sync \
+                --gcs-token "{\"access_token\":\"${source_token}\",\"token_type\":\"Bearer\",\"expiry\":\"${token_expiry}\"}" \
+                ":gcs:{{ $s.sourceBucket }}/{{ $model.path }}" \
+                {{- if eq $.Values.cloudProvider "gke" }}
+                ":gcs,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
+                {{- else }}
+                ":s3,env_auth=true:{{ $.Values.modelsBucket }}/models/{{ $model.destPath }}" \
+                {{- end }}
+                --progress --transfers 8 --checkers 16
+              {{- else }}
+              echo "Skipping {{ $model.destPath }} (not in modelSync.enabledModels)."
+              {{- end }}
+              {{- end }}
+              echo "Model sync complete."
+          volumeMounts:
+            - name: straiker-credential
+              mountPath: /var/secrets/source
+              readOnly: true
+          resources:
+            {{- toYaml $s.resources | nindent 12 }}
+      volumes:
+        - name: straiker-credential
+          secret:
+            secretName: {{ .Values.straikerCredentialSecretName }}
+{{- end }}

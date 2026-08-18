@@ -1,0 +1,83 @@
+{{- if .Values.reportWorker.enabled }}
+{{- $rw := .Values.reportWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ascend-report-worker
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: report-worker
+spec:
+  replicas: {{ $rw.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-ascend-report-worker
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-report-worker
+    spec:
+      terminationGracePeriodSeconds: 300
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: report-worker
+          image: {{ include "ascend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "run_report_worker.py"]
+          resources:
+            {{- toYaml $rw.resources | nindent 12 }}
+          env:
+            {{- include "ascend.commonEnv" . | nindent 12 }}
+            - name: SYS__INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+              value: {{ .Values.publishTestRunSummary | quote }}
+            - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+              value: {{ include "ascend.foundationEndpoint" . | quote }}
+            - name: SYS__DATA_EXFILTRATION_ENDPOINT
+              value: {{ include "ascend.externalUrl" . | quote }}
+            - name: SYS__DB_HOST
+              value: {{ required "db.host is required" .Values.db.host | quote }}
+            - name: SYS__DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: SYS__DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: SYS__DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: SYS__ASCEND_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $rw.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: straiker-ascend-report-worker
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $rw.hpa.minReplicas }}
+  maxReplicas: {{ $rw.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: straiker-ascend-report-worker
+  targetCPUUtilizationPercentage: {{ $rw.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

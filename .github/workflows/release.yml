@@ -1,0 +1,186 @@
+name: Release Charts
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: dist-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # See https://github.com for updates
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Add chart dependency repos
+        run: |
+          set -euo pipefail
+          for chart in charts/*/Chart.yaml; do
+            yq -r '.dependencies[]? | select(.repository | test("^https?://")) | "\(.name) \(.repository)"' "$chart"
+          done | grep -v '^[[:space:]]*$' | sort -u | while read -r name url; do
+            helm repo add "$name" "$url"
+          done
+          helm repo update
+
+      - name: Lint charts
+        run: |
+          set -euo pipefail
+          for chart in charts/*/; do
+            helm dependency update "$chart"
+            helm lint "$chart"
+          done
+
+      - name: Ensure dist branch and index
+        run: |
+          set -euo pipefail
+          worktree="$(mktemp -d)"
+          if ! git ls-remote --exit-code --heads origin dist >/dev/null 2>&1; then
+            git worktree add --detach "$worktree" HEAD
+            git -C "$worktree" switch --orphan dist
+            git -C "$worktree" rm -rf . >/dev/null 2>&1 || true
+            printf '%s\n' \
+              'apiVersion: v1' \
+              'entries: {}' \
+              'generated: "1970-01-01T00:00:00Z"' \
+              > "$worktree/index.yaml"
+            git -C "$worktree" add index.yaml
+            git -C "$worktree" commit -m "Initialize dist"
+            git -C "$worktree" push origin dist
+            git worktree remove --force "$worktree"
+            exit 0
+          fi
+
+          git fetch origin dist
+          git worktree add --detach "$worktree" origin/dist
+          if [[ ! -s "$worktree/index.yaml" ]]; then
+            printf '%s\n' \
+              'apiVersion: v1' \
+              'entries: {}' \
+              'generated: "1970-01-01T00:00:00Z"' \
+              > "$worktree/index.yaml"
+            git -C "$worktree" add index.yaml
+            git -C "$worktree" commit -m "Repair dist index"
+            git -C "$worktree" push origin HEAD:dist
+          fi
+          git worktree remove --force "$worktree"
+
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: charts
+          pages_branch: dist
+          skip_existing: true
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Build installer bundle + launcher
+        run: |
+          set -euo pipefail
+          version="$(git rev-parse --short HEAD)"
+          bundle_url="https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/bundles/straiker-installer-${version}.tar.gz"
+
+          scripts/release/package-installer-bundle.sh --version "${version}" --output-dir dist/installer
+          scripts/release/render-launcher.sh --version "${version}" --bundle-url "${bundle_url}" \
+            --template scripts/launch-straiker.sh --output dist/install.sh
+          scripts/release/render-launcher.sh --version "${version}" --bundle-url "${bundle_url}" \
+            --template scripts/launch-uninstall.sh --output dist/uninstall.sh
+
+          echo "INSTALLER_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Publish installer bundle + launchers
+        run: |
+          set -euo pipefail
+          BUNDLE_RETAIN=10
+          worktree="$(mktemp -d)"
+          git fetch origin dist
+          git worktree add --detach "$worktree" origin/dist
+          mkdir -p "$worktree/bundles"
+          cp "dist/installer/straiker-installer-${INSTALLER_VERSION}.tar.gz" "$worktree/bundles/"
+          cp dist/install.sh "$worktree/install.sh"
+          cp dist/uninstall.sh "$worktree/uninstall.sh"
+
+          # Prune old bundles beyond BUNDLE_RETAIN, oldest first, so uninstall can
+          # still find the exact bundle version a recent install recorded in state.
+          # Order comes from dist's own history (newest bundle-adding commit first).
+          mapfile -t ordered < <(
+            git -C "$worktree" log --diff-filter=A --name-only --format= -- bundles/ \
+              | grep -v '^$' | awk '!seen[$0]++'
+          )
+          for stale in "${ordered[@]:${BUNDLE_RETAIN}}"; do
+            rm -f "$worktree/${stale}"
+          done
+
+          git -C "$worktree" add -A bundles/ install.sh uninstall.sh
+          if ! git -C "$worktree" diff --cached --quiet; then
+            git -C "$worktree" commit -m "Publish installer bundle ${INSTALLER_VERSION}"
+            git -C "$worktree" push origin HEAD:dist
+          fi
+          git worktree remove --force "$worktree"
+
+      - name: Prune old chart releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # chart-releaser creates one GitHub Release + tag per published
+          # version, with no retention of its own — at this project's version
+          # churn (see e.g. straiker-artifact's 0.1.0 -> 0.1.18 in under a
+          # week) that grows unbounded. install-straiker.sh never pins an
+          # exact --version (always resolves latest), so nothing depends on
+          # old chart versions still existing; keeping this many of the most
+          # recent per chart is just a safety margin for manual rollback.
+          RETAIN: "5"
+        run: |
+          set -euo pipefail
+          worktree="$(mktemp -d)"
+          git fetch origin dist
+          git worktree add --detach "$worktree" origin/dist
+
+          index_changed=false
+          for chart_yaml in charts/*/Chart.yaml; do
+            chart_name="$(yq -r '.name' "$chart_yaml")"
+
+            # Tag/release name format is "<chart-name>-<version>" (chart-releaser's
+            # convention). Anchor on a semver-shaped suffix so a shorter chart name
+            # that's a prefix of another (e.g. "straiker" vs "straiker-artifact")
+            # doesn't also match that other chart's releases.
+            mapfile -t tags < <(
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+                --json tagName,createdAt \
+                --jq ".[] | select(.tagName | test(\"^${chart_name}-[0-9]+\\\\.[0-9]+\\\\.[0-9]+\")) | [.createdAt, .tagName] | @tsv" \
+                | sort -r | cut -f2
+            )
+            if (( ${#tags[@]} <= RETAIN )); then
+              continue
+            fi
+
+            for tag in "${tags[@]:RETAIN}"; do
+              version="${tag#${chart_name}-}"
+              echo "Pruning release '${tag}' (beyond the last ${RETAIN} for '${chart_name}')..."
+              gh release delete "${tag}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              yq -i "del(.entries.\"${chart_name}\"[] | select(.version == \"${version}\"))" "$worktree/index.yaml"
+              index_changed=true
+            done
+          done
+
+          if [[ "${index_changed}" == true ]]; then
+            git -C "$worktree" add index.yaml
+            git -C "$worktree" commit -m "Prune index entries for deleted chart releases"
+            git -C "$worktree" push origin HEAD:dist
+          fi
+          git worktree remove --force "$worktree"

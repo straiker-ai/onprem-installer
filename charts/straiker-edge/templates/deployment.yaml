@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-edge
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: straiker-edge
+  template:
+    metadata:
+      labels:
+        app: straiker-edge
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: caddy
+          image: {{ include "edge.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+              name: http
+            - containerPort: {{ .Values.httpsPort }}
+              name: https
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: straiker-edge-config
+        # Disposable — self-signed certs regenerate on restart.
+        - name: data
+          emptyDir: {}
+        - name: config-dir
+          emptyDir: {}
+      nodeSelector:
+        {{- include "edge.nodeSelector" . | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

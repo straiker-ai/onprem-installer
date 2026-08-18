@@ -1,0 +1,134 @@
+{{- if .Values.controlPlane.enabled }}
+{{- $cp := .Values.controlPlane }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ascend-control-plane
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ $cp.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-ascend-control-plane
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-control-plane
+    spec:
+      terminationGracePeriodSeconds: {{ $cp.terminationGracePeriodSeconds }}
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control-plane
+          image: {{ include "ascend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "run_control_plane.py"]
+          resources:
+            {{- toYaml $cp.resources | nindent 12 }}
+          env:
+            {{- include "ascend.commonEnv" . | nindent 12 }}
+            - name: SYS__INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: SYS__IRIS_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: IRIS_ADMIN_API_KEY
+            - name: SYS__DB_HOST
+              value: {{ required "db.host is required" .Values.db.host | quote }}
+            - name: SYS__DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: SYS__DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: SYS__DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: SYS__ASCEND_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+            - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+              value: {{ include "ascend.foundationEndpoint" . | quote }}
+            - name: SYS__SYSTEM_PROMPT_MAX_LENGTH
+              value: {{ .Values.systemPrompt.maxLength | quote }}
+            - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+              value: {{ .Values.publishTestRunSummary | quote }}
+            - name: SYS__IRIS_PRIVATELINK_ENDPOINT
+              value: {{ include "ascend.privatelinkEndpoint" . | quote }}
+            - name: SYS__CORS_ALLOW_ORIGINS
+              value: {{ include "ascend.frontendOrigin" . | quote }}
+            - name: SYS__DATA_EXFILTRATION_ENDPOINT
+              value: {{ include "ascend.externalUrl" . | quote }}
+            # Internal-only diagnostic MCP server (iris/opsai/mcp_server.py) -
+            # own port, no separate Ingress, reachable only via kubectl
+            # port-forward. Only takes effect once this actually deploys the
+            # port below (see the ports: block).
+            - name: SYS__MCP_ENABLED
+              value: {{ $cp.mcp.enabled | quote }}
+            - name: SYS__MCP_PORT
+              value: {{ $cp.mcp.port | quote }}
+          ports:
+            - containerPort: {{ $cp.service.targetPort }}
+            {{- if $cp.mcp.enabled }}
+            - containerPort: {{ $cp.mcp.port }}
+              name: mcp
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /api/v1/public/ping
+              port: {{ $cp.service.targetPort }}
+            initialDelaySeconds: 20
+            periodSeconds: 40
+            timeoutSeconds: 30
+            failureThreshold: 20
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-ascend-control-plane
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ $cp.service.type }}
+  selector:
+    app: straiker-ascend-control-plane
+  ports:
+    - protocol: TCP
+      port: {{ $cp.service.port }}
+      targetPort: {{ $cp.service.targetPort }}
+      name: http
+{{- if $cp.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: straiker-ascend-control-plane
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $cp.hpa.minReplicas }}
+  maxReplicas: {{ $cp.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: straiker-ascend-control-plane
+  targetCPUUtilizationPercentage: {{ $cp.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

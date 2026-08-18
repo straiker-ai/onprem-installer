@@ -1,0 +1,1365 @@
+{{- if .Values.dbMigrate.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-ascend-liquibase-master
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+data:
+  master.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "includeAll": {
+            "path": "./changes",
+            "relativeToChangelogFile": true
+          }
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-ascend-liquibase-changes
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+data:
+  20250101-create-recon-tables.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "create-recon-request-table",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "tableExists": {
+                  "tableName": "recon_request"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createTable": {
+                  "tableName": "recon_request",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "id",
+                        "type": "uuid",
+                        "defaultValueComputed": "gen_random_uuid()",
+                        "constraints": {
+                          "primaryKey": true,
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "app_id",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "straiker_id",
+                        "type": "int",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "name",
+                        "type": "varchar(255)"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "controls",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "hash_backend",
+                        "type": "varchar(255)"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "agent_config",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "application_details",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "status",
+                        "type": "varchar(50)",
+                        "defaultValue": "pending",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "category_summaries",
+                        "type": "jsonb",
+                        "defaultValueComputed": "'{}'::jsonb",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "updated_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sql": {
+                  "sql": "ALTER TABLE recon_request ADD CONSTRAINT chk_recon_request_status CHECK (status IN ('pending', 'in_progress', 'paused', 'completed', 'error'))"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-tasks-table",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "tableExists": {
+                  "tableName": "recon_tasks"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createTable": {
+                  "tableName": "recon_tasks",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "id",
+                        "type": "uuid",
+                        "defaultValueComputed": "gen_random_uuid()",
+                        "constraints": {
+                          "primaryKey": true,
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "straiker_id",
+                        "type": "int",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "recon_request_id",
+                        "type": "uuid"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "app_id",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "category",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "control",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "goal",
+                        "type": "text",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "max_turn",
+                        "type": "int",
+                        "defaultValueNumeric": 10,
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "status",
+                        "type": "varchar(50)",
+                        "defaultValue": "pending",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "total_turns",
+                        "type": "int"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "final_status",
+                        "type": "varchar(50)"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "goal_matched",
+                        "type": "boolean",
+                        "defaultValueBoolean": false
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "application_details",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "application_config",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "documentation_content",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "json_schema",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "agent_config",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "seed_prompt",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "updated_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "addForeignKeyConstraint": {
+                  "baseTableName": "recon_tasks",
+                  "baseColumnNames": "recon_request_id",
+                  "referencedTableName": "recon_request",
+                  "referencedColumnNames": "id",
+                  "constraintName": "fk_recon_tasks_request_id",
+                  "onDelete": "CASCADE"
+                }
+              },
+              {
+                "sql": {
+                  "sql": "ALTER TABLE recon_tasks ADD CONSTRAINT chk_recon_tasks_status CHECK (status IN ('pending', 'in_progress', 'paused', 'completed', 'max_turns_reached', 'error'))"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-turns-table",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "tableExists": {
+                  "tableName": "recon_turns"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createTable": {
+                  "tableName": "recon_turns",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "id",
+                        "type": "uuid",
+                        "defaultValueComputed": "gen_random_uuid()",
+                        "constraints": {
+                          "primaryKey": true,
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "straiker_id",
+                        "type": "int",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "recon_task_id",
+                        "type": "uuid",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "turn_number",
+                        "type": "int",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "question",
+                        "type": "text",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "question_reasoning",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "response",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "status_code",
+                        "type": "int"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "summarized_recon_structured",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "summarized_recon_json",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "goal_matched",
+                        "type": "boolean",
+                        "defaultValueBoolean": false
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "goal_reasoning",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "pii_database",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "pii_reasoning",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "generate_question_debug",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "addForeignKeyConstraint": {
+                  "baseTableName": "recon_turns",
+                  "baseColumnNames": "recon_task_id",
+                  "referencedTableName": "recon_tasks",
+                  "referencedColumnNames": "id",
+                  "constraintName": "fk_recon_turns_task_id",
+                  "onDelete": "CASCADE"
+                }
+              },
+              {
+                "addUniqueConstraint": {
+                  "tableName": "recon_turns",
+                  "columnNames": "recon_task_id,turn_number",
+                  "constraintName": "unique_turn_per_task"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-request-indexes",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "indexExists": {
+                  "indexName": "idx_recon_request_app_id"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createIndex": {
+                  "tableName": "recon_request",
+                  "indexName": "idx_recon_request_app_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "app_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_request",
+                  "indexName": "idx_recon_request_straiker_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "straiker_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_request",
+                  "indexName": "idx_recon_request_status",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "status"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_request",
+                  "indexName": "idx_recon_request_created_at",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "descending": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-tasks-indexes",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "indexExists": {
+                  "indexName": "idx_recon_tasks_straiker_id"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_straiker_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "straiker_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_request_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "recon_request_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_app_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "app_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_category",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "category"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_control",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "control"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_status",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "status"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_final_status",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "final_status"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_goal_matched",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "goal_matched"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_created_at",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "descending": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-turns-indexes",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "indexExists": {
+                  "indexName": "idx_recon_turns_straiker_id"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createIndex": {
+                  "tableName": "recon_turns",
+                  "indexName": "idx_recon_turns_straiker_id",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "straiker_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_turns",
+                  "indexName": "idx_recon_turns_task_turn",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "recon_task_id"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "turn_number"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_turns",
+                  "indexName": "idx_recon_turns_goal_matched",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "goal_matched"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-update-trigger-function",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "sqlCheck": {
+                  "expectedResult": "1",
+                  "sql": "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname = 'update_updated_at_column'"
+                }
+              }
+            },
+            "changes": [
+              {
+                "sql": {
+                  "sql": "CREATE OR REPLACE FUNCTION update_updated_at_column() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = CURRENT_TIMESTAMP; RETURN NEW; END; $$ language 'plpgsql'"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-triggers",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "sqlCheck": {
+                  "expectedResult": "1",
+                  "sql": "SELECT 1 FROM pg_trigger WHERE tgname = 'update_recon_request_updated_at'"
+                }
+              }
+            },
+            "changes": [
+              {
+                "sql": {
+                  "sql": "DROP TRIGGER IF EXISTS update_recon_request_updated_at ON recon_request; CREATE TRIGGER update_recon_request_updated_at BEFORE UPDATE ON recon_request FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();"
+                }
+              },
+              {
+                "sql": {
+                  "sql": "DROP TRIGGER IF EXISTS update_recon_tasks_updated_at ON recon_tasks; CREATE TRIGGER update_recon_tasks_updated_at BEFORE UPDATE ON recon_tasks FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-app-recon-results-table",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "tableExists": {
+                  "tableName": "app_recon_results"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createTable": {
+                  "tableName": "app_recon_results",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "id",
+                        "type": "uuid",
+                        "defaultValueComputed": "gen_random_uuid()",
+                        "constraints": {
+                          "primaryKey": true,
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "app_id",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "straiker_id",
+                        "type": "int",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "category",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "control",
+                        "type": "varchar(255)",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "summarized_recon_structured",
+                        "type": "text"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "summarized_recon_json",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "source_request_id",
+                        "type": "uuid"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "source_task_id",
+                        "type": "uuid"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "total_turns",
+                        "type": "int",
+                        "defaultValueNumeric": 0
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "goal_matched",
+                        "type": "boolean",
+                        "defaultValueBoolean": false
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "final_status",
+                        "type": "varchar(50)"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "created_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "updated_at",
+                        "type": "timestamptz",
+                        "defaultValueComputed": "CURRENT_TIMESTAMP",
+                        "constraints": {
+                          "nullable": false
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "addForeignKeyConstraint": {
+                  "baseTableName": "app_recon_results",
+                  "baseColumnNames": "source_request_id",
+                  "referencedTableName": "recon_request",
+                  "referencedColumnNames": "id",
+                  "constraintName": "fk_app_recon_results_request_id",
+                  "onDelete": "SET NULL"
+                }
+              },
+              {
+                "addUniqueConstraint": {
+                  "tableName": "app_recon_results",
+                  "columnNames": "app_id,straiker_id,category,control",
+                  "constraintName": "unique_app_category_control"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-app-recon-results-indexes",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "indexExists": {
+                  "indexName": "idx_app_recon_results_app"
+                }
+              }
+            },
+            "changes": [
+              {
+                "createIndex": {
+                  "tableName": "app_recon_results",
+                  "indexName": "idx_app_recon_results_app",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "app_id"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "straiker_id"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "app_recon_results",
+                  "indexName": "idx_app_recon_results_category",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "category"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "app_recon_results",
+                  "indexName": "idx_app_recon_results_control",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "control"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-app-recon-results-trigger",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "sqlCheck": {
+                  "expectedResult": "1",
+                  "sql": "SELECT 1 FROM pg_trigger WHERE tgname = 'update_app_recon_results_updated_at'"
+                }
+              }
+            },
+            "changes": [
+              {
+                "sql": {
+                  "sql": "DROP TRIGGER IF EXISTS update_app_recon_results_updated_at ON app_recon_results; CREATE TRIGGER update_app_recon_results_updated_at BEFORE UPDATE ON app_recon_results FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "changeSet": {
+            "id": "create-recon-turns-partial-indexes",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "indexExists": {
+                  "indexName": "idx_recon_turns_question_debug_error"
+                }
+              }
+            },
+            "changes": [
+              {
+                "sql": {
+                  "sql": "CREATE INDEX IF NOT EXISTS idx_recon_turns_question_debug_error ON recon_turns ((generate_question_debug->>'error')) WHERE generate_question_debug IS NOT NULL AND generate_question_debug->>'error' IS NOT NULL"
+                }
+              },
+              {
+                "sql": {
+                  "sql": "CREATE INDEX IF NOT EXISTS idx_recon_turns_question_debug_fallback ON recon_turns ((generate_question_debug->>'used_fallback')) WHERE generate_question_debug IS NOT NULL AND (generate_question_debug->>'used_fallback')::boolean = true"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20250102-add-recon-request-name.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-recon-request-name",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_request",
+                  "columnName": "name"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_request",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "name",
+                        "type": "varchar(255)"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20250103-add-app-details-to-request.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-app-details-to-request",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_request",
+                  "columnName": "application_details"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_request",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "application_details",
+                        "type": "jsonb"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sql": {
+                  "sql": "UPDATE recon_request rr SET application_details = (SELECT application_details FROM recon_tasks rt WHERE rt.recon_request_id = rr.id AND rt.application_details IS NOT NULL ORDER BY rt.created_at ASC LIMIT 1) WHERE rr.application_details IS NULL"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20250104-add-pii-columns.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-pii-columns-turns",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_turns",
+                  "columnName": "pii_database"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_turns",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "pii_database",
+                        "type": "jsonb"
+                      }
+                    },
+                    {
+                      "column": {
+                        "name": "pii_reasoning",
+                        "type": "text"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20250105-add-goal-matched-to-tasks.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-goal-matched-to-tasks",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_tasks",
+                  "columnName": "goal_matched"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_tasks",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "goal_matched",
+                        "type": "boolean",
+                        "defaultValueBoolean": false
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sql": {
+                  "sql": "UPDATE recon_tasks t SET goal_matched = COALESCE((SELECT BOOL_OR(turns.goal_matched) FROM recon_turns turns WHERE turns.recon_task_id = t.id), FALSE) WHERE t.final_status IS NOT NULL"
+                }
+              },
+              {
+                "createIndex": {
+                  "tableName": "recon_tasks",
+                  "indexName": "idx_recon_tasks_goal_matched",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "goal_matched"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20260122-add-generate-question-debug-to-turns.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-generate-question-debug",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_turns",
+                  "columnName": "generate_question_debug"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_turns",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "generate_question_debug",
+                        "type": "jsonb"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sql": {
+                  "sql": "CREATE INDEX IF NOT EXISTS idx_recon_turns_question_debug_error ON recon_turns ((generate_question_debug->>'error')) WHERE generate_question_debug IS NOT NULL AND generate_question_debug->>'error' IS NOT NULL"
+                }
+              },
+              {
+                "sql": {
+                  "sql": "CREATE INDEX IF NOT EXISTS idx_recon_turns_question_debug_fallback ON recon_turns ((generate_question_debug->>'used_fallback')) WHERE generate_question_debug IS NOT NULL AND (generate_question_debug->>'used_fallback')::boolean = true"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20260126-add-deleted-at-to-recon-request.json: |
+    {
+      "databaseChangeLog": [
+        {
+          "changeSet": {
+            "id": "add-deleted-at-recon-request",
+            "author": "iris",
+            "preConditions": {
+              "onFail": "MARK_RAN",
+              "onError": "MARK_RAN",
+              "not": {
+                "columnExists": {
+                  "tableName": "recon_request",
+                  "columnName": "deleted_at"
+                }
+              }
+            },
+            "changes": [
+              {
+                "addColumn": {
+                  "tableName": "recon_request",
+                  "columns": [
+                    {
+                      "column": {
+                        "name": "deleted_at",
+                        "type": "timestamptz"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sql": {
+                  "sql": "CREATE INDEX IF NOT EXISTS idx_recon_request_active ON recon_request(app_id, straiker_id, created_at DESC) WHERE deleted_at IS NULL"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  20260226-add-app-recon-app-result.json: |
+    {"databaseChangeLog":[{"changeSet":{"id":"create-app-recon-app-result-table","author":"iris","preConditions":{"onFail":"MARK_RAN","onError":"MARK_RAN","not":{"tableExists":{"tableName":"app_recon_app_result"}}},"changes":[{"createTable":{"tableName":"app_recon_app_result","columns":[{"column":{"name":"app_id","type":"varchar(255)","constraints":{"nullable":false}}},{"column":{"name":"straiker_id","type":"int","constraints":{"nullable":false}}},{"column":{"name":"result_payload","type":"jsonb","defaultValueComputed":"'{\"controls\": [], \"category_summaries\": {}}'::jsonb","constraints":{"nullable":false}}},{"column":{"name":"source_request_id","type":"uuid"}},{"column":{"name":"created_at","type":"timestamptz","defaultValueComputed":"CURRENT_TIMESTAMP","constraints":{"nullable":false}}},{"column":{"name":"updated_at","type":"timestamptz","defaultValueComputed":"CURRENT_TIMESTAMP","constraints":{"nullable":false}}}]}},{"addForeignKeyConstraint":{"baseTableName":"app_recon_app_result","baseColumnNames":"source_request_id","referencedTableName":"recon_request","referencedColumnNames":"id","constraintName":"fk_app_recon_app_result_request_id","onDelete":"SET NULL"}},{"addPrimaryKey":{"tableName":"app_recon_app_result","columnNames":"app_id,straiker_id","constraintName":"pk_app_recon_app_result"}}]}},{"changeSet":{"id":"create-app-recon-app-result-index","author":"iris","preConditions":{"onFail":"MARK_RAN","onError":"MARK_RAN","not":{"indexExists":{"indexName":"idx_app_recon_app_result_updated_at"}}},"changes":[{"createIndex":{"tableName":"app_recon_app_result","indexName":"idx_app_recon_app_result_updated_at","columns":[{"column":{"name":"updated_at","descending":true}}]}}]}},{"changeSet":{"id":"create-app-recon-app-result-trigger","author":"iris","preConditions":{"onFail":"MARK_RAN","onError":"MARK_RAN","not":{"sqlCheck":{"expectedResult":"1","sql":"SELECT 1 FROM pg_trigger WHERE tgname = 'update_app_recon_app_result_updated_at'"}}},"changes":[{"sql":{"sql":"DROP TRIGGER IF EXISTS update_app_recon_app_result_updated_at ON app_recon_app_result; CREATE TRIGGER update_app_recon_app_result_updated_at BEFORE UPDATE ON app_recon_app_result FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();"}}]}},{"changeSet":{"id":"comment-app-recon-app-result-table","author":"iris","changes":[{"sql":{"sql":"COMMENT ON TABLE app_recon_app_result IS 'Cache of full app recon result (controls + category summaries) for single-query read; updated on control upsert and when recon request completes'"}}]}}]}
+  20260226-add-email-to-recon-request.json: |
+    {"databaseChangeLog":[{"changeSet":{"id":"add-email-to-recon-request","author":"iris","preConditions":{"onFail":"MARK_RAN","onError":"MARK_RAN","not":{"columnExists":{"tableName":"recon_request","columnName":"email"}}},"changes":[{"addColumn":{"tableName":"recon_request","columns":[{"column":{"name":"email","type":"varchar(255)"}}]}},{"sql":{"sql":"COMMENT ON COLUMN recon_request.email IS 'Optional email associated with the recon request'"}}]}}]}
+{{- end }}

@@ -1,0 +1,17 @@
+{{- if .Values.hpa.enabled }}
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: straiker-defend-hpa
+  namespace: {{ include "defend.namespace" . }}
+  labels:
+    {{- include "defend.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: straiker-defend
+  targetCPUUtilizationPercentage: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+{{- end }}

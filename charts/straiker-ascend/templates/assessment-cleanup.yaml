@@ -1,0 +1,84 @@
+{{- if .Values.assessmentCleanup.enabled }}
+{{- $ac := .Values.assessmentCleanup }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: straiker-ascend-assessment-cleanup
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: assessment-cleanup
+spec:
+  schedule: {{ $ac.schedule | quote }}
+  successfulJobsHistoryLimit: {{ $ac.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $ac.failedJobsHistoryLimit }}
+  concurrencyPolicy: {{ $ac.concurrencyPolicy }}
+  jobTemplate:
+    metadata:
+      labels:
+        app: straiker-ascend-assessment-cleanup
+    spec:
+      ttlSecondsAfterFinished: {{ $ac.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ $ac.activeDeadlineSeconds }}
+      backoffLimit: {{ $ac.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app: straiker-ascend-assessment-cleanup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ .Values.serviceAccountName }}
+          securityContext:
+            runAsNonRoot: {{ $ac.securityContext.runAsNonRoot }}
+            runAsUser: {{ $ac.securityContext.runAsUser }}
+          containers:
+            - name: cleanup
+              image: {{ include "ascend.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "run_assessment_cleanup.py"]
+              securityContext:
+                allowPrivilegeEscalation: {{ $ac.securityContext.allowPrivilegeEscalation }}
+                readOnlyRootFilesystem: {{ $ac.securityContext.readOnlyRootFilesystem }}
+              resources:
+                {{- toYaml $ac.resources | nindent 16 }}
+              env:
+                - name: SYS__ENV
+                  value: "production"
+                - name: SYS__SECRET_MANAGER_ENABLED
+                  value: "false"
+                - name: SYS__REDIS_URL
+                  value: {{ include "ascend.redisUrl" . | quote }}
+                # Double underscore -- assessment_cleanup's own SaaS cronjob is the
+                # one exception to every other component's SYS__LOGGING_LEVEL,
+                # confirmed against iris/deploy/helm/assessment_cleanup/templates/
+                # cronjob.yaml.
+                - name: SYS__LOGGING__LEVEL
+                  value: {{ .Values.logging.level | quote }}
+                - name: SYS__CLEANUP_DELAY_DAYS
+                  value: {{ .Values.cleanup.delayDays | quote }}
+                - name: SYS__CLEANUP_THROTTLE_SECONDS
+                  value: {{ .Values.cleanup.throttleSeconds | quote }}
+                # The old chart's own version of this CronJob omitted these --
+                # run_assessment_cleanup.py needs DB access the same as
+                # recon-worker (matches ~/straiker/iris/onprem/docker-
+                # compose.yml's assessment-cleanup service, which does set
+                # them).
+                - name: SYS__DB_HOST
+                  value: {{ required "db.host is required" .Values.db.host | quote }}
+                - name: SYS__DB_PORT
+                  value: {{ .Values.db.port | quote }}
+                - name: SYS__DB_NAME
+                  value: {{ .Values.db.name | quote }}
+                - name: SYS__DB_USER
+                  value: {{ .Values.db.user | quote }}
+                - name: SYS__ASCEND_RDS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "ascend.dbPasswordSecretName" . }}
+                      key: {{ include "ascend.dbPasswordSecretKey" . }}
+          {{- include "ascend.nodeSelector" . | nindent 10 }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

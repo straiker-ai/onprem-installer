@@ -1,0 +1,106 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bifrost
+  namespace: {{ include "bifrost.namespace" . }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-gateway
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: bifrost
+  template:
+    metadata:
+      labels:
+        app: bifrost
+      annotations:
+        # Roll pods when the config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bifrost
+          image: {{ include "bifrost.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # No command/entrypoint override — this image's actual ENTRYPOINT
+          # (/app/docker-entrypoint.sh -> /app/main) is configured entirely via
+          # env vars (APP_PORT/APP_HOST/...), not CLI flags. An earlier
+          # version of this chart assumed a "/app/bifrost -host ... -port ..."
+          # CLI, which doesn't exist in this image (verified via `crane config`
+          # against the actual published image) and crash-looped with
+          # "stat /app/bifrost: no such file or directory".
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: APP_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: APP_HOST
+              value: "0.0.0.0"
+            # API keys — mapped from secretRef.name to the names bifrost reads via env.*
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretRef.name }}
+                  key: {{ .Values.secretRef.openaiKey }}
+                  optional: true
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretRef.name }}
+                  key: {{ .Values.secretRef.xaiKey }}
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretRef.name }}
+                  key: {{ .Values.secretRef.anthropicKey }}
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretRef.name }}
+                  key: {{ .Values.secretRef.bedrockAccessKeyId }}
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretRef.name }}
+                  key: {{ .Values.secretRef.bedrockSecretAccessKey }}
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.json
+              subPath: config.json
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: bifrost-config
+      nodeSelector:
+        {{- include "bifrost.nodeSelector" . | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

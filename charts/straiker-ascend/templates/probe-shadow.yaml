@@ -1,0 +1,166 @@
+{{- if .Values.probeShadow.enabled }}
+{{- $ps := .Values.probeShadow }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ascend-probe-shadow
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-shadow
+spec:
+  replicas: {{ $ps.replicaCount }}
+  selector:
+    matchLabels:
+      app: straiker-ascend-probe-shadow
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-probe-shadow
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: probe-shadow
+          image: {{ include "ascend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "run_probe_shadow.py"]
+          resources:
+            {{- toYaml $ps.resources | nindent 12 }}
+          env:
+            {{- include "ascend.commonEnv" . | nindent 12 }}
+            - name: SYS__INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: SYS__IRIS_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: IRIS_ADMIN_API_KEY
+            # Shared bearer secret probe-worker's http_request_handler.py sends and
+            # probe_shadow/app.py verifies (iris_privatelink_api_key) -- only load-
+            # bearing once probeShadow.enabled is flipped back on. Not auto-
+            # provisioned by install-straiker.sh's phase_shared_secrets like
+            # IRIS_ADMIN_API_KEY above; set manually on both this and probe-worker's
+            # identical secretKeyRef before enabling.
+            - name: SYS__IRIS_PRIVATELINK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: IRIS_PRIVATELINK_API_KEY
+                  optional: true
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SYS__IRIS_CONTROL_PLANE_URL
+              value: {{ include "ascend.controlPlaneUrl" . | quote }}
+            - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+              value: {{ include "ascend.foundationEndpoint" . | quote }}
+            - name: SYS__DATA_EXFILTRATION_ENDPOINT
+              value: {{ include "ascend.externalUrl" . | quote }}
+            # How long probe-shadow waits for a bridge response before 504ing.
+            - name: SYS__BRIDGE_RESPONSE_TIMEOUT_S
+              value: {{ $ps.bridgeResponseTimeoutSeconds | quote }}
+            # SaaS-chart parity only -- current probe_shadow/app.py code wasn't
+            # found to actually query Postgres from this service, so treat as
+            # possibly-vestigial-but-harmless rather than confirmed-required.
+            - name: SYS__DB_HOST
+              value: {{ required "db.host is required" .Values.db.host | quote }}
+            - name: SYS__DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: SYS__DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: SYS__DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: SYS__ASCEND_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+          ports:
+            - containerPort: {{ $ps.service.targetPort }}
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: {{ $ps.service.targetPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: {{ $ps.service.targetPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: {{ $ps.service.targetPort }}
+            initialDelaySeconds: 20
+            periodSeconds: 40
+            timeoutSeconds: 30
+            failureThreshold: 20
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: straiker-ascend-probe-shadow
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: probe-shadow
+spec:
+  type: {{ $ps.service.type }}
+  selector:
+    app: straiker-ascend-probe-shadow
+  sessionAffinity: {{ $ps.service.sessionAffinity }}
+  ports:
+    - protocol: TCP
+      port: {{ $ps.service.port }}
+      targetPort: {{ $ps.service.targetPort }}
+      name: http
+{{- if $ps.hpa.enabled }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: straiker-ascend-probe-shadow
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+spec:
+  minReplicas: {{ $ps.hpa.minReplicas }}
+  maxReplicas: {{ $ps.hpa.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: straiker-ascend-probe-shadow
+  targetCPUUtilizationPercentage: {{ $ps.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

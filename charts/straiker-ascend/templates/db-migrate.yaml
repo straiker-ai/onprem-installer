@@ -1,0 +1,77 @@
+{{- if .Values.dbMigrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-ascend-db-migrate
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.dbMigrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.dbMigrate.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.dbMigrate.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-db-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: liquibase
+          # Straiker's own image, not liquibase/liquibase -- the changelog
+          # files are entirely supplied via the ConfigMaps below now (the
+          # current onprem image doesn't bundle
+          # packages/database/src/rds/liquibase the way the old chart's
+          # db-migrate assumed, confirmed against onprem/Dockerfile), so
+          # there's no need for the old chart's copy-migrations initContainer
+          # either -- this container just needs a liquibase binary, and
+          # Straiker's own image already has one (same one iris itself runs
+          # migrations with in other environments).
+          image: liquibase/liquibase:4.28
+          imagePullPolicy: IfNotPresent
+          args: ["update"]
+          resources:
+            {{- toYaml .Values.dbMigrate.resources | nindent 12 }}
+          env:
+            - name: LIQUIBASE_COMMAND_CHANGELOG_FILE
+              value: "master.json"
+            - name: LIQUIBASE_SEARCH_PATH
+              value: "/liquibase/changelog"
+            - name: LIQUIBASE_COMMAND_URL
+              value: {{ printf "jdbc:postgresql://%s:%v/%s?sslmode=%s" (required "db.host is required" .Values.db.host) .Values.db.port .Values.db.name .Values.db.sslMode | quote }}
+            - name: LIQUIBASE_COMMAND_USERNAME
+              value: {{ .Values.db.user | quote }}
+            - name: LIQUIBASE_COMMAND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+          volumeMounts:
+            - name: liquibase-master
+              mountPath: /liquibase/changelog/master.json
+              subPath: master.json
+            - name: liquibase-changes
+              mountPath: /liquibase/changelog/changes
+      volumes:
+        - name: liquibase-master
+          configMap:
+            name: straiker-ascend-liquibase-master
+        - name: liquibase-changes
+          configMap:
+            name: straiker-ascend-liquibase-changes
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
