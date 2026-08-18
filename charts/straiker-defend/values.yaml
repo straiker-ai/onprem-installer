@@ -1,22 +1,14 @@
 # global.dockerRegistry: same convention as every other chart in this repo —
 # when set, argus's image (relative repository, no registry host) resolves
 # against this instead of pulling directly from Straiker's own registry.
-# global.modelBucket: S3 (EKS) or GCS (GKE) bucket the tokenizer-pull init
-# container syncs from — matches charts/straiker-artifact's models_bucket.
 global:
   dockerRegistry: ""
-  modelBucket: ""
-
-# Selects the CLI image/command the tokenizer-pull init container uses to
-# sync from global.modelBucket: aws s3 sync (eks) vs gsutil rsync (gke).
-cloudProvider: eks
 
 imagePullSecrets: []
 
 replicas: 1
 
-# Argus loads several tokenizers at startup (~400 MB) plus Python/runtime
-# overhead — matches straiker-platform-old's own sizing guidance.
+# Baseline Argus sizing from prior on-prem defaults.
 resources:
   requests:
     cpu: "500m"
@@ -26,9 +18,7 @@ resources:
 
 image:
   repository: straiker/argus
-  # Must match the tag charts/straiker-artifact's imageMirror.images mirrors
-  # into ECR for straiker/argus.
-  tag: onprem-v2026.7.29
+  tag: onprem-v2026.7.29.2
   pullPolicy: IfNotPresent
 
 nodeSelector: {}
@@ -117,30 +107,6 @@ logging:
 # cluster has no such NodePool at all (pods get no nodeSelector then).
 karpenter:
   enabled: true
-
-# Tokenizers argus loads at startup, pre-cached via the tokenizer-pull init
-# container from global.modelBucket/tokenizer/<destPath> into a fake HF hub
-# cache layout (avoids a live Hub call at boot, matching this repo's
-# HF_HUB_OFFLINE=1 convention elsewhere). Same list straiker-platform-old's
-# reference chart used — no newer source for this specific list.
-# NOTE: charts/straiker-artifact does not yet sync these tokenizer paths into
-# global.modelBucket (its modelSync.models list only covers the 7 inference
-# model directories) — this is a known follow-up gap, not yet implemented.
-tokenizers:
-  - destPath: straikerinc--llama-3.2-3b-instruct-argus-v23
-    hfModelId: straikerinc/Llama-3.2-3B-Instruct-argus-v23
-  - destPath: straikerinc--internlm2_5-1_8b-chat-argus-v23
-    hfModelId: straikerinc/internlm2_5-1_8b-chat-argus-v23
-  - destPath: straikerinc--qwen2.5-3b-instruct-argus-v23
-    hfModelId: straikerinc/Qwen2.5-3B-instruct-argus-v23
-  - destPath: straikerinc--qwen3-4b-instruct-2507
-    hfModelId: straikerinc/Qwen3-4B-Instruct-2507
-  - destPath: straikerinc--qwen3-1.7b
-    hfModelId: straikerinc/Qwen3-1.7B
-  - destPath: straikerinc--qwen3-vl-2b-instruct-argus-384-color
-    hfModelId: straikerinc/Qwen3-VL-2B-Instruct-argus-384-color
-  - destPath: sentence-transformers--all-minilm-l6-v2
-    hfModelId: sentence-transformers/all-MiniLM-L6-v2
 
 # LLM inference endpoints — maps each of argus's SYS__LLM_ENDPOINTS__* keys to
 # one of charts/straiker-inference's per-model Services (inference-<model>,

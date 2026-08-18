@@ -7,6 +7,12 @@ metadata:
   labels:
     {{- include "ascend.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
+  annotations:
+    # This must be a hook because db-migrate itself is a pre-install/pre-upgrade
+    # hook; plain resources are applied only after all hooks complete.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   master.json: |
     {
@@ -28,6 +34,12 @@ metadata:
   labels:
     {{- include "ascend.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
+  annotations:
+    # Same hook timing as the master ConfigMap so both are present before the
+    # db-migrate hook job starts.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   20250101-create-recon-tables.json: |
     {

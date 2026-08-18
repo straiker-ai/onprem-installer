@@ -50,3 +50,53 @@ resource "aws_eks_pod_identity_association" "workload" {
 
   tags = local.common_tags
 }
+
+# ── Bedrock Pod Identity ──────────────────────────────────────────────────────
+# Only created when bedrock_mode=true (AI_PROVIDER_MODE=bedrock). Gives
+# bifrost's own ServiceAccount permission to call Bedrock without static keys.
+resource "aws_iam_role" "bifrost_bedrock" {
+  count = var.bedrock_mode ? 1 : 0
+  name  = "${var.prefix}-bifrost-bedrock"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "pods.eks.amazonaws.com"
+      }
+      Action = ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "bifrost_bedrock_invoke" {
+  count = var.bedrock_mode ? 1 : 0
+  name  = "bedrock-invoke"
+  role  = aws_iam_role.bifrost_bedrock[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ]
+      Resource = "arn:aws:bedrock:*::foundation-model/*"
+    }]
+  })
+}
+
+resource "aws_eks_pod_identity_association" "bifrost_bedrock" {
+  count = var.bedrock_mode && var.workload_namespace != "" ? 1 : 0
+
+  cluster_name    = var.cluster_name
+  namespace       = var.workload_namespace
+  service_account = var.bifrost_service_account_name
+  role_arn        = aws_iam_role.bifrost_bedrock[0].arn
+
+  tags = local.common_tags
+}

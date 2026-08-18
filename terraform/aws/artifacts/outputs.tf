@@ -17,3 +17,8 @@ output "hauler_role_arn" {
 output "workload_role_arn" {
   value = aws_iam_role.workload.arn
 }
+
+output "bedrock_role_arn" {
+  value       = var.bedrock_mode ? aws_iam_role.bifrost_bedrock[0].arn : ""
+  description = "ARN of the Bedrock-invoke IAM role for bifrost's Pod Identity. Empty when bedrock_mode=false."
+}

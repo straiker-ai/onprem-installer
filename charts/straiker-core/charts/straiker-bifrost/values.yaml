@@ -1,5 +1,10 @@
 enabled: true
 
+# Kubernetes ServiceAccount name for this pod. Created by this chart.
+# Must match the Pod Identity association created by terraform/aws/artifacts
+# when bedrock_mode=true.
+serviceAccountName: straiker-bifrost
+
 image:
   # Official upstream image (not a Straiker fork), mirrored by
   # charts/straiker-artifact under this exact repository/tag
@@ -51,9 +56,12 @@ secretRef:
 
 # AWS Bedrock — only load-bearing once a customer picks "bedrock" as a
 # recon-agent provider (see iris/config/recon/agents_config.py's
-# PROVIDER_MODELS) and populates the two secretRef keys above. Region isn't
-# a secret, so it's a plain value (embedded directly into configmap.yaml's
-# config.json) rather than a third secretRef key — override per-install if
-# the customer's Bedrock access isn't in us-east-1.
+# PROVIDER_MODELS). Region isn't a secret, so it's a plain value (embedded
+# directly into configmap.yaml's config.json).
 bedrock:
   region: us-east-1
+  # When true, bifrost's ServiceAccount has a Pod Identity association
+  # granting bedrock:InvokeModel — no static keys needed. Set by the installer
+  # when AI_PROVIDER_MODE=bedrock. When false, static AWS_ACCESS_KEY_ID/
+  # AWS_SECRET_ACCESS_KEY env vars are injected from secretRef instead.
+  podIdentity: false
