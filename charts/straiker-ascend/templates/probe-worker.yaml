@@ -70,6 +70,8 @@ spec:
               value: {{ include "ascend.controlPlaneUrl" . | quote }}
             - name: SYS__ARGUS_ENDPOINT
               value: {{ include "ascend.argusEndpoint" . | quote }}
+            - name: SYS__ARGUS_ENABLED
+              value: {{ .Values.argus.enabled | quote }}
             - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
               value: {{ include "ascend.foundationEndpoint" . | quote }}
             - name: SYS__PROBE_RESPONSES_STREAM_ENABLED
@@ -96,6 +98,8 @@ spec:
               value: {{ .Values.db.name | quote }}
             - name: SYS__DB_USER
               value: {{ .Values.db.user | quote }}
+            - name: SYS__DB_SSL_MODE
+              value: {{ .Values.db.sslMode | quote }}
             - name: SYS__ASCEND_RDS_PASSWORD
               valueFrom:
                 secretKeyRef:

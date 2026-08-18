@@ -20,6 +20,7 @@ spec:
         # Roll pods when the config changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -60,6 +61,10 @@ spec:
                   name: {{ .Values.secretRef.name }}
                   key: {{ .Values.secretRef.anthropicKey }}
                   optional: true
+            {{- if not .Values.bedrock.podIdentity }}
+            # Static AWS credentials — only used when bedrock.podIdentity=false.
+            # When podIdentity=true, the Pod Identity association on this SA
+            # injects credentials automatically via the instance metadata service.
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -72,9 +77,10 @@ spec:
                   name: {{ .Values.secretRef.name }}
                   key: {{ .Values.secretRef.bedrockSecretAccessKey }}
                   optional: true
+            {{- end }}
           volumeMounts:
             - name: config
-              mountPath: /app/config.json
+              mountPath: /app/data/config.json
               subPath: config.json
               readOnly: true
           livenessProbe:

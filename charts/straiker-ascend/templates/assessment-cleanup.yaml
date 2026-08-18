@@ -60,7 +60,6 @@ spec:
                   value: {{ .Values.cleanup.throttleSeconds | quote }}
                 # The old chart's own version of this CronJob omitted these --
                 # run_assessment_cleanup.py needs DB access the same as
-                # recon-worker (matches ~/straiker/iris/onprem/docker-
                 # compose.yml's assessment-cleanup service, which does set
                 # them).
                 - name: SYS__DB_HOST
@@ -71,6 +70,8 @@ spec:
                   value: {{ .Values.db.name | quote }}
                 - name: SYS__DB_USER
                   value: {{ .Values.db.user | quote }}
+                - name: SYS__DB_SSL_MODE
+                  value: {{ .Values.db.sslMode | quote }}
                 - name: SYS__ASCEND_RDS_PASSWORD
                   valueFrom:
                     secretKeyRef:

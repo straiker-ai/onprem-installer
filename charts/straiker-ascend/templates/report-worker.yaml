@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.db.name | quote }}
             - name: SYS__DB_USER
               value: {{ .Values.db.user | quote }}
+            - name: SYS__DB_SSL_MODE
+              value: {{ .Values.db.sslMode | quote }}
             - name: SYS__ASCEND_RDS_PASSWORD
               valueFrom:
                 secretKeyRef:

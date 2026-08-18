@@ -3,15 +3,9 @@ name: straiker-ascend
 description: >
   Iris automated red-teaming engine (Straiker's "Ascend" product) — control
   plane, probe worker/shadow, recon worker, report worker, and a daily
-  assessment-cleanup CronJob. Ported from
-  charts/straiker-platform-old/charts/straiker-iris, updated to match the
-  current ~/straiker/iris/onprem/docker-compose.yml architecture: HTTP-based
-  Redpanda Connect archiving (the shared straiker-system benthos) instead of
-  a Kafka-broker cluster, straiker-system's shared Postgres/Redis instead of
-  in-cluster-per-release ones, and the current inference-thanos service
-  name (was a bare "thanos" guess in the old chart).
+  assessment-cleanup CronJob.
 type: application
-version: 0.1.2
+version: 0.1.8
 appVersion: "0.0.1"
 home: https://github.com/straiker-ai/onprem
 sources:

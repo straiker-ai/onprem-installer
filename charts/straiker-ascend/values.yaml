@@ -15,19 +15,9 @@ global:
 # (SYS__DATA_EXFILTRATION_ENDPOINT) and straiker-frontend's origin (CORS).
 edgeHttpsPort: 8443
 
-# One image for every component below (control-plane/probe-worker/probe-
-# shadow/recon-worker/report-worker/assessment-cleanup/db-migrate all run
-# the same image with a different `command`) — matches
-# ~/straiker/iris/onprem/Dockerfile and cloudbuild.yaml exactly (single
-# `straiker/iris:<tag>` image, no separate migrate variant the way
-# straiker-core/frontend has).
 image:
   repository: straiker/iris
-  # Known future tag -- confirmed with the iris team, not yet built/pushed
-  # as of this chart's authoring. Confirm this has actually landed at
-  # us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
-  # before relying on it (same caveat as before, tag name now finalized).
-  tag: onprem-v2026.8.13
+  tag: onprem-v2026.8.13.7
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -37,7 +27,7 @@ serviceAccountName: straiker-ascend
 replicas: 1
 
 logging:
-  level: INFO
+  level: DEBUG
 
 nodeSelector: {}
 # Matches charts/straiker-system's karpenter.iris NodeClass taint.
@@ -78,6 +68,10 @@ db:
 # assumed, confirmed against onprem/Dockerfile) before any ascend pods start.
 dbMigrate:
   enabled: true
+  # Leave empty so the pre-install hook job uses namespace's default ServiceAccount.
+  # This avoids a hook-ordering race where the chart's dedicated ServiceAccount
+  # may not exist yet when Helm runs pre-install hooks.
+  serviceAccountName: ""
   backoffLimit: 2
   activeDeadlineSeconds: 300
   ttlSecondsAfterFinished: 3600
@@ -103,13 +97,38 @@ redis:
 bifrost:
   baseUrl: ""
 
+# ── Allow-list of (provider, model) combinations this deployment can
+# actually reach — iris's resolver (iris/generators/llm/resolver.py)
+# refuses to pick anything not listed here, even if bifrost itself would
+# happily route to it. Empty (default) falls back to iris's own code
+# default (["openai", "grok"]) — fine for own-keys mode using an OpenAI
+# and/or xAI key, but NOT for bedrock (see install-straiker.sh's
+# phase_straiker_ascend, which overrides this explicitly for
+# AI_PROVIDER_MODE=bedrock) or an own-keys install using only an
+# Anthropic key (needs "claude" added here too).
+#
+# Accepts a bare provider name (any model from that provider, e.g.
+# "openai"), a "provider/*" glob (equivalent), or an exact "provider/model"
+# pin (e.g. "bedrock/global.anthropic.claude-sonnet-4-6" — the "global."
+# cross-region inference profile prefix is part of the pin, since newer
+# Bedrock models reject the bare model ID with on-demand throughput) — the
+# pin form is what AWS Bedrock's own per-model "Model access" grant maps to
+# 1:1 (modulo the prefix), so bedrock mode always uses that form rather
+# than the bare/glob one.
+availableModels: []
+
 # ── Archive pipeline: iris posts events over HTTP to the shared
 # straiker-system Redpanda Connect (Benthos), same as charts/straiker-defend.
 archive:
   enabled: true
-  # Any string works -- the shared benthos pipeline routes dynamically by
-  # this field's own value (see charts/straiker-system's benthos.yaml), not
-  # a fixed set of known streams.
+  # The shared benthos pipeline (charts/straiker-system's benthos.yaml)
+  # routes dynamically by this field's own value (index: '${! this.stream }'),
+  # not a fixed set of known streams -- but it must still match the "iris*"
+  # OpenSearch index pattern straiker-frontend's own iris-turns.ts queries
+  # against. Only load-bearing as of iris/common/analyzer/analysis_worker.py
+  # actually stamping this into every archive record's "stream" field --
+  # before that fix, records had no "stream" field at all and silently
+  # landed nowhere queryable.
   stream: iris
   endpoint: ""
 
@@ -119,12 +138,23 @@ archive:
 foundationEndpoint: ""
 
 # ── Argus detection endpoint — straiker-defend's Service, in this same
-# namespace, once that product is also selected. apiKey is the new
-# service-to-service key argus's own /api/v1/detect route accepts with no
-# real per-app tenant record (settings.argus_service_api_key on argus's side)
-# -- both charts must reference the same "ARGUS_SERVICE_API_KEY" key in
-# straiker-secrets, see templates/secrets.yaml.
+# namespace. install-straiker.sh now installs straiker-defend unconditionally
+# (regardless of product selection), since iris depends on Argus's own
+# /api/v1/detect directly for several detection categories -- so this should
+# be reachable in every real install. apiKey is the service-to-service key
+# argus's own /api/v1/detect route accepts with no real per-app tenant record
+# (settings.argus_service_api_key on argus's side) -- both charts must
+# reference the same "ARGUS_SERVICE_API_KEY" key in straiker-secrets, see
+# templates/secrets.yaml.
+#
+# enabled: manual safety valve, not the expected normal state -- flip false
+# only if straiker-defend is deliberately not deployed in this cluster (e.g.
+# a manually-assembled install that skips install-straiker.sh) or is down for
+# an extended maintenance window. When false, iris's own ArgusDetection.run()
+# skips the network call entirely instead of retrying a connection that can't
+# succeed (~12s/turn x up to 8 turns wasted per amt_attack_* probe otherwise).
 argus:
+  enabled: true
   endpoint: ""
 
 # ── Capture-callback target for the DataPoint/data-exfiltration probe
@@ -207,7 +237,6 @@ probeShadow:
   enabled: false
   replicaCount: 1
   # How long (s) probe-shadow waits for a bridge response before returning
-  # 504 -- matches ~/straiker/iris/onprem/docker-compose.yml's own default.
   # Raise for on-prem deployments with slow target apps.
   bridgeResponseTimeoutSeconds: 120
   resources:

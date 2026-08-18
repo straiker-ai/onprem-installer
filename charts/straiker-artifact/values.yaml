@@ -28,68 +28,66 @@ customerSku: "base"
 # endpoint, the same for every install. The mounted straiker-credential
 # file's api_key + customer_email are exchanged here for a short-lived
 # pull token (see image-mirror-job.yaml / model-sync-job.yaml).
-brokerUrl: "https://us-central1-prod-registry-447007.cloudfunctions.net/onprem-artifact-broker"
+brokerUrl: "https://2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws"
+# Source-side ECR registry (Straiker's own account) — the broker's assumed-role
+# credentials grant read access to this registry. Populated by the installer
+# from the broker's /whoami response or a known fixed value.
+sourceEcrRegistry: "631748089429.dkr.ecr.us-east-1.amazonaws.com"
+# AWS region for the source S3 models bucket (Straiker's account).
+sourceBucketRegion: "us-east-1"
 
 imageMirror:
   enabled: false
-  # Fixed sources this project mirrors from — full source URL per image (no tag),
-  # since different images live under different source repos (e.g. onprem-base vs
-  # onprem-pro, which are different SKUs — the credential may not be entitled to
-  # every repo) rather than one shared registry path. destRepository (the relative
-  # ECR path) must match terraform/aws/artifacts/locals.tf's image_names (which
-  # creates the ECR repos) and charts/straiker-system's own image repository values.
-  #
-  # No separate sku field: the sku is the source repo segment itself
-  # (".../onprem-base/..." -> "base", ".../onprem-pro/..." -> "pro" — see
-  # $imgSku in image-mirror-job.yaml). "base" images are attempted for every
-  # customer; anything else only when it matches customerSku above. This list
-  # is the explicit, known-correct set for each sku, so unlike the sku filter
-  # (which just avoids attempting images we already know aren't granted), an
-  # in-scope image failing to copy IS fatal — it fails the Job.
   images:
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/nvidia/k8s-device-plugin
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/nvidia/k8s-device-plugin
       tag: v0.17.0
       destRepository: nvidia/k8s-device-plugin
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/opensearchproject/opensearch
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/opensearchproject/opensearch
       tag: "3.6.0"
       destRepository: opensearchproject/opensearch
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/timberio/vector
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/timberio/vector
       tag: "0.55.0-distroless-libc"
       destRepository: timberio/vector
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/valkey/valkey
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/valkey/valkey
       tag: "8-alpine"
       destRepository: valkey/valkey
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/postgres
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/library/postgres
       tag: "16-alpine"
       destRepository: library/postgres
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/maximhq/bifrost
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/maximhq/bifrost
       tag: v1.6.7
       destRepository: maximhq/bifrost
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/dexidp/dex
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/dexidp/dex
       tag: v2.45.1
       destRepository: dexidp/dex
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/library/caddy
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/library/caddy
       tag: 2-alpine
       destRepository: library/caddy
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/redpandadata/connect
-      tag: 4.101.0
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/aws-cli/aws-cli 
+      tag: 2.24.24
+      destRepository: aws-cli/aws-cli
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/liquibase/liquibase
+      tag: "4.28"
+      destRepository: liquibase/liquibase
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/redpandadata/connect
+      tag: "4.101.0"
       destRepository: redpandadata/connect
     # Straiker's own apps — under onprem-base/straiker/* (an extra
     # segment vs the third-party images above) since it's not upstream.
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/vllm
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
       tag: v0.27.0
       destRepository: straiker/vllm
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend
-      tag: onprem-v2026.8.2.1
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
+      tag: onprem-v2026.8.2.6
       destRepository: straiker/frontend
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/frontend-migrate
-      tag: onprem-v2026.8.2.1
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend-migrate
+      tag: onprem-v2026.8.2.6
       destRepository: straiker/frontend-migrate
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/argus
-      tag: onprem-v2026.7.29
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
+      tag: onprem-v2026.7.29.2
       destRepository: straiker/argus
-    - source: us-central1-docker.pkg.dev/prod-registry-447007/onprem-base/straiker/iris
-      tag: onprem-v2026.8.13
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
+      tag: onprem-v2026.8.13.7
       destRepository: straiker/iris
   image:
     repository: gcr.io/go-containerregistry/crane
@@ -105,7 +103,7 @@ imageMirror:
 
 modelSync:
   enabled: false
-  sourceBucket: straiker-models
+  sourceBucket: onprem-artifact-models
   # Leave empty to sync every model in the list below (the old, simpler
   # behavior — still the default for anyone applying this chart standalone).
   # install-straiker.sh's phase_artifacts_sync sets this to exactly the
@@ -123,13 +121,13 @@ modelSync:
   # models are enabled, or this Job populates a path that chart never looks
   # for.
   models:
-    - path: huggingface/antman/a5fa48112a74
+    - path: huggingface/antman/9b1ed457baf4
       destPath: antman
     - path: huggingface/hulk/733e4e123828
       destPath: hulk
-    - path: huggingface/quicksilver/45a3d2f4ab80
+    - path: huggingface/quicksilver/e54037e4c285
       destPath: quicksilver
-    - path: huggingface/thor/b8fdf643b189
+    - path: huggingface/thor/f516550d4db9
       destPath: thor
     - path: huggingface/thanos/94cc8385641b
       destPath: thanos
