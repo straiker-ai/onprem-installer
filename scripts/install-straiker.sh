@@ -190,6 +190,14 @@ CLUSTER_NAME=""
 INSTALL_EKS=false
 INSTALL_EKS_EXPLICIT=false
 PROVISION_STRATEGY_EXPLICIT=false
+# Bring-your-own-VPC (terraform/aws/eks's vpc_id variable) — for customers
+# whose IAM/SCP denies ec2:CreateVpc. All three empty (the default) means
+# "let this installer create its own VPC," unchanged from today. Foundational
+# like CLOUD_PROVIDER/PROVISION_STRATEGY above: first-run-only, see the
+# vpc_id_set metadata handling below.
+VPC_ID=""
+PRIVATE_SUBNET_IDS=""
+PUBLIC_SUBNET_IDS=""
 INSTALL_TOFU=false
 AUTO_YES=false
 PLAN_ONLY=false
@@ -254,6 +262,23 @@ Options:
                                    first-run-only treatment as --cloud-provider: permanent once
                                    set, ignored on later invocations. Irrelevant for bring-your-
                                    own-cluster installs.
+  --vpc-id <vpc-id>               Attach EKS to an existing VPC instead of creating one (e.g.
+                                   when an AWS Organizations SCP denies ec2:CreateVpc). Requires
+                                   --private-subnet-ids and --public-subnet-ids together. Needs
+                                   ec2:DescribeVpcs/DescribeSubnets/CreateTags/DeleteTags on the
+                                   supplied VPC (not ec2:CreateVpc) — this installer tags your
+                                   subnets kubernetes.io/role/*-elb and karpenter.sh/discovery,
+                                   which Karpenter/the AWS Load Balancer Controller need, but
+                                   does NOT create a NAT gateway: your private subnets must
+                                   already have outbound internet routing. Only used with
+                                   --install-eks; irrelevant for bring-your-own-cluster installs.
+                                   Same first-run-only treatment as --cloud-provider.
+  --private-subnet-ids <ids>      Comma-separated private subnet IDs (>=2, spanning >=2 AZs).
+                                   Required with --vpc-id. Order matters under
+                                   --provision-strategy min: only the first subnet's AZ is used
+                                   for the system node group and Karpenter-launched nodes.
+  --public-subnet-ids <ids>       Comma-separated public subnet IDs, tagged for the AWS Load
+                                   Balancer Controller. Required with --vpc-id.
   --aws-region <region>           AWS region (falls back to AWS_REGION/AWS_DEFAULT_REGION env,
                                    then the AWS CLI's configured region). Only used when
                                    --cloud-provider aws (the default).
@@ -721,6 +746,9 @@ show_cost_estimate() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo " cloud_provider=${CLOUD_PROVIDER} products=${PRODUCTS_OPT} provision_strategy=${PROVISION_STRATEGY}"
   echo " install_eks=${INSTALL_EKS} (bring-your-own-cluster costs aren't ours to estimate)"
+  if [[ -n "${VPC_ID}" ]]; then
+    echo " vpc_id=${VPC_ID} (bring-your-own-VPC — NAT gateway/data-transfer costs on your existing VPC aren't estimated here; only the EKS control plane + node group lines below apply)"
+  fi
   echo ""
 
   local total=0
@@ -750,13 +778,17 @@ show_cost_estimate() {
       total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
 
       # 1 NAT gateway under min (see terraform/aws/eks's single_nat_gateway),
-      # one per AZ otherwise. Base hourly charge only -- excludes
-      # per-GB data processing.
-      local nat_count=1
-      [[ "${PROVISION_STRATEGY}" != "min" ]] && nat_count="${az_or_zone_count}"
-      line_cost="$(awk -v n="${nat_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.045 * h }')"
-      echo " NAT gateway (${nat_count}x, base charge only, excludes data processing): \$${line_cost}/mo"
-      total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+      # one per AZ otherwise. Base hourly charge only -- excludes per-GB data
+      # processing. Only applies in create-mode -- bring-your-own-VPC (see
+      # vpc_id above) creates no NAT gateway at all; the customer's supplied
+      # subnets are expected to already have their own outbound routing.
+      if [[ -z "${VPC_ID}" ]]; then
+        local nat_count=1
+        [[ "${PROVISION_STRATEGY}" != "min" ]] && nat_count="${az_or_zone_count}"
+        line_cost="$(awk -v n="${nat_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.045 * h }')"
+        echo " NAT gateway (${nat_count}x, base charge only, excludes data processing): \$${line_cost}/mo"
+        total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+      fi
     fi
     echo ""
   fi
@@ -893,6 +925,18 @@ parse_args() {
         PROVISION_STRATEGY_EXPLICIT=true
         shift 2
         ;;
+      --vpc-id)
+        VPC_ID=${2:-}
+        shift 2
+        ;;
+      --private-subnet-ids)
+        PRIVATE_SUBNET_IDS=${2:-}
+        shift 2
+        ;;
+      --public-subnet-ids)
+        PUBLIC_SUBNET_IDS=${2:-}
+        shift 2
+        ;;
       --aws-region)
         AWS_REGION=${2:-}
         shift 2
@@ -972,6 +1016,16 @@ parse_args() {
         ;;
     esac
   done
+
+  # Bring-your-own-VPC: --vpc-id/--private-subnet-ids/--public-subnet-ids
+  # must be given together or not at all — a partial set almost certainly
+  # means a typo'd/forgotten flag, not a deliberate half-BYO configuration.
+  if [[ -n "${VPC_ID}" || -n "${PRIVATE_SUBNET_IDS}" || -n "${PUBLIC_SUBNET_IDS}" ]]; then
+    if [[ -z "${VPC_ID}" || -z "${PRIVATE_SUBNET_IDS}" || -z "${PUBLIC_SUBNET_IDS}" ]]; then
+      echo "ERROR: --vpc-id, --private-subnet-ids, and --public-subnet-ids must all be given together, or not at all." >&2
+      exit 1
+    fi
+  fi
 }
 
 on_error() {
@@ -1075,7 +1129,54 @@ EOF
 }
 
 # Renders var.image_names as a tofu-var JSON array, e.g. ["a/b","c/d"].
+
+# Splits a comma-separated subnet-ID list, trims whitespace around each
+# entry, and rejects (exit 1) any entry that ends up empty (e.g. a leading
+# or doubled comma — a lone trailing comma is silently absorbed instead,
+# since bash's own IFS splitting already drops a trailing empty field).
+# Left uncaught, an empty entry here later fails deep inside `tofu apply`
+# with a cryptic AWS API error ("InvalidID: The ID '' is not valid") on
+# whichever aws_ec2_tag resource happens to land on it, rather than a clear
+# message here. Echoes the normalized comma-separated list on success.
+normalize_subnet_ids() {
+  local csv="$1" flag_name="$2" raw id
+  local -a out=()
+  IFS=',' read -r -a raw <<< "${csv}"
+  for id in "${raw[@]}"; do
+    id="${id#"${id%%[![:space:]]*}"}"
+    id="${id%"${id##*[![:space:]]}"}"
+    if [[ -z "${id}" ]]; then
+      echo "ERROR: ${flag_name} contains an empty entry (check for a leading/trailing/doubled comma): '${csv}'" >&2
+      exit 1
+    fi
+    out+=("${id}")
+  done
+  local IFS=,
+  echo "${out[*]}"
+}
+
 write_eks_tfvars() {
+  # Bring-your-own-VPC: AZs are derived from the supplied subnets by
+  # terraform/aws/eks itself (see its locals.tf), so the live
+  # describe-availability-zones resolution below is not just redundant here,
+  # it would be actively wrong to still gate on var.availability_zones.
+  if [[ -n "${VPC_ID}" ]]; then
+    local priv_json pub_json
+    priv_json="$(echo "${PRIVATE_SUBNET_IDS}" | sed 's/,/", "/g; s/^/["/; s/$/"]/')"
+    pub_json="$(echo "${PUBLIC_SUBNET_IDS}" | sed 's/,/", "/g; s/^/["/; s/$/"]/')"
+    cat > "${EKS_DIR}/terraform.auto.tfvars" <<EOF
+# Generated by scripts/install-straiker.sh — safe to delete between runs.
+region             = "${AWS_REGION}"
+cluster_name       = "${CLUSTER_NAME}"
+provision_strategy = "${PROVISION_STRATEGY}"
+vpc_id             = "${VPC_ID}"
+private_subnet_ids = ${priv_json}
+public_subnet_ids  = ${pub_json}
+byo_vpc_confirm    = true
+EOF
+    return
+  fi
+
   # provision_strategy=max gets a 3rd AZ registered (matching this module's
   # own availability_zones variable description: "3 for maximum
   # resilience") -- min/ha both still register 2 (EKS's hard minimum for
@@ -1293,6 +1394,29 @@ phase_eks_cluster() {
   require_command kubectl
   require_terraform_dir "${EKS_SRC}" || return
   sync_terraform_workdir "${EKS_SRC}" "${EKS_DIR}"
+
+  # Bring-your-own-VPC preflight: fail fast with a clear message rather than
+  # deep inside `tofu apply` — this is exactly the class of gap the feature
+  # exists to route around (an SCP/IAM policy denying more than just
+  # ec2:CreateVpc), so it deserves its own explicit check.
+  if [[ -n "${VPC_ID}" ]]; then
+    if ! aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Could not describe VPC '${VPC_ID}' in ${AWS_REGION} — either it doesn't exist, or your AWS credentials lack ec2:DescribeVpcs."
+      return
+    fi
+    local byo_priv_ids byo_pub_ids
+    IFS=',' read -r -a byo_priv_ids <<< "${PRIVATE_SUBNET_IDS}"
+    IFS=',' read -r -a byo_pub_ids <<< "${PUBLIC_SUBNET_IDS}"
+    if ! aws ec2 describe-subnets --subnet-ids "${byo_priv_ids[@]}" "${byo_pub_ids[@]}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Could not describe one or more of the supplied subnet IDs in ${AWS_REGION} — either an ID is wrong, or your AWS credentials lack ec2:DescribeSubnets."
+      return
+    fi
+    if ! aws ec2 create-tags --resources "${byo_priv_ids[0]}" --tags Key=straiker-byo-vpc-preflight,Value=ok --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Your AWS credentials can describe subnet '${byo_priv_ids[0]}' but cannot tag it (ec2:CreateTags denied). Bring-your-own-VPC needs CreateTags/DeleteTags on the supplied subnets to apply required kubernetes.io/role/* and karpenter.sh/discovery tags."
+      return
+    fi
+    aws ec2 delete-tags --resources "${byo_priv_ids[0]}" --tags Key=straiker-byo-vpc-preflight --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  fi
 
   local bucket_name
   bucket_name="$(get_metadata "bootstrap_bucket")"
@@ -2658,6 +2782,13 @@ phase_straiker_ascend() {
     --create-namespace
     --set "global.dockerRegistry=$(docker_registry_with_prefix "${ecr_registry}")"
     --set "db.host=postgres.${INFRA_NAMESPACE}.svc.cluster.local"
+    # Helm 4 defaults to server-side apply; --force-conflicts lets the chart's
+    # own values win over fields an operator hand-edited out-of-band (e.g. via
+    # `kubectl set env`), instead of failing the upgrade with a field-manager
+    # conflict. (Note: `kubectl patch --type=json remove metadata/managedFields`
+    # does NOT work to clear this — the API server recomputes managedFields
+    # from the request and ignores a direct edit to that field.)
+    --force-conflicts
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
@@ -2970,6 +3101,61 @@ EOF
       fi
       set_metadata "provision_strategy" "${PROVISION_STRATEGY}"
       set_metadata "provision_strategy_set" "true"
+    fi
+  fi
+
+  # Bring-your-own-VPC — only meaningful for AWS EKS provisioning (no GKE
+  # equivalent exists yet). First-run-only like provision_strategy above:
+  # once persisted, always wins regardless of what --vpc-id says on a later
+  # invocation (switching VPCs mid-install isn't a thing this installer
+  # supports, same reasoning as cloud_provider/provision_strategy).
+  if [[ "${INSTALL_EKS}" == true && "${CLOUD_PROVIDER}" != "gke" ]]; then
+    if [[ "$(get_metadata "vpc_id_set")" == "true" ]]; then
+      VPC_ID="$(get_metadata "vpc_id")"
+      PRIVATE_SUBNET_IDS="$(get_metadata "private_subnet_ids")"
+      PUBLIC_SUBNET_IDS="$(get_metadata "public_subnet_ids")"
+    else
+      if [[ -z "${VPC_ID}" ]]; then
+        cat >&2 <<'EOF'
+
+Provision a new VPC, or attach to an existing one?
+  new (default) — this installer creates and manages its own VPC/subnets.
+  existing      — bring your own VPC (e.g. your AWS account's SCP denies
+                  ec2:CreateVpc). Your subnets must already have outbound
+                  internet routing (NAT/IGW) — this installer does not
+                  create one in this mode.
+EOF
+        local vpc_answer
+        vpc_answer="$(prompt_line 'VPC [new/existing] (default: new): ' || true)"
+        if [[ "${vpc_answer}" == "existing" ]]; then
+          VPC_ID="$(prompt_line 'Existing VPC ID: ' || true)"
+          PRIVATE_SUBNET_IDS="$(prompt_line 'Private subnet IDs, comma-separated (>=2, one per AZ; order matters under provision_strategy=min — only the first is used): ' || true)"
+          PUBLIC_SUBNET_IDS="$(prompt_line 'Public subnet IDs, comma-separated: ' || true)"
+          if [[ -z "${VPC_ID}" || -z "${PRIVATE_SUBNET_IDS}" || -z "${PUBLIC_SUBNET_IDS}" ]]; then
+            echo "ERROR: bring-your-own-VPC needs a VPC ID and both subnet ID lists." >&2
+            exit 1
+          fi
+        fi
+      fi
+      set_metadata "vpc_id" "${VPC_ID}"
+      set_metadata "private_subnet_ids" "${PRIVATE_SUBNET_IDS}"
+      set_metadata "public_subnet_ids" "${PUBLIC_SUBNET_IDS}"
+      set_metadata "vpc_id_set" "true"
+    fi
+
+    # Normalize once here (covers both the metadata-loaded and freshly-set
+    # branches above) so every later consumer — the preflight check and
+    # write_eks_tfvars's tfvars generation — can trust these are already
+    # trimmed with no empty entries. A stray leading/trailing/doubled comma
+    # here previously produced an empty string list element that sailed
+    # straight through to `tofu apply`, where it surfaced as a cryptic
+    # "InvalidID: The ID '' is not valid" deep inside an aws_ec2_tag
+    # resource instead of a clear error at input-resolution time.
+    if [[ -n "${VPC_ID}" ]]; then
+      PRIVATE_SUBNET_IDS="$(normalize_subnet_ids "${PRIVATE_SUBNET_IDS}" "--private-subnet-ids")"
+      PUBLIC_SUBNET_IDS="$(normalize_subnet_ids "${PUBLIC_SUBNET_IDS}" "--public-subnet-ids")"
+      set_metadata "private_subnet_ids" "${PRIVATE_SUBNET_IDS}"
+      set_metadata "public_subnet_ids" "${PUBLIC_SUBNET_IDS}"
     fi
   fi
 

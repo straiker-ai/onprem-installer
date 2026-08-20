@@ -22,6 +22,29 @@ to `main` — see `scripts/launch-straiker.sh`, `scripts/install-straiker.sh`, a
 Run `curl -fsSL .../dist/install.sh | bash -s -- --help` for the full list of options (phase
 selection, `--status`, values files, chart version pinning, etc).
 
+### Bring your own VPC
+
+`--install-eks` normally provisions its own VPC. If your AWS account's Organizations SCP denies
+`ec2:CreateVpc` (or you just want EKS attached to an existing network), pass `--vpc-id` together
+with `--private-subnet-ids` and `--public-subnet-ids` (all three required together):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- \
+  --install-eks --aws-region us-east-1 \
+  --vpc-id vpc-0123456789abcdef0 \
+  --private-subnet-ids subnet-0aaa...,subnet-0bbb... \
+  --public-subnet-ids subnet-0ccc...,subnet-0ddd...
+```
+
+IAM needed instead of `ec2:CreateVpc`/`CreateSubnet`/`CreateNatGateway`/etc.: `ec2:DescribeVpcs`,
+`ec2:DescribeSubnets`, `ec2:DescribeRouteTables`, `ec2:CreateTags`, `ec2:DeleteTags` (the installer
+tags your subnets `kubernetes.io/role/*-elb` and `karpenter.sh/discovery`, which the AWS Load
+Balancer Controller and Karpenter both require to discover them).
+
+This mode does **not** create a NAT gateway — your supplied private subnets must already have their
+own outbound internet routing. Like `--cloud-provider`/`--provision-strategy`, this is first-run-only:
+once set, it's permanent for the install recorded in `~/.straiker/install.json`.
+
 ## Uninstall
 
 ```bash

@@ -185,6 +185,16 @@ unalignedLLM:
   throttle:
     enabled: false
     rpm: 300
+  # The served-model-name this deployment's own UnalignedLLM endpoint (see
+  # straiker-inference chart) registers its model under - NOT the same as any
+  # HuggingFace model id. Iris's own code default ("straikerinc/mistral-nemo-12B-
+  # uncensored") matches SaaS's inference service; on-prem's straiker-inference
+  # chart serves the identical model under the shorter name "thanos" (confirmed
+  # live via that vLLM instance's own /v1/models) - every UnalignedLLM call 404'd
+  # with "The model `straikerinc/mistral-nemo-12B-uncensored` does not exist"
+  # until this was set, silently dropping coverage for any probe whose evasion
+  # needed it.
+  modelName: thanos
 
 cleanup:
   delayDays: 30
