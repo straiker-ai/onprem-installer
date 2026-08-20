@@ -17,15 +17,20 @@ output "cluster_certificate_authority_data" {
 }
 
 output "vpc_id" {
-  value = module.vpc.vpc_id
+  value = local.vpc_id
 }
 
 output "private_subnet_ids" {
-  value = module.vpc.private_subnets
+  value = local.private_subnet_ids
 }
 
 output "public_subnet_ids" {
-  value = module.vpc.public_subnets
+  value = local.public_subnet_ids
+}
+
+output "vpc_managed_by_installer" {
+  description = "true if this module created the VPC (safe for nuke-eks.sh to delete); false if customer-supplied via vpc_id (bring-your-own-VPC)."
+  value       = local.create_vpc
 }
 
 output "karpenter_node_role_name" {
