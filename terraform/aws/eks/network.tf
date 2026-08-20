@@ -1,4 +1,6 @@
 module "vpc" {
+  count = local.create_vpc ? 1 : 0
+
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
@@ -34,4 +36,47 @@ module "vpc" {
   }
 
   tags = local.common_tags
+}
+
+# ── Bring-your-own-VPC (vpc_id set): AZ lookup + tagging ──────────────────
+# module.vpc (above) applies public_subnet_tags/private_subnet_tags/
+# private_subnet_tags_per_az itself when it creates the VPC. In BYO mode
+# nothing creates those subnets, so this block replicates the same tags onto
+# the customer-supplied ones directly -- Karpenter's EC2NodeClasses
+# (charts/straiker-system/templates/karpenter-*.yaml) discover subnets
+# exclusively via the karpenter.sh/discovery tag, not by ID, so this can't be
+# skipped. Deliberately tags only subnets, never the VPC resource itself --
+# scripts/nuke-eks.sh's safety gate depends on a BYO VPC never acquiring
+# Straiker's own vendor/managed_by tags.
+data "aws_subnet" "private" {
+  count = local.create_vpc ? 0 : length(var.private_subnet_ids)
+  id    = var.private_subnet_ids[count.index]
+}
+
+resource "aws_ec2_tag" "public_elb" {
+  count       = local.create_vpc ? 0 : length(var.public_subnet_ids)
+  resource_id = var.public_subnet_ids[count.index]
+  key         = "kubernetes.io/role/elb"
+  value       = "1"
+}
+
+resource "aws_ec2_tag" "private_internal_elb" {
+  count       = local.create_vpc ? 0 : length(var.private_subnet_ids)
+  resource_id = var.private_subnet_ids[count.index]
+  key         = "kubernetes.io/role/internal-elb"
+  value       = "1"
+}
+
+# Only local.karpenter_azs' subnet(s) get tagged, mirroring module.vpc's own
+# private_subnet_tags_per_az -- respects provision_strategy=min's AZ
+# confinement (see locals.tf) instead of tagging every BYO private subnet.
+resource "aws_ec2_tag" "karpenter_discovery" {
+  for_each = local.create_vpc ? {} : {
+    for idx, sid in var.private_subnet_ids : sid => sid
+    if contains(local.karpenter_azs, data.aws_subnet.private[idx].availability_zone)
+  }
+
+  resource_id = each.value
+  key         = "karpenter.sh/discovery"
+  value       = var.cluster_name
 }

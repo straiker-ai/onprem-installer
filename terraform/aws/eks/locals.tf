@@ -1,7 +1,19 @@
 locals {
-  azs             = var.availability_zones
+  create_vpc = var.vpc_id == null
+
+  # In BYO mode (create_vpc = false), AZs come from the supplied subnets
+  # (see data.aws_subnet.private in network.tf) instead of this variable --
+  # Terraform's conditional operator short-circuits, so var.availability_zones
+  # being null in that mode is never actually evaluated here.
+  azs             = local.create_vpc ? var.availability_zones : data.aws_subnet.private[*].availability_zone
   public_subnets  = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 8, i)]
   private_subnets = [for i, _ in local.azs : cidrsubnet(var.vpc_cidr, 8, i + 10)]
+
+  # Resolved VPC/subnet IDs -- either what module.vpc created, or what the
+  # customer supplied via vpc_id/private_subnet_ids/public_subnet_ids.
+  vpc_id             = local.create_vpc ? module.vpc[0].vpc_id : var.vpc_id
+  private_subnet_ids = local.create_vpc ? module.vpc[0].private_subnets : var.private_subnet_ids
+  public_subnet_ids  = local.create_vpc ? module.vpc[0].public_subnets : var.public_subnet_ids
 
   common_tags = {
     vendor      = "Straiker"
@@ -24,10 +36,11 @@ locals {
   # needed on the chart side. karpenter_azs is that AZ list.
   karpenter_azs = var.provision_strategy == "min" ? [local.azs[0]] : local.azs
 
-  # module.vpc.private_subnets is the module's *output* (actual subnet IDs
-  # created by it), not the CIDR list above -- needed directly (not via a
-  # tag) since eks_managed_node_groups takes real subnet_ids.
-  system_node_subnet_ids = var.provision_strategy == "min" ? [module.vpc.private_subnets[0]] : module.vpc.private_subnets
+  # local.private_subnet_ids is real subnet IDs (module.vpc's output, or the
+  # customer-supplied ones in BYO mode), not the CIDR list above -- needed
+  # directly (not via a tag) since eks_managed_node_groups takes real
+  # subnet_ids.
+  system_node_subnet_ids = var.provision_strategy == "min" ? [local.private_subnet_ids[0]] : local.private_subnet_ids
 
   system_node_sizing = {
     min = { min_size = 1, max_size = 1, desired_size = 1 }

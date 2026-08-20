@@ -59,11 +59,20 @@ spec:
                 exit 1
               fi
               # Login to source ECR with assumed-role creds, dest ECR with Pod Identity.
+              # `aws ecr get-login-password` issues a token scoped to whatever
+              # region it's run in -- without an explicit --region, both calls
+              # would fall back to the pod's own ambient default region (the
+              # customer's cluster region), which is wrong for the SOURCE
+              # login whenever that differs from Straiker's own us-east-1
+              # (surfaces as ECR's generic "DENIED: Your Authorization Token
+              # is invalid", not a region-mismatch error). Derive each token's
+              # region from its own registry host instead of assuming either
+              # side matches the pod's default.
               SOURCE_HOST="{{ index (splitList "/" .Values.sourceEcrRegistry) 0 }}"
               crane auth login "${SOURCE_HOST}" \
-                --username AWS --password "$(AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}" aws ecr get-login-password)"
+                --username AWS --password "$(AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}" aws ecr get-login-password --region {{ index (splitList "." .Values.sourceEcrRegistry) 3 | quote }})"
               crane auth login {{ $destHost | quote }} \
-                --username AWS --password "$(aws ecr get-login-password)"
+                --username AWS --password "$(aws ecr get-login-password --region {{ index (splitList "." $destHost) 3 | quote }})"
               {{- range $img := $m.images }}
               {{- $imgSku := include "artifact-sync.imageSku" $img.source }}
               {{- if or (eq $imgSku "base") (eq $imgSku $.Values.customerSku) }}

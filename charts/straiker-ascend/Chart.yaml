@@ -5,7 +5,7 @@ description: >
   plane, probe worker/shadow, recon worker, report worker, and a daily
   assessment-cleanup CronJob.
 type: application
-version: 0.1.8
+version: 0.1.9
 appVersion: "0.0.1"
 home: https://github.com/straiker-ai/onprem
 sources:

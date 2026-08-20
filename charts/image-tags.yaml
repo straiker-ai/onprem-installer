@@ -1,0 +1,28 @@
+# Single source of truth for the tags of Straiker-owned container images.
+#
+# To bump a released image, edit ONLY the tag below, then run:
+#   scripts/lint-artifacts.sh --fix
+# This propagates the tag into every values.yaml that references it,
+# updates charts/straiker-artifact/values.yaml's matching imageMirror.images
+# entry, and bumps the owning chart's version (cascading into the parent
+# umbrella chart's dependency constraint + own version, for nested charts).
+#
+# Run `scripts/lint-artifacts.sh` (no args) to verify this file and its
+# targets agree, alongside this script's other chart-consistency checks
+# (not currently wired into CI).
+#
+# Third-party images (bifrost, dex, caddy, postgres, valkey, opensearch,
+# vector, k8s-device-plugin, aws-cli, liquibase, redpanda-connect) are
+# intentionally NOT tracked here — hand-maintained directly where they're
+# used, independent of this manifest.
+images:
+  straiker/frontend:
+    tag: onprem-v2026.8.3
+  straiker/frontend-migrate:
+    tag: onprem-v2026.8.3
+  straiker/argus:
+    tag: onprem-v2026.7.29.2
+  straiker/iris:
+    tag: onprem-v2026.8.13.9
+  straiker/vllm:
+    tag: v0.27.0

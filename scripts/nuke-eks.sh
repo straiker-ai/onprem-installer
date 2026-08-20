@@ -239,23 +239,49 @@ fi
 # stalled NAT GW blocks VPC deletion), this cleans them up via AWS API.
 # Resources are found by the s6r-onprem Name tag, with cluster-ownership tag
 # as fallback. If no matching VPC is found, the phase is skipped.
+#
+# SAFETY: this installer supports bring-your-own-VPC (terraform/aws/eks's
+# vpc_id variable), where a customer's own pre-existing VPC is attached to
+# instead of creating one. That VPC commonly carries a
+# "kubernetes.io/cluster/<name>" tag (customers are routinely told to apply
+# it themselves for EKS/ALB-controller subnet discovery) -- the fallback
+# filter below used to match on that tag ALONE, which would find and delete
+# a customer's real production VPC. Both filters below now additionally
+# require the vendor/managed_by tags that terraform/aws/eks's module.vpc
+# unconditionally applies to every VPC IT creates (see local.common_tags) --
+# a bring-your-own VPC never carries these, since that module only tags
+# subnets in BYO mode, never the VPC resource itself. This is the primary
+# guard and is always available (no tofu state required). A secondary,
+# best-effort check follows below using the vpc_managed_by_installer tofu
+# output, for the subset of runs where TF_DIR/state actually resolves.
 echo ""
 echo "=== Phase 5: VPC/networking cleanup ==="
 
-VPC_ID=$(aws ec2 describe-vpcs \
-  --region "${REGION}" \
-  --filters "Name=tag:Name,Values=s6r-onprem*" \
-  --query 'Vpcs[0].VpcId' \
-  --output text 2>/dev/null || echo "")
-[[ "${VPC_ID}" == "None" ]] && VPC_ID=""
+BYO_VPC=""
+if [[ -d "${TF_DIR}" ]] && command -v tofu &>/dev/null; then
+  BYO_VPC=$(tofu -chdir="${TF_DIR}" output -raw vpc_managed_by_installer 2>/dev/null || echo "")
+fi
 
-if [[ -z "${VPC_ID}" ]]; then
+if [[ "${BYO_VPC}" == "false" ]]; then
+  echo "  [!] Terraform state reports this VPC was customer-supplied (bring-your-own-VPC)."
+  echo "      Skipping — nuke-eks.sh will never delete a VPC it did not create."
+  VPC_ID=""
+else
   VPC_ID=$(aws ec2 describe-vpcs \
     --region "${REGION}" \
-    --filters "Name=tag-key,Values=kubernetes.io/cluster/${CLUSTER}" \
+    --filters "Name=tag:Name,Values=s6r-onprem*" "Name=tag:vendor,Values=Straiker" "Name=tag:managed_by,Values=terraform" \
     --query 'Vpcs[0].VpcId' \
     --output text 2>/dev/null || echo "")
   [[ "${VPC_ID}" == "None" ]] && VPC_ID=""
+
+  if [[ -z "${VPC_ID}" ]]; then
+    VPC_ID=$(aws ec2 describe-vpcs \
+      --region "${REGION}" \
+      --filters "Name=tag-key,Values=kubernetes.io/cluster/${CLUSTER}" "Name=tag:vendor,Values=Straiker" "Name=tag:managed_by,Values=terraform" \
+      --query 'Vpcs[0].VpcId' \
+      --output text 2>/dev/null || echo "")
+    [[ "${VPC_ID}" == "None" ]] && VPC_ID=""
+  fi
 fi
 
 if [[ -z "${VPC_ID}" ]]; then

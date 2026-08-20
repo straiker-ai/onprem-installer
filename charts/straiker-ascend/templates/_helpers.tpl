@@ -44,6 +44,8 @@ Env vars common to every ascend component.
   value: "false"
 - name: SYS__UNALIGNED_LLM_ENDPOINT
   value: {{ include "ascend.unalignedLLMEndpoint" . | quote }}
+- name: SYS__UNALIGNED_LLM_MODEL_NAME
+  value: {{ .Values.unalignedLLM.modelName | quote }}
 - name: SYS__UNALIGNED_LLM_THROTTLE_ENABLED
   value: {{ .Values.unalignedLLM.throttle.enabled | quote }}
 - name: SYS__UNALIGNED_LLM_RPM
