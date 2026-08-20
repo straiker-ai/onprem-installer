@@ -17,7 +17,7 @@ edgeHttpsPort: 8443
 
 image:
   repository: straiker/iris
-  tag: onprem-v2026.8.13.7
+  tag: onprem-v2026.8.13.10
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -109,13 +109,27 @@ bifrost:
 #
 # Accepts a bare provider name (any model from that provider, e.g.
 # "openai"), a "provider/*" glob (equivalent), or an exact "provider/model"
-# pin (e.g. "bedrock/global.anthropic.claude-sonnet-4-6" — the "global."
-# cross-region inference profile prefix is part of the pin, since newer
-# Bedrock models reject the bare model ID with on-demand throughput) — the
-# pin form is what AWS Bedrock's own per-model "Model access" grant maps to
-# 1:1 (modulo the prefix), so bedrock mode always uses that form rather
-# than the bare/glob one.
+# pin (e.g. "bedrock/claude-sonnet-4-6" — the bare logical name iris's
+# resolver.BEDROCK_MODEL_IDS maps to AWS's real model id; the pin does NOT
+# include the cross-region inference-profile prefix, since newer Bedrock
+# models reject the bare model ID with on-demand throughput and iris stitches
+# that prefix on itself from bedrockInferenceProfile below) — the pin form
+# is what AWS Bedrock's own per-model "Model access" grant maps to 1:1, so
+# bedrock mode always uses that form rather than the bare/glob one.
 availableModels: []
+
+# ── Bedrock cross-region inference profile prefix (see availableModels'
+# own comment above) - install-straiker.sh sets this explicitly for
+# AI_PROVIDER_MODE=bedrock, from the "global"/"regional" choice made during
+# that mode's setup. Empty (default) falls back to iris's own code default
+# ("global" - dynamically routes to whichever region has capacity, no
+# pricing premium). Set to a region-family prefix ("us"/"eu"/"apac") to pin
+# every Bedrock request to that family instead, for data-residency reasons -
+# note not every model has an endpoint in every family (e.g. neither Haiku
+# 4.5 nor Sonnet 4.6 have one in apac), so a non-global pin can make a
+# purpose's preferred model unreachable at call time rather than at install
+# time.
+bedrockInferenceProfile: ""
 
 # ── Archive pipeline: iris posts events over HTTP to the shared
 # straiker-system Redpanda Connect (Benthos), same as charts/straiker-defend.
@@ -185,6 +199,16 @@ unalignedLLM:
   throttle:
     enabled: false
     rpm: 300
+  # The served-model-name this deployment's own UnalignedLLM endpoint (see
+  # straiker-inference chart) registers its model under - NOT the same as any
+  # HuggingFace model id. Iris's own code default ("straikerinc/mistral-nemo-12B-
+  # uncensored") matches SaaS's inference service; on-prem's straiker-inference
+  # chart serves the identical model under the shorter name "thanos" (confirmed
+  # live via that vLLM instance's own /v1/models) - every UnalignedLLM call 404'd
+  # with "The model `straikerinc/mistral-nemo-12B-uncensored` does not exist"
+  # until this was set, silently dropping coverage for any probe whose evasion
+  # needed it.
+  modelName: thanos
 
 cleanup:
   delayDays: 30

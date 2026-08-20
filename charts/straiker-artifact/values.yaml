@@ -78,16 +78,16 @@ imageMirror:
       tag: v0.27.0
       destRepository: straiker/vllm
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
-      tag: onprem-v2026.8.2.6
+      tag: onprem-v2026.8.3
       destRepository: straiker/frontend
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend-migrate
-      tag: onprem-v2026.8.2.6
+      tag: onprem-v2026.8.3
       destRepository: straiker/frontend-migrate
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
       tag: onprem-v2026.7.29.2
       destRepository: straiker/argus
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
-      tag: onprem-v2026.8.13.7
+      tag: onprem-v2026.8.13.10
       destRepository: straiker/iris
   image:
     repository: gcr.io/go-containerregistry/crane

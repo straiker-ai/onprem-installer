@@ -44,6 +44,8 @@ Env vars common to every ascend component.
   value: "false"
 - name: SYS__UNALIGNED_LLM_ENDPOINT
   value: {{ include "ascend.unalignedLLMEndpoint" . | quote }}
+- name: SYS__UNALIGNED_LLM_MODEL_NAME
+  value: {{ .Values.unalignedLLM.modelName | quote }}
 - name: SYS__UNALIGNED_LLM_THROTTLE_ENABLED
   value: {{ .Values.unalignedLLM.throttle.enabled | quote }}
 - name: SYS__UNALIGNED_LLM_RPM
@@ -67,6 +69,14 @@ Env vars common to every ascend component.
 # install-straiker.sh for AI_PROVIDER_MODE=bedrock.
 - name: SYS__AVAILABLE_MODELS
   value: {{ .Values.availableModels | default (list "openai" "grok") | toJson | quote }}
+# See values.yaml's own bedrockInferenceProfile comment. Omitted (not just
+# empty-quoted) when unset, so iris's own code default ("global") applies —
+# an explicit empty string would instead literally become the model-id
+# prefix and break every Bedrock call.
+{{- if .Values.bedrockInferenceProfile }}
+- name: SYS__BEDROCK_INFERENCE_PROFILE
+  value: {{ .Values.bedrockInferenceProfile | quote }}
+{{- end }}
 - name: SYS__USE_SAQ_WORKERS
   value: "true"
 - name: SYS__RATE_LIMIT_CHECK

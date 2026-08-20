@@ -169,6 +169,29 @@ PROVISION_STRATEGY="${PROVISION_STRATEGY:-min}"
 # IAM role accordingly on the next aws-artifacts run.
 AI_PROVIDER_MODE="${AI_PROVIDER_MODE:-}"
 
+# Cross-region inference profile prefix baked into Bedrock's Claude model ids
+# (e.g. "global.anthropic.claude-sonnet-4-6" vs "us.anthropic.claude-sonnet-4-6")
+# - "global" dynamically routes to whichever region has capacity, no pricing
+# premium; "regional" pins to the customer's own region's profile instead, at
+# the cost of that model needing a real endpoint in that specific profile
+# family (not every model has one in every region - see
+# iris/common/settings/settings.py's bedrock_inference_profile field, which
+# defaults to "global"). This installer's own interactive prompt defaults to
+# "regional" instead: onprem customers are more likely to need data
+# residency than to need global's cost savings. AWS groups regions into
+# profile families broader than a literal region name (us-east-1 and
+# us-west-2 are both "us"); this maps BEDROCK_REGION to its containing
+# family. Unrecognized regions fall back to "global" rather than guessing a
+# family with no real coverage.
+bedrock_profile_for_region() {
+  case "$1" in
+    us-*) echo "us" ;;
+    eu-*) echo "eu" ;;
+    ap-*) echo "apac" ;;
+    *) echo "global" ;;
+  esac
+}
+
 # Provider credential values, captured interactively right after
 # AI_PROVIDER_MODE is chosen. Held in memory only, never persisted to
 # ~/.straiker/install.json; phase_ai_provider_secrets writes whichever of
@@ -190,6 +213,14 @@ CLUSTER_NAME=""
 INSTALL_EKS=false
 INSTALL_EKS_EXPLICIT=false
 PROVISION_STRATEGY_EXPLICIT=false
+# Bring-your-own-VPC (terraform/aws/eks's vpc_id variable) — for customers
+# whose IAM/SCP denies ec2:CreateVpc. All three empty (the default) means
+# "let this installer create its own VPC," unchanged from today. Foundational
+# like CLOUD_PROVIDER/PROVISION_STRATEGY above: first-run-only, see the
+# vpc_id_set metadata handling below.
+VPC_ID=""
+PRIVATE_SUBNET_IDS=""
+PUBLIC_SUBNET_IDS=""
 INSTALL_TOFU=false
 AUTO_YES=false
 PLAN_ONLY=false
@@ -254,6 +285,23 @@ Options:
                                    first-run-only treatment as --cloud-provider: permanent once
                                    set, ignored on later invocations. Irrelevant for bring-your-
                                    own-cluster installs.
+  --vpc-id <vpc-id>               Attach EKS to an existing VPC instead of creating one (e.g.
+                                   when an AWS Organizations SCP denies ec2:CreateVpc). Requires
+                                   --private-subnet-ids and --public-subnet-ids together. Needs
+                                   ec2:DescribeVpcs/DescribeSubnets/CreateTags/DeleteTags on the
+                                   supplied VPC (not ec2:CreateVpc) — this installer tags your
+                                   subnets kubernetes.io/role/*-elb and karpenter.sh/discovery,
+                                   which Karpenter/the AWS Load Balancer Controller need, but
+                                   does NOT create a NAT gateway: your private subnets must
+                                   already have outbound internet routing. Only used with
+                                   --install-eks; irrelevant for bring-your-own-cluster installs.
+                                   Same first-run-only treatment as --cloud-provider.
+  --private-subnet-ids <ids>      Comma-separated private subnet IDs (>=2, spanning >=2 AZs).
+                                   Required with --vpc-id. Order matters under
+                                   --provision-strategy min: only the first subnet's AZ is used
+                                   for the system node group and Karpenter-launched nodes.
+  --public-subnet-ids <ids>       Comma-separated public subnet IDs, tagged for the AWS Load
+                                   Balancer Controller. Required with --vpc-id.
   --aws-region <region>           AWS region (falls back to AWS_REGION/AWS_DEFAULT_REGION env,
                                    then the AWS CLI's configured region). Only used when
                                    --cloud-provider aws (the default).
@@ -721,6 +769,9 @@ show_cost_estimate() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo " cloud_provider=${CLOUD_PROVIDER} products=${PRODUCTS_OPT} provision_strategy=${PROVISION_STRATEGY}"
   echo " install_eks=${INSTALL_EKS} (bring-your-own-cluster costs aren't ours to estimate)"
+  if [[ -n "${VPC_ID}" ]]; then
+    echo " vpc_id=${VPC_ID} (bring-your-own-VPC — NAT gateway/data-transfer costs on your existing VPC aren't estimated here; only the EKS control plane + node group lines below apply)"
+  fi
   echo ""
 
   local total=0
@@ -750,13 +801,17 @@ show_cost_estimate() {
       total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
 
       # 1 NAT gateway under min (see terraform/aws/eks's single_nat_gateway),
-      # one per AZ otherwise. Base hourly charge only -- excludes
-      # per-GB data processing.
-      local nat_count=1
-      [[ "${PROVISION_STRATEGY}" != "min" ]] && nat_count="${az_or_zone_count}"
-      line_cost="$(awk -v n="${nat_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.045 * h }')"
-      echo " NAT gateway (${nat_count}x, base charge only, excludes data processing): \$${line_cost}/mo"
-      total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+      # one per AZ otherwise. Base hourly charge only -- excludes per-GB data
+      # processing. Only applies in create-mode -- bring-your-own-VPC (see
+      # vpc_id above) creates no NAT gateway at all; the customer's supplied
+      # subnets are expected to already have their own outbound routing.
+      if [[ -z "${VPC_ID}" ]]; then
+        local nat_count=1
+        [[ "${PROVISION_STRATEGY}" != "min" ]] && nat_count="${az_or_zone_count}"
+        line_cost="$(awk -v n="${nat_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.045 * h }')"
+        echo " NAT gateway (${nat_count}x, base charge only, excludes data processing): \$${line_cost}/mo"
+        total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+      fi
     fi
     echo ""
   fi
@@ -893,6 +948,18 @@ parse_args() {
         PROVISION_STRATEGY_EXPLICIT=true
         shift 2
         ;;
+      --vpc-id)
+        VPC_ID=${2:-}
+        shift 2
+        ;;
+      --private-subnet-ids)
+        PRIVATE_SUBNET_IDS=${2:-}
+        shift 2
+        ;;
+      --public-subnet-ids)
+        PUBLIC_SUBNET_IDS=${2:-}
+        shift 2
+        ;;
       --aws-region)
         AWS_REGION=${2:-}
         shift 2
@@ -972,6 +1039,16 @@ parse_args() {
         ;;
     esac
   done
+
+  # Bring-your-own-VPC: --vpc-id/--private-subnet-ids/--public-subnet-ids
+  # must be given together or not at all — a partial set almost certainly
+  # means a typo'd/forgotten flag, not a deliberate half-BYO configuration.
+  if [[ -n "${VPC_ID}" || -n "${PRIVATE_SUBNET_IDS}" || -n "${PUBLIC_SUBNET_IDS}" ]]; then
+    if [[ -z "${VPC_ID}" || -z "${PRIVATE_SUBNET_IDS}" || -z "${PUBLIC_SUBNET_IDS}" ]]; then
+      echo "ERROR: --vpc-id, --private-subnet-ids, and --public-subnet-ids must all be given together, or not at all." >&2
+      exit 1
+    fi
+  fi
 }
 
 on_error() {
@@ -1075,7 +1152,54 @@ EOF
 }
 
 # Renders var.image_names as a tofu-var JSON array, e.g. ["a/b","c/d"].
+
+# Splits a comma-separated subnet-ID list, trims whitespace around each
+# entry, and rejects (exit 1) any entry that ends up empty (e.g. a leading
+# or doubled comma — a lone trailing comma is silently absorbed instead,
+# since bash's own IFS splitting already drops a trailing empty field).
+# Left uncaught, an empty entry here later fails deep inside `tofu apply`
+# with a cryptic AWS API error ("InvalidID: The ID '' is not valid") on
+# whichever aws_ec2_tag resource happens to land on it, rather than a clear
+# message here. Echoes the normalized comma-separated list on success.
+normalize_subnet_ids() {
+  local csv="$1" flag_name="$2" raw id
+  local -a out=()
+  IFS=',' read -r -a raw <<< "${csv}"
+  for id in "${raw[@]}"; do
+    id="${id#"${id%%[![:space:]]*}"}"
+    id="${id%"${id##*[![:space:]]}"}"
+    if [[ -z "${id}" ]]; then
+      echo "ERROR: ${flag_name} contains an empty entry (check for a leading/trailing/doubled comma): '${csv}'" >&2
+      exit 1
+    fi
+    out+=("${id}")
+  done
+  local IFS=,
+  echo "${out[*]}"
+}
+
 write_eks_tfvars() {
+  # Bring-your-own-VPC: AZs are derived from the supplied subnets by
+  # terraform/aws/eks itself (see its locals.tf), so the live
+  # describe-availability-zones resolution below is not just redundant here,
+  # it would be actively wrong to still gate on var.availability_zones.
+  if [[ -n "${VPC_ID}" ]]; then
+    local priv_json pub_json
+    priv_json="$(echo "${PRIVATE_SUBNET_IDS}" | sed 's/,/", "/g; s/^/["/; s/$/"]/')"
+    pub_json="$(echo "${PUBLIC_SUBNET_IDS}" | sed 's/,/", "/g; s/^/["/; s/$/"]/')"
+    cat > "${EKS_DIR}/terraform.auto.tfvars" <<EOF
+# Generated by scripts/install-straiker.sh — safe to delete between runs.
+region             = "${AWS_REGION}"
+cluster_name       = "${CLUSTER_NAME}"
+provision_strategy = "${PROVISION_STRATEGY}"
+vpc_id             = "${VPC_ID}"
+private_subnet_ids = ${priv_json}
+public_subnet_ids  = ${pub_json}
+byo_vpc_confirm    = true
+EOF
+    return
+  fi
+
   # provision_strategy=max gets a 3rd AZ registered (matching this module's
   # own availability_zones variable description: "3 for maximum
   # resilience") -- min/ha both still register 2 (EKS's hard minimum for
@@ -1293,6 +1417,29 @@ phase_eks_cluster() {
   require_command kubectl
   require_terraform_dir "${EKS_SRC}" || return
   sync_terraform_workdir "${EKS_SRC}" "${EKS_DIR}"
+
+  # Bring-your-own-VPC preflight: fail fast with a clear message rather than
+  # deep inside `tofu apply` — this is exactly the class of gap the feature
+  # exists to route around (an SCP/IAM policy denying more than just
+  # ec2:CreateVpc), so it deserves its own explicit check.
+  if [[ -n "${VPC_ID}" ]]; then
+    if ! aws ec2 describe-vpcs --vpc-ids "${VPC_ID}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Could not describe VPC '${VPC_ID}' in ${AWS_REGION} — either it doesn't exist, or your AWS credentials lack ec2:DescribeVpcs."
+      return
+    fi
+    local byo_priv_ids byo_pub_ids
+    IFS=',' read -r -a byo_priv_ids <<< "${PRIVATE_SUBNET_IDS}"
+    IFS=',' read -r -a byo_pub_ids <<< "${PUBLIC_SUBNET_IDS}"
+    if ! aws ec2 describe-subnets --subnet-ids "${byo_priv_ids[@]}" "${byo_pub_ids[@]}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Could not describe one or more of the supplied subnet IDs in ${AWS_REGION} — either an ID is wrong, or your AWS credentials lack ec2:DescribeSubnets."
+      return
+    fi
+    if ! aws ec2 create-tags --resources "${byo_priv_ids[0]}" --tags Key=straiker-byo-vpc-preflight,Value=ok --region "${AWS_REGION}" >/dev/null 2>&1; then
+      mark_phase_blocked "Your AWS credentials can describe subnet '${byo_priv_ids[0]}' but cannot tag it (ec2:CreateTags denied). Bring-your-own-VPC needs CreateTags/DeleteTags on the supplied subnets to apply required kubernetes.io/role/* and karpenter.sh/discovery tags."
+      return
+    fi
+    aws ec2 delete-tags --resources "${byo_priv_ids[0]}" --tags Key=straiker-byo-vpc-preflight --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  fi
 
   local bucket_name
   bucket_name="$(get_metadata "bootstrap_bucket")"
@@ -2245,6 +2392,43 @@ phase_ai_provider_secrets() {
       fi
       ;;
     bedrock)
+      # Preflight: verify bedrock:InvokeModel is actually usable for both
+      # models Ascend is pinned to, before bifrost/straiker-ascend even
+      # deploy. Confirmed live: an AWS Organizations SCP explicit deny on
+      # bedrock:InvokeModel (account-wide, layered on top of an IAM role that
+      # correctly allows it) surfaces identically to "model access not yet
+      # granted under Bedrock > Model access" — both show up as a 403
+      # AccessDeniedException, but only once a live probe run actually hits
+      # it, hours into the install. An SCP applies to every principal in the
+      # account, not just bifrost's own Pod-Identity role, so testing with
+      # the installer's own already-authenticated credentials is an accurate
+      # proxy without needing to reach into the cluster.
+      require_command aws
+      local bedrock_region bedrock_inference_profile model preflight_err bedrock_preflight_failed=false
+      bedrock_region="$(get_metadata "bedrock_region")"
+      # Pre-existing installs from before bedrock_inference_profile existed
+      # have this metadata key unset - "global" matches their actual
+      # long-standing behavior (the prefix used to be hardcoded to it).
+      bedrock_inference_profile="$(get_metadata "bedrock_inference_profile")"
+      bedrock_inference_profile="${bedrock_inference_profile:-global}"
+      for model in "anthropic.claude-haiku-4-5-20251001-v1:0" "anthropic.claude-sonnet-4-6"; do
+        if ! preflight_err="$(aws bedrock-runtime invoke-model \
+          --region "${bedrock_region}" \
+          --model-id "${bedrock_inference_profile}.${model}" \
+          --body '{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+          --cli-binary-format raw-in-base64-out \
+          /dev/null 2>&1)"; then
+          bedrock_preflight_failed=true
+          echo "  [!] bedrock:InvokeModel preflight failed for '${bedrock_inference_profile}.${model}':" >&2
+          echo "      ${preflight_err}" >&2
+        fi
+      done
+      if [[ "${bedrock_preflight_failed}" == true ]]; then
+        mark_phase_blocked "Bedrock preflight failed (see above) — either an AWS Organizations SCP is denying bedrock:InvokeModel for this account, one/both pinned models (anthropic.claude-haiku-4-5-20251001-v1:0, anthropic.claude-sonnet-4-6) haven't been granted access under Bedrock > Model access in the AWS Console for region '${bedrock_region}', or (if inference profile '${bedrock_inference_profile}' isn't 'global') that profile family has no endpoint for one of these models. Fix in AWS (or re-run with --ai-provider-mode bedrock to pick a different profile), then re-run this phase (--phase ai-provider-secrets --rerun-phase)."
+        return
+      fi
+      log "Bedrock preflight OK: bedrock:InvokeModel confirmed usable for both pinned models via the '${bedrock_inference_profile}' profile in '${bedrock_region}'."
+
       # Pod Identity handles auth — no static keys needed. Ensure the bifrost
       # ServiceAccount exists (chart creates it on helm upgrade, but this phase
       # runs before straiker-core) so the Pod Identity association Terraform
@@ -2603,6 +2787,19 @@ phase_straiker_defend() {
   "${cmd[@]}"
 }
 
+# Helm 4 defaults to server-side apply, where --force-conflicts is needed to
+# resolve a field-manager conflict from an out-of-band edit (e.g. `kubectl
+# set env`) instead of failing the upgrade outright. Helm 3's default
+# client-side apply doesn't hit that conflict in the first place and, on at
+# least some 3.x versions, doesn't have the flag at all -- passing an
+# unrecognized flag is a hard "unknown flag" error, not a harmless no-op, so
+# this must be feature-detected rather than assumed (confirmed live: AWS
+# CloudShell's preinstalled helm is older than a locally-installed Helm 4 and
+# rejected this flag outright).
+helm_supports_force_conflicts() {
+  helm upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'
+}
+
 # Iris automated red-teaming engine (Straiker's "Ascend" product) — only
 # when "ascend" is selected. Runs after straiker-core (shared Postgres via
 # straiker-system + frontend's admin-API callback) and straiker-inference
@@ -2661,6 +2858,12 @@ phase_straiker_ascend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  # See helm_supports_force_conflicts's declaration above for why this can't
+  # just always be passed. (Note: `kubectl patch --type=json remove
+  # metadata/managedFields` does NOT work as an alternative fix on Helm 4 --
+  # the API server recomputes managedFields from the request and ignores a
+  # direct edit to that field.)
+  helm_supports_force_conflicts && cmd+=(--force-conflicts)
   if [[ -n "${CHART_VERSION}" ]]; then
     cmd+=(--version "${CHART_VERSION}")
   fi
@@ -2682,12 +2885,20 @@ phase_straiker_ascend() {
   # SYS__AVAILABLE_MODELS, even though bifrost itself would happily route
   # to it — without this, every AI-driven feature (not just the recon
   # agent) fails outright in bedrock mode. Pinned to the exact two model
-  # IDs the codebase ever asks for today. The installer grants pod IAM
-  # access; AWS still needs the selected Bedrock models enabled for the
-  # account.
+  # IDs the codebase ever asks for today, by their bare logical name (see
+  # resolver.BEDROCK_MODEL_IDS) — NOT the ARN-versioned AWS id or any
+  # inference-profile prefix, both of which resolver.py stitches on itself
+  # from SYS__BEDROCK_INFERENCE_PROFILE (set below) at call time. The
+  # installer grants pod IAM access; AWS still needs the selected Bedrock
+  # models enabled for the account.
   if [[ "${AI_PROVIDER_MODE}" == "bedrock" ]]; then
-    cmd+=(--set "availableModels[0]=bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0")
-    cmd+=(--set "availableModels[1]=bedrock/global.anthropic.claude-sonnet-4-6")
+    cmd+=(--set "availableModels[0]=bedrock/claude-haiku-4-5")
+    cmd+=(--set "availableModels[1]=bedrock/claude-sonnet-4-6")
+    local bedrock_inference_profile
+    bedrock_inference_profile="$(get_metadata "bedrock_inference_profile")"
+    if [[ -n "${bedrock_inference_profile}" ]]; then
+      cmd+=(--set "bedrockInferenceProfile=${bedrock_inference_profile}")
+    fi
   fi
 
   "${cmd[@]}"
@@ -2973,6 +3184,61 @@ EOF
     fi
   fi
 
+  # Bring-your-own-VPC — only meaningful for AWS EKS provisioning (no GKE
+  # equivalent exists yet). First-run-only like provision_strategy above:
+  # once persisted, always wins regardless of what --vpc-id says on a later
+  # invocation (switching VPCs mid-install isn't a thing this installer
+  # supports, same reasoning as cloud_provider/provision_strategy).
+  if [[ "${INSTALL_EKS}" == true && "${CLOUD_PROVIDER}" != "gke" ]]; then
+    if [[ "$(get_metadata "vpc_id_set")" == "true" ]]; then
+      VPC_ID="$(get_metadata "vpc_id")"
+      PRIVATE_SUBNET_IDS="$(get_metadata "private_subnet_ids")"
+      PUBLIC_SUBNET_IDS="$(get_metadata "public_subnet_ids")"
+    else
+      if [[ -z "${VPC_ID}" ]]; then
+        cat >&2 <<'EOF'
+
+Provision a new VPC, or attach to an existing one?
+  new (default) — this installer creates and manages its own VPC/subnets.
+  existing      — bring your own VPC (e.g. your AWS account's SCP denies
+                  ec2:CreateVpc). Your subnets must already have outbound
+                  internet routing (NAT/IGW) — this installer does not
+                  create one in this mode.
+EOF
+        local vpc_answer
+        vpc_answer="$(prompt_line 'VPC [new/existing] (default: new): ' || true)"
+        if [[ "${vpc_answer}" == "existing" ]]; then
+          VPC_ID="$(prompt_line 'Existing VPC ID: ' || true)"
+          PRIVATE_SUBNET_IDS="$(prompt_line 'Private subnet IDs, comma-separated (>=2, one per AZ; order matters under provision_strategy=min — only the first is used): ' || true)"
+          PUBLIC_SUBNET_IDS="$(prompt_line 'Public subnet IDs, comma-separated: ' || true)"
+          if [[ -z "${VPC_ID}" || -z "${PRIVATE_SUBNET_IDS}" || -z "${PUBLIC_SUBNET_IDS}" ]]; then
+            echo "ERROR: bring-your-own-VPC needs a VPC ID and both subnet ID lists." >&2
+            exit 1
+          fi
+        fi
+      fi
+      set_metadata "vpc_id" "${VPC_ID}"
+      set_metadata "private_subnet_ids" "${PRIVATE_SUBNET_IDS}"
+      set_metadata "public_subnet_ids" "${PUBLIC_SUBNET_IDS}"
+      set_metadata "vpc_id_set" "true"
+    fi
+
+    # Normalize once here (covers both the metadata-loaded and freshly-set
+    # branches above) so every later consumer — the preflight check and
+    # write_eks_tfvars's tfvars generation — can trust these are already
+    # trimmed with no empty entries. A stray leading/trailing/doubled comma
+    # here previously produced an empty string list element that sailed
+    # straight through to `tofu apply`, where it surfaced as a cryptic
+    # "InvalidID: The ID '' is not valid" deep inside an aws_ec2_tag
+    # resource instead of a clear error at input-resolution time.
+    if [[ -n "${VPC_ID}" ]]; then
+      PRIVATE_SUBNET_IDS="$(normalize_subnet_ids "${PRIVATE_SUBNET_IDS}" "--private-subnet-ids")"
+      PUBLIC_SUBNET_IDS="$(normalize_subnet_ids "${PUBLIC_SUBNET_IDS}" "--public-subnet-ids")"
+      set_metadata "private_subnet_ids" "${PRIVATE_SUBNET_IDS}"
+      set_metadata "public_subnet_ids" "${PUBLIC_SUBNET_IDS}"
+    fi
+  fi
+
   # Products — mandatory, at least one; "still empty" doubles as "still needs
   # resolving," same as region above.
   [[ -z "${PRODUCTS_OPT}" ]] && PRODUCTS_OPT="$(get_metadata "products")"
@@ -3133,18 +3399,45 @@ model IDs and won't use any others, so there's no need to enable more:
   - anthropic.claude-haiku-4-5-20251001-v1:0
   - anthropic.claude-sonnet-4-6
 
-Both are invoked through Bedrock's "global." cross-region inference profile
-(required for these models — the plain on-demand model ID is rejected),
-which dynamically routes to whichever region has capacity rather than
-staying pinned to the one you're installing into — Bedrock model
-availability still varies by region, so request access in whichever
-region(s) you expect traffic to land in, not just this one.
+Both are invoked through a Bedrock cross-region inference profile (required
+for these models — the plain on-demand model ID is rejected). Next you'll
+choose which profile:
 
 EOF
           log "Using AWS region '${bedrock_region}' for Bedrock."
           set_metadata "bedrock_region" "${bedrock_region}"
+
+          local default_profile
+          default_profile="$(bedrock_profile_for_region "${bedrock_region}")"
+          cat >&2 <<EOF
+Cross-region inference profile:
+  regional — pins every request to the '${default_profile}' profile family
+             (derived from region '${bedrock_region}'), so requests never
+             leave it (recommended for onprem — data residency tends to
+             matter more than the cost savings global offers). Not every
+             model has an endpoint in every regional profile family (e.g.
+             neither Haiku 4.5 nor Sonnet 4.6 have one in apac) — confirm
+             both pinned models are available in '${default_profile}'
+             before picking this.
+  global   — dynamically routes to whichever region has capacity, no pricing
+             premium.
+
+EOF
+          local bedrock_profile_answer bedrock_inference_profile
+          bedrock_profile_answer="$(prompt_line "Bedrock inference profile [global/regional] (default: regional): " || true)"
+          case "${bedrock_profile_answer}" in
+            regional|"") bedrock_inference_profile="${default_profile}" ;;
+            global) bedrock_inference_profile="global" ;;
+            *)
+              echo "ERROR: Bedrock inference profile must be 'global' or 'regional', got '${bedrock_profile_answer}'." >&2
+              exit 1
+              ;;
+          esac
+          log "Using Bedrock inference profile '${bedrock_inference_profile}'."
+          set_metadata "bedrock_inference_profile" "${bedrock_inference_profile}"
         else
           log "Bedrock region already set: $(get_metadata "bedrock_region")."
+          log "Bedrock inference profile already set: $(get_metadata "bedrock_inference_profile")."
         fi
         ;;
       trial-key)
