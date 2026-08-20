@@ -53,7 +53,7 @@ frontend:
     # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
     # since it's Straiker's own component, not third-party.
     repository: straiker/frontend
-    tag: onprem-v2026.8.2.6
+    tag: onprem-v2026.8.2.7
     pullPolicy: IfNotPresent
 
   imagePullSecrets: []
@@ -109,7 +109,7 @@ frontend:
     enabled: true
     image:
       repository: straiker/frontend-migrate
-      tag: onprem-v2026.8.2.6
+      tag: onprem-v2026.8.2.7
     backoffLimit: 2
     activeDeadlineSeconds: 300
     ttlSecondsAfterFinished: 3600

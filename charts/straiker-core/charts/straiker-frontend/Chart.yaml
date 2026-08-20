@@ -8,7 +8,7 @@ description: >
   exist purely to support this component's login flow and have no other
   consumer, so they're bundled here rather than split into their own chart.
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "1.0.0"
 home: https://github.com/straiker-ai/onprem
 sources:

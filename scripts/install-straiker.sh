@@ -2658,6 +2658,13 @@ phase_straiker_ascend() {
     --create-namespace
     --set "global.dockerRegistry=$(docker_registry_with_prefix "${ecr_registry}")"
     --set "db.host=postgres.${INFRA_NAMESPACE}.svc.cluster.local"
+    # Helm 4 defaults to server-side apply; --force-conflicts lets the chart's
+    # own values win over fields an operator hand-edited out-of-band (e.g. via
+    # `kubectl set env`), instead of failing the upgrade with a field-manager
+    # conflict. (Note: `kubectl patch --type=json remove metadata/managedFields`
+    # does NOT work to clear this — the API server recomputes managedFields
+    # from the request and ignores a direct edit to that field.)
+    --force-conflicts
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
