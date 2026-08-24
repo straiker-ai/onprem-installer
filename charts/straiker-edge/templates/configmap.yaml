@@ -1,3 +1,4 @@
+{{- if eq .Values.edgeType "internal" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,3 +14,4 @@ data:
       reverse_proxy {{ .targetService }}:{{ .targetPort }}
     }
     {{- end }}
+{{- end }}

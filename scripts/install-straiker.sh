@@ -119,6 +119,7 @@ ASCEND_SERVICE_ACCOUNT="straiker-ascend"
 # JSON from /bifrost-trial and /whoami. Fixed, same for every install.
 ARTIFACT_BROKER_BASE_URL="https://2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws"
 ARTIFACT_BROKER_BIFROST_TRIAL_URL="${ARTIFACT_BROKER_BASE_URL}/bifrost-trial"
+ARTIFACT_BROKER_TAILSCALE_SHARED_URL="${ARTIFACT_BROKER_BASE_URL}/tailscale-shared"
 ARTIFACT_BROKER_WHOAMI_URL="${ARTIFACT_BROKER_BASE_URL}/whoami"
 # Default Bifrost base URL used when the broker's /bifrost-trial response does
 # not include a base_url (customer secret not yet seeded with one).
@@ -204,6 +205,64 @@ AI_TRIAL_VIRTUAL_KEY=""
 # response.
 AI_TRIAL_BIFROST_BASE_URL=""
 
+# How straiker-edge exposes app/defend/ascend externally: internal (Caddy
+# reverse proxy, self-signed certs — current behavior, default), none (no
+# edge/ingress installed — bring your own), or tailscale (Tailscale
+# Kubernetes operator + Funnel, one Ingress per charts/straiker-edge's
+# routes[] entry). Safe to change on a later run, same as AI_PROVIDER_MODE —
+# just re-run with --edge-type and re-run the affected phases.
+EDGE_TYPE="${EDGE_TYPE:-}"
+
+# Which Tailscale account backs the 'tailscale' edge type: own (bring your
+# own OAuth client, created by hand) or shared (Straiker's own tailnet,
+# fetched from the artifact broker's /tailscale-shared endpoint using
+# STRAIKER_CUSTOMER_NAME/KEY — see capture_install_config's tailscale
+# block). Only asked/used when EDGE_TYPE=tailscale.
+TAILSCALE_ACCOUNT_MODE="${TAILSCALE_ACCOUNT_MODE:-}"
+
+# Tailscale OAuth client credentials for 'tailscale' edge type — captured
+# (mode=own) or fetched from the broker (mode=shared) after
+# STRAIKER_CUSTOMER_NAME/KEY are known. Held in memory only, never
+# persisted to ~/.straiker/install.json (same treatment as the AI_* keys
+# above). For mode=own, the OAuth client itself is created by hand in the
+# Tailscale admin console (see docs), scoped to tag:k8s-operator — this
+# installer never creates or mints Tailscale credentials itself.
+TAILSCALE_OAUTH_CLIENT_ID=""
+TAILSCALE_OAUTH_CLIENT_SECRET=""
+
+# Not a secret (visible to anyone in the admin console) — persisted as plain
+# install metadata, unlike the OAuth credentials above. Needed for more than
+# display: straiker-core's frontend/dex computes its OIDC issuer + redirect-
+# URI allowlist, and straiker-ascend computes its data-exfiltration endpoint
+# + CORS origin, from a hostname formula that assumes the Caddy edge
+# (https://<subdomain>.<appDomain>:<port>) unless overridden — phase_
+# straiker_core/phase_straiker_ascend override them with this value instead
+# when EDGE_TYPE=tailscale, or Dex's redirect URI won't match what the
+# browser actually lands on and login will loop.
+TAILSCALE_TAILNET_DOMAIN="${TAILSCALE_TAILNET_DOMAIN:-}"
+
+# Optional — not a secret, persisted as plain metadata like
+# TAILSCALE_TAILNET_DOMAIN above. Matches charts/straiker-edge's
+# tailscale.hostnamePrefix: prepended to each route's subdomain
+# (<prefix>-app/<prefix>-defend/<prefix>-ascend) so multiple customers
+# sharing one Tailscale account/tailnet don't collide on the bare
+# app/defend/ascend MagicDNS names, and so one customer's three machines
+# sort together in the Tailscale admin console's machine list. Convention:
+# the first label of the customer's own production domain
+# (acmecorp.com -> "acmecorp") — mechanical and inherently
+# collision-free, since domains are unique. Threaded into the same
+# frontend.origin/dataExfiltrationEndpoint/corsAllowOrigins overrides as
+# TAILSCALE_TAILNET_DOMAIN, so OIDC/CORS matches whatever hostname the
+# chart actually requests. Empty (default) preserves the bare names.
+TAILSCALE_HOSTNAME_PREFIX="${TAILSCALE_HOSTNAME_PREFIX:-}"
+
+# Tailscale's own Helm chart repo — distinct from HELM_REPO_NAME/HELM_REPO_URL
+# (Straiker's own chart repo, added fresh in every phase_* function below).
+TAILSCALE_HELM_REPO_NAME="tailscale"
+TAILSCALE_HELM_REPO_URL="https://pkgs.tailscale.com/helmcharts"
+TAILSCALE_OPERATOR_RELEASE="tailscale-operator"
+TAILSCALE_OPERATOR_NAMESPACE="tailscale"
+
 # ServiceAccount name this installer creates for bifrost — must match the
 # bifrost chart's own serviceAccountName value.
 BIFROST_SERVICE_ACCOUNT="straiker-bifrost"
@@ -243,7 +302,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -347,6 +406,37 @@ Options:
                                    --phase aws-artifacts,ai-provider-secrets,straiker-core
                                    --rerun-phase. If omitted, you'll be prompted interactively
                                    the first time 'ascend' is selected.
+  --edge-type <internal|none|tailscale|straiker-tailscale>
+                                   How straiker-edge exposes app/defend/ascend externally
+                                   (default: internal). internal = Caddy reverse proxy with
+                                   self-signed certs (current behavior). none = install
+                                   nothing; bring your own ingress/LoadBalancer. tailscale =
+                                   Tailscale Kubernetes operator + Funnel, one Ingress per
+                                   route, using your own Tailscale account (see
+                                   --tailscale-account-mode). straiker-tailscale = shorthand
+                                   for 'tailscale' + --tailscale-account-mode shared in one
+                                   flag — Straiker's own shared tailnet instead of yours.
+                                   Unlike --cloud-provider/--provision-strategy, safe to
+                                   change on a later run — just pass this flag again and
+                                   re-run --phase tailscale-operator,straiker-edge
+                                   --rerun-phase. If omitted, you'll be prompted interactively
+                                   the first time (before every other question).
+  --tailscale-account-mode <own|shared>
+                                   Only asked/used when --edge-type tailscale is selected
+                                   (already implied by --edge-type straiker-tailscale, so
+                                   this flag is redundant with that shorthand). own = bring
+                                   your own Tailscale OAuth client, scoped to
+                                   tag:k8s-operator, created by hand in the Tailscale admin
+                                   console first — you'll be prompted for its client
+                                   ID/secret, tailnet MagicDNS domain, and an optional
+                                   hostname prefix if not already stored. shared = use
+                                   Straiker's own shared tailnet instead — fetched
+                                   automatically from the artifact broker using your
+                                   Straiker customer name/key once those are captured; ask
+                                   your Straiker contact to provision shared-tailscale access
+                                   for your account first. If omitted, you'll be prompted
+                                   interactively the first time 'tailscale' edge type is
+                                   selected.
   --timeout <duration>            Helm wait timeout (default: 20m).
   -h, --help                      Show this help.
 EOF
@@ -718,11 +808,22 @@ Installer phases:
                              straiker-system + frontend's admin-API callback), ai-provider-
                              secrets (trial-key's BIFROST_API_KEY), and straiker-inference
                              (needs inference-thanos).
- 14) straiker-edge        - install/upgrade release 'straiker-edge' (thin TLS edge —
-                             charts/straiker-edge). Always runs: routes app.<appDomain>
-                             to straiker-core's frontend and defend.<appDomain> to
+ 14) tailscale-operator   - only when --edge-type tailscale is selected. Installs the
+                             third-party Tailscale Kubernetes operator Helm chart, using
+                             the OAuth client ID/secret resolved earlier per
+                             --tailscale-account-mode (own = you provided it; shared =
+                             fetched from the artifact broker) — stored in
+                             'straiker-secrets'. Provides the 'tailscale' IngressClass
+                             straiker-edge's Ingresses (mode 15 below) need.
+ 15) straiker-edge        - install/upgrade release 'straiker-edge' (charts/straiker-edge).
+                             Always runs, in one of three edgeType modes (chosen via
+                             --edge-type, prompted first if omitted): internal (default) —
+                             thin TLS edge (Caddy) routing app.<appDomain> to
+                             straiker-core's frontend and defend.<appDomain> to
                              straiker-defend (502s until that phase has run, since
-                             straiker-defend is now always installed too).
+                             straiker-defend is now always installed too); none — installs
+                             nothing, bring your own ingress/LoadBalancer; tailscale — one
+                             Ingress per route via the operator installed in phase 14.
 
 Notes:
   - If a phase preflight is not met, the installer marks that phase BLOCKED and exits cleanly.
@@ -1020,6 +1121,30 @@ parse_args() {
         AI_PROVIDER_MODE=${2:-}
         if [[ "${AI_PROVIDER_MODE}" != "own-keys" && "${AI_PROVIDER_MODE}" != "bedrock" && "${AI_PROVIDER_MODE}" != "trial-key" ]]; then
           echo "ERROR: --ai-provider-mode must be 'own-keys', 'bedrock', or 'trial-key', got '${AI_PROVIDER_MODE}'." >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      --edge-type)
+        EDGE_TYPE=${2:-}
+        # straiker-tailscale is shorthand for tailscale + account mode
+        # shared, not a real 4th EDGE_TYPE value — see TAILSCALE_ACCOUNT_MODE's
+        # declaration up top for why those stay two separate concerns
+        # internally (what exposes traffic vs. whose Tailscale account).
+        if [[ "${EDGE_TYPE}" == "straiker-tailscale" ]]; then
+          EDGE_TYPE=tailscale
+          TAILSCALE_ACCOUNT_MODE=shared
+        fi
+        if [[ "${EDGE_TYPE}" != "internal" && "${EDGE_TYPE}" != "none" && "${EDGE_TYPE}" != "tailscale" ]]; then
+          echo "ERROR: --edge-type must be 'internal', 'none', 'tailscale', or 'straiker-tailscale', got '${2:-}'." >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      --tailscale-account-mode)
+        TAILSCALE_ACCOUNT_MODE=${2:-}
+        if [[ "${TAILSCALE_ACCOUNT_MODE}" != "own" && "${TAILSCALE_ACCOUNT_MODE}" != "shared" ]]; then
+          echo "ERROR: --tailscale-account-mode must be 'own' or 'shared', got '${TAILSCALE_ACCOUNT_MODE}'." >&2
           exit 1
         fi
         shift 2
@@ -1926,15 +2051,6 @@ phase_aws_artifacts_gke() {
 # if it can't be determined — a safe default, since sku: "base" images in
 # charts/straiker-artifact are always attempted regardless, and this only
 # widens or narrows what else gets attempted.
-detect_customer_sku() {
-  local sku
-  sku="$(curl -sf -H "Authorization: Bearer ${STRAIKER_CUSTOMER_KEY}" -H "X-Customer-Email: $(straiker_customer_email)" "${ARTIFACT_BROKER_WHOAMI_URL}" 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tier",""))' 2>/dev/null)"
-  echo "${sku:-base}"
-}
-
-# Same as detect_customer_sku(), but explicitly uses the Bearer format expected
-# by the current broker implementation.
 fetch_customer_sku_bearer() {
   local sku
   sku="$(curl -sf -H "Authorization: Bearer ${STRAIKER_CUSTOMER_KEY}" -H "X-Customer-Email: $(straiker_customer_email)" "${ARTIFACT_BROKER_WHOAMI_URL}" 2>/dev/null \
@@ -2464,6 +2580,23 @@ phase_ai_provider_secrets() {
   esac
 }
 
+# $1=subdomain (e.g. "app"). Returns "[<prefix>-]<subdomain>" per
+# TAILSCALE_HOSTNAME_PREFIX/charts/straiker-edge's own
+# tailscale.hostnamePrefix convention — the two MUST stay in lockstep, or
+# the URLs phase_straiker_core/phase_straiker_ascend/show_access_info
+# compute won't match the hostname straiker-edge's Ingresses actually
+# request.
+tailscale_hostname() {
+  local subdomain=$1
+  local prefix
+  prefix="$(get_metadata "tailscale_hostname_prefix")"
+  if [[ -n "${prefix}" ]]; then
+    printf '%s-%s' "${prefix}" "${subdomain}"
+  else
+    printf '%s' "${subdomain}"
+  fi
+}
+
 # Application layer — frontend/bifrost/dex/caddy (charts/straiker-core,
 # a standalone chart). Runs after straiker-system since frontend connects
 # to that chart's postgres/opensearch directly (see straiker-core's
@@ -2543,6 +2676,25 @@ phase_straiker_core() {
   cmd+=(--set "straiker-frontend.frontend.irisControlPlaneAdminApiKey.secretKey=IRIS_ADMIN_API_KEY")
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     cmd+=(--set "straiker-frontend.frontend.irisControlPlaneAdminEndpoint=http://${ASCEND_RELEASE}-control-plane.${INFRA_NAMESPACE}.svc.cluster.local")
+  fi
+
+  # EDGE_TYPE=tailscale: frontend.origin/irisControlPlanePublicEndpoint
+  # otherwise default to the Caddy-style https://<subdomain>.<appDomain>:
+  # <port> formula (see straiker-frontend's _helpers.tpl), which doesn't
+  # match a Tailscale-served hostname — Dex's issuer + redirect-URI
+  # allowlist are derived from frontend.origin, so this has to be exactly
+  # right or OIDC login loops. See TAILSCALE_TAILNET_DOMAIN's declaration.
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    local tailnet_domain
+    tailnet_domain="$(get_metadata "tailscale_tailnet_domain")"
+    if [[ -z "${tailnet_domain}" ]]; then
+      mark_phase_blocked "Missing tailscale_tailnet_domain from install state. Re-run with --edge-type tailscale so it's captured."
+      return
+    fi
+    cmd+=(--set "straiker-frontend.frontend.origin=https://$(tailscale_hostname app).${tailnet_domain}")
+    if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
+      cmd+=(--set "straiker-frontend.frontend.irisControlPlanePublicEndpoint=https://$(tailscale_hostname ascend).${tailnet_domain}")
+    fi
   fi
 
   # AI provider mode (see AI_PROVIDER_MODE's declaration + phase_ai_provider_secrets).
@@ -2901,6 +3053,84 @@ phase_straiker_ascend() {
     fi
   fi
 
+  # EDGE_TYPE=tailscale: dataExfiltrationEndpoint/corsAllowOrigins otherwise
+  # default to the same Caddy-style formula as straiker-frontend.frontend.origin
+  # above (see this chart's own "ascend.externalUrl"/"ascend.frontendOrigin"
+  # helpers) — override with the real Tailscale hostname for the same reason.
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    local tailnet_domain
+    tailnet_domain="$(get_metadata "tailscale_tailnet_domain")"
+    if [[ -z "${tailnet_domain}" ]]; then
+      mark_phase_blocked "Missing tailscale_tailnet_domain from install state. Re-run with --edge-type tailscale so it's captured."
+      return
+    fi
+    cmd+=(--set "dataExfiltrationEndpoint=https://$(tailscale_hostname ascend).${tailnet_domain}")
+    cmd+=(--set "corsAllowOrigins=https://$(tailscale_hostname app).${tailnet_domain}")
+  fi
+
+  "${cmd[@]}"
+}
+
+# Tailscale Kubernetes operator (third-party chart, not Straiker's) — only
+# runs when EDGE_TYPE=tailscale, installing straiker-edge's per-route
+# Ingresses onto a cluster with no 'tailscale' IngressClass otherwise. Runs
+# after shared-secrets (needs SHARED_SECRETS_NAME to already exist) and
+# before straiker-edge (which depends on this release being healthy).
+phase_tailscale_operator() {
+  if [[ "${EDGE_TYPE}" != "tailscale" ]]; then
+    log "Edge type is '${EDGE_TYPE:-internal}', not 'tailscale' — skipping the Tailscale operator."
+    return
+  fi
+
+  require_command helm
+  require_command kubectl
+
+  if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    mark_phase_blocked "Secret '${SHARED_SECRETS_NAME}' doesn't exist yet. Run phase 'shared-secrets' first."
+    return
+  fi
+
+  ensure_k8s_ready_for_charts || return
+
+  if [[ -n "${TAILSCALE_OAUTH_CLIENT_ID}" && -n "${TAILSCALE_OAUTH_CLIENT_SECRET}" ]]; then
+    patch_shared_secret "TAILSCALE_OAUTH_CLIENT_ID" "${TAILSCALE_OAUTH_CLIENT_ID}"
+    patch_shared_secret "TAILSCALE_OAUTH_CLIENT_SECRET" "${TAILSCALE_OAUTH_CLIENT_SECRET}"
+    log "Stored the Tailscale OAuth client in '${SHARED_SECRETS_NAME}'."
+  else
+    log "No new Tailscale OAuth client to store (already present in '${SHARED_SECRETS_NAME}', or none captured)."
+  fi
+
+  local client_id client_secret
+  client_id="$(kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.TAILSCALE_OAUTH_CLIENT_ID}' 2>/dev/null | base64 -d || true)"
+  client_secret="$(kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.TAILSCALE_OAUTH_CLIENT_SECRET}' 2>/dev/null | base64 -d || true)"
+  if [[ -z "${client_id}" || -z "${client_secret}" ]]; then
+    mark_phase_blocked "No Tailscale OAuth client in '${SHARED_SECRETS_NAME}'. Re-run with --edge-type tailscale and TAILSCALE_OAUTH_CLIENT_ID/TAILSCALE_OAUTH_CLIENT_SECRET set (or answer the prompts), or seed the secret directly: kubectl patch secret ${SHARED_SECRETS_NAME} -n ${INFRA_NAMESPACE} --type=merge -p '{\"stringData\":{\"TAILSCALE_OAUTH_CLIENT_ID\":\"...\",\"TAILSCALE_OAUTH_CLIENT_SECRET\":\"...\"}}'."
+    return
+  fi
+
+  helm repo add --force-update "${TAILSCALE_HELM_REPO_NAME}" "${TAILSCALE_HELM_REPO_URL}" >/dev/null
+  helm repo update "${TAILSCALE_HELM_REPO_NAME}" >/dev/null
+
+  local cmd=(
+    helm upgrade --install "${TAILSCALE_OPERATOR_RELEASE}" "${TAILSCALE_HELM_REPO_NAME}/tailscale-operator"
+    --namespace "${TAILSCALE_OPERATOR_NAMESPACE}"
+    --create-namespace
+    --wait
+    --timeout "${HELM_TIMEOUT}"
+    --set-string "oauth.clientId=${client_id}"
+    --set-string "oauth.clientSecret=${client_secret}"
+  )
+  # own mode: the chart's own defaults (operatorConfig.defaultTags=
+  # tag:k8s-operator, proxyConfig.defaultTags=tag:k8s) already match what
+  # the docs walk customers through setting up themselves — no override
+  # needed. shared mode: this customer's OAuth client is scoped only to
+  # their own tag:cust-<name>[-operator] pair (see the artifact broker's
+  # customers.tf), NOT the chart's generic defaults, so both tag settings
+  # must be overridden or the operator can't authenticate at all.
+  if [[ "${TAILSCALE_ACCOUNT_MODE}" == "shared" ]]; then
+    cmd+=(--set-string "operatorConfig.defaultTags[0]=tag:cust-${STRAIKER_CUSTOMER_NAME}-operator")
+    cmd+=(--set-string "proxyConfig.defaultTags=tag:cust-${STRAIKER_CUSTOMER_NAME}")
+  fi
   "${cmd[@]}"
 }
 
@@ -2920,6 +3150,21 @@ phase_straiker_edge() {
     return
   fi
 
+  if [[ "${EDGE_TYPE}" == "none" ]]; then
+    log "Edge type is 'none' — skipping straiker-edge entirely. Point your own ingress/LoadBalancer at straiker-frontend-service, straiker-defend, and straiker-ascend-control-plane directly."
+    return
+  fi
+
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    local operator_status
+    operator_status="$(helm status "${TAILSCALE_OPERATOR_RELEASE}" -n "${TAILSCALE_OPERATOR_NAMESPACE}" -o json 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("info",{}).get("status",""))' 2>/dev/null || true)"
+    if [[ "${operator_status}" != "deployed" ]]; then
+      mark_phase_blocked "Release '${TAILSCALE_OPERATOR_RELEASE}' in namespace '${TAILSCALE_OPERATOR_NAMESPACE}' is not healthy (status: '${operator_status:-not installed}'). straiker-edge's Ingresses need the tailscale IngressClass it provides — fix and re-run 'tailscale-operator' first (--phase tailscale-operator --rerun-phase)."
+      return
+    fi
+  fi
+
   require_file_inputs "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"
   ensure_k8s_ready_for_charts || return
 
@@ -2934,7 +3179,15 @@ phase_straiker_edge() {
     --create-namespace
     --wait
     --timeout "${HELM_TIMEOUT}"
+    --set "edgeType=${EDGE_TYPE}"
   )
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    local hostname_prefix
+    hostname_prefix="$(get_metadata "tailscale_hostname_prefix")"
+    if [[ -n "${hostname_prefix}" ]]; then
+      cmd+=(--set "tailscale.hostnamePrefix=${hostname_prefix}")
+    fi
+  fi
   if [[ -n "${ecr_registry}" ]]; then
     cmd+=(--set "global.dockerRegistry=$(docker_registry_with_prefix "${ecr_registry}")")
   fi
@@ -2955,10 +3208,40 @@ phase_straiker_edge() {
 # Called unconditionally at the end of a successful main() run — not just
 # right after phase_straiker_edge actually executes, since that phase gets
 # skipped entirely on a re-run once already marked done. Reads live cluster
-# state (charts/straiker-edge's own ConfigMap) rather than assuming anything
-# was just installed, so it prints correctly whether this run did real work
-# or everything was already up from a previous one.
+# state rather than assuming anything was just installed, so it prints
+# correctly whether this run did real work or everything was already up from
+# a previous one.
 show_access_info() {
+  if [[ "${EDGE_TYPE}" == "none" ]]; then
+    log ""
+    log "Straiker is installed. Edge type is 'none' — no ingress was installed for you."
+    log "Point your own ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
+    log "  App    : straiker-frontend-service:80"
+    log "  Defend : straiker-defend:80"
+    log "  Ascend : straiker-ascend-control-plane:80"
+    return
+  fi
+
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    local tailnet_domain
+    tailnet_domain="$(get_metadata "tailscale_tailnet_domain")"
+    tailnet_domain="${tailnet_domain:-<your-tailnet>.ts.net}"
+    log ""
+    log "Straiker is installed. Edge type is 'tailscale' — reachable from your tailnet"
+    log "(and publicly, if Funnel is enabled) at:"
+    log "  App    : https://$(tailscale_hostname app).${tailnet_domain}/"
+    log "  Ascend : https://$(tailscale_hostname ascend).${tailnet_domain}/"
+    log "  Defend : https://$(tailscale_hostname defend).${tailnet_domain}/"
+    log ""
+    log "Smoke test the Defend API (needs one of your application's API keys):"
+    log "  curl -sk -X POST https://$(tailscale_hostname defend).${tailnet_domain}/api/v1/detect \\"
+    log "    -H \"Authorization: <api-key>\" \\"
+    log "    -H \"Content-Type: application/json\" \\"
+    log "    -H \"Straiker-Debug: true\" \\"
+    log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
+    return
+  fi
+
   local caddyfile edge_port
   caddyfile="$(kubectl -n "${INFRA_NAMESPACE}" get configmap straiker-edge-config -o jsonpath='{.data.Caddyfile}' 2>/dev/null || true)"
 
@@ -3064,6 +3347,91 @@ yet), re-running only asks what's still missing. Delete
 ~/.straiker/install.json to start over from scratch.
 
 EOF
+  fi
+
+  # Edge type — how straiker-edge exposes app/defend/ascend externally.
+  # Asked first since it's independent of every other choice below. Safe to
+  # change on a later run (see EDGE_TYPE declaration up top), unlike
+  # cloud_provider immediately below.
+  if [[ -z "${EDGE_TYPE}" ]]; then
+    EDGE_TYPE="$(get_metadata "edge_type")"
+  fi
+  if [[ -z "${EDGE_TYPE}" ]]; then
+    cat >&2 <<'EOF'
+
+How should straiker-edge expose app/defend/ascend externally?
+  1) internal          — Caddy reverse proxy with self-signed certs
+                          (default). Reachable via 'kubectl port-forward' —
+                          see the access instructions printed at the end of
+                          this install.
+  2) none               — install nothing; bring your own ingress/
+                          LoadBalancer pointed at the frontend/defend/ascend
+                          Services directly.
+  3) tailscale          — expose via the Tailscale Kubernetes operator +
+                          Funnel (one Ingress per route, publicly reachable
+                          at https://<name>.<your-tailnet>.ts.net), using
+                          your own Tailscale account. Requires a Tailscale
+                          OAuth client scoped to tag:k8s-operator, created
+                          by hand in the Tailscale admin console first —
+                          you'll be prompted for its client ID/secret next.
+  4) straiker-tailscale — same as tailscale, but using Straiker's own
+                          shared tailnet instead of your own — fetched
+                          automatically from Straiker's artifact broker
+                          using your Straiker customer name/key (captured a
+                          few questions from now). Nothing to create
+                          yourself, but ask your Straiker contact to
+                          provision shared-tailscale access for your
+                          account first.
+EOF
+    local edge_type_answer
+    edge_type_answer="$(prompt_line 'Edge type [internal/none/tailscale/straiker-tailscale] (default: internal): ' || true)"
+    case "${edge_type_answer}" in
+      1|internal|"") EDGE_TYPE=internal ;;
+      2|none) EDGE_TYPE=none ;;
+      3|tailscale) EDGE_TYPE=tailscale ;;
+      4|straiker-tailscale) EDGE_TYPE=tailscale; TAILSCALE_ACCOUNT_MODE=shared ;;
+      *)
+        echo "ERROR: Edge type must be 'internal', 'none', 'tailscale', or 'straiker-tailscale', got '${edge_type_answer}'." >&2
+        exit 1
+        ;;
+    esac
+  fi
+  set_metadata "edge_type" "${EDGE_TYPE}"
+
+  # Only which Tailscale account to use is decided here — actual credential/
+  # config resolution is deferred until after STRAIKER_CUSTOMER_NAME/KEY are
+  # captured below, since 'shared' mode needs them to call the artifact
+  # broker (see the block right after set_metadata "straiker_customer_key").
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    if [[ -z "${TAILSCALE_ACCOUNT_MODE}" ]]; then
+      TAILSCALE_ACCOUNT_MODE="$(get_metadata "tailscale_account_mode")"
+    fi
+    if [[ -z "${TAILSCALE_ACCOUNT_MODE}" ]]; then
+      cat >&2 <<'EOF'
+
+Tailscale account for the 'tailscale' edge type:
+  1) own    — bring your own: an OAuth client you created by hand in your
+              own Tailscale admin console, scoped to tag:k8s-operator.
+              You'll be prompted for its client ID/secret next.
+  2) shared — use Straiker's own shared tailnet instead. Fetched
+              automatically from Straiker's artifact broker using your
+              Straiker customer name/key (captured a few questions from
+              now) — nothing to create yourself, but ask your Straiker
+              contact to provision shared-tailscale access for your
+              account first.
+EOF
+      local tailscale_account_answer
+      tailscale_account_answer="$(prompt_line 'Tailscale account [own/shared] (default: own): ' || true)"
+      case "${tailscale_account_answer}" in
+        1|own|"") TAILSCALE_ACCOUNT_MODE=own ;;
+        2|shared) TAILSCALE_ACCOUNT_MODE=shared ;;
+        *)
+          echo "ERROR: Tailscale account mode must be 'own' or 'shared', got '${tailscale_account_answer}'." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    set_metadata "tailscale_account_mode" "${TAILSCALE_ACCOUNT_MODE}"
   fi
 
   # Cloud provider — first-run-only (see the CLOUD_PROVIDER declaration up
@@ -3301,6 +3669,120 @@ EOF
   fi
   set_metadata "straiker_customer_name" "${STRAIKER_CUSTOMER_NAME}"
   set_metadata "straiker_customer_key" "${STRAIKER_CUSTOMER_KEY}"
+
+  # Tailscale credentials/config for edgeType=tailscale — deferred to here
+  # (rather than right after EDGE_TYPE/TAILSCALE_ACCOUNT_MODE above) because
+  # 'shared' mode needs STRAIKER_CUSTOMER_NAME/KEY, just captured above, to
+  # call the artifact broker.
+  if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
+    case "${TAILSCALE_ACCOUNT_MODE}" in
+      own)
+        if secret_key_exists "TAILSCALE_OAUTH_CLIENT_ID" && secret_key_exists "TAILSCALE_OAUTH_CLIENT_SECRET"; then
+          log "Tailscale OAuth client already present in '${SHARED_SECRETS_NAME}' — leaving as-is."
+        else
+          cat >&2 <<'EOF'
+
+Tailscale edge type needs the OAuth client ID/secret from the client you
+created in the Tailscale admin console (Settings/Trust credentials → OAuth
+clients), scoped to tag:k8s-operator. Checking this shell's environment for
+TAILSCALE_OAUTH_CLIENT_ID/TAILSCALE_OAUTH_CLIENT_SECRET first — if either is
+already set, it's used automatically, no prompt needed.
+EOF
+          TAILSCALE_OAUTH_CLIENT_ID="${TAILSCALE_OAUTH_CLIENT_ID:-}"
+          [[ -z "${TAILSCALE_OAUTH_CLIENT_ID}" ]] && TAILSCALE_OAUTH_CLIENT_ID="$(prompt_line 'Tailscale OAuth client ID: ' || true)"
+          TAILSCALE_OAUTH_CLIENT_SECRET="${TAILSCALE_OAUTH_CLIENT_SECRET:-}"
+          [[ -z "${TAILSCALE_OAUTH_CLIENT_SECRET}" ]] && TAILSCALE_OAUTH_CLIENT_SECRET="$(prompt_line 'Tailscale OAuth client secret: ' || true)"
+          if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID}" || -z "${TAILSCALE_OAUTH_CLIENT_SECRET}" ]]; then
+            echo "ERROR: 'tailscale' edge type needs both a client ID and client secret. Set TAILSCALE_OAUTH_CLIENT_ID/TAILSCALE_OAUTH_CLIENT_SECRET in this shell, or re-run and answer the prompts." >&2
+            exit 1
+          fi
+        fi
+
+        # Not a secret — see TAILSCALE_TAILNET_DOMAIN's declaration up top
+        # for why this is required, not cosmetic.
+        if [[ -z "${TAILSCALE_TAILNET_DOMAIN}" ]]; then
+          TAILSCALE_TAILNET_DOMAIN="$(get_metadata "tailscale_tailnet_domain")"
+        fi
+        if [[ -z "${TAILSCALE_TAILNET_DOMAIN}" ]]; then
+          cat >&2 <<'EOF'
+
+Straiker-core's frontend/dex and straiker-ascend need to know the exact
+hostname Tailscale will serve this install at, so their OIDC redirect URIs
+and CORS origin match what the browser actually lands on. Find your
+tailnet's MagicDNS domain in the Tailscale admin console under
+Settings → General (e.g. "yourco.ts.net" or "tailXXXXX.ts.net").
+EOF
+          TAILSCALE_TAILNET_DOMAIN="$(prompt_line "Tailnet MagicDNS domain (e.g. yourco.ts.net): " || true)"
+          if [[ -z "${TAILSCALE_TAILNET_DOMAIN}" ]]; then
+            echo "ERROR: 'tailscale' edge type needs the tailnet's MagicDNS domain. Set TAILSCALE_TAILNET_DOMAIN in this shell, or re-run and answer the prompt." >&2
+            exit 1
+          fi
+        fi
+        set_metadata "tailscale_tailnet_domain" "${TAILSCALE_TAILNET_DOMAIN}"
+
+        # Optional — see TAILSCALE_HOSTNAME_PREFIX's declaration up top.
+        # Only asked once; "" (blank) is a valid, deliberate answer
+        # (dedicated tailnet, no prefix needed), so "_set" tracks whether
+        # it's been asked at all, same pattern as aws_profile_set elsewhere
+        # in this function.
+        if [[ -z "${TAILSCALE_HOSTNAME_PREFIX}" ]]; then
+          if [[ "$(get_metadata "tailscale_hostname_prefix_set")" == "true" ]]; then
+            TAILSCALE_HOSTNAME_PREFIX="$(get_metadata "tailscale_hostname_prefix")"
+          else
+            cat >&2 <<'EOF'
+
+If this Tailscale account/tailnet is shared across multiple customers,
+each one needs a distinct hostname prefix to avoid colliding on the bare
+app/defend/ascend MagicDNS names (they must be unique tailnet-wide), and so
+this customer's three machines sort together in the admin console. Use the
+first label of the customer's own production domain (e.g. "acmecorp"
+for acmecorp.com). Leave blank if this tailnet is dedicated to just this
+install.
+EOF
+            TAILSCALE_HOSTNAME_PREFIX="$(prompt_line "Hostname prefix (e.g. 'acmecorp' -> acmecorp-app; blank for none): " || true)"
+          fi
+        fi
+        set_metadata "tailscale_hostname_prefix" "${TAILSCALE_HOSTNAME_PREFIX}"
+        set_metadata "tailscale_hostname_prefix_set" "true"
+        ;;
+      shared)
+        if secret_key_exists "TAILSCALE_OAUTH_CLIENT_ID" && secret_key_exists "TAILSCALE_OAUTH_CLIENT_SECRET"; then
+          log "Shared Tailscale OAuth client already present in '${SHARED_SECRETS_NAME}' — leaving as-is."
+          TAILSCALE_HOSTNAME_PREFIX="$(get_metadata "tailscale_hostname_prefix")"
+          TAILSCALE_TAILNET_DOMAIN="$(get_metadata "tailscale_tailnet_domain")"
+        else
+          log "Fetching your shared Tailscale config from the artifact broker..."
+          local tailscale_shared_response
+          tailscale_shared_response="$(curl -sf -H "Authorization: Bearer ${STRAIKER_CUSTOMER_KEY}" -H "X-Customer-Email: $(straiker_customer_email)" "${ARTIFACT_BROKER_TAILSCALE_SHARED_URL}" || true)"
+          if [[ -z "${tailscale_shared_response}" ]]; then
+            tailscale_shared_response="$(curl -sf -H "Authorization: Bearer ${STRAIKER_CUSTOMER_KEY}" -H "X-Customer-Email: $(straiker_customer_email)" "${ARTIFACT_BROKER_TAILSCALE_SHARED_URL}" || true)"
+          fi
+          if [[ -z "${tailscale_shared_response}" ]]; then
+            echo "ERROR: Could not fetch your shared Tailscale config from the artifact broker (${ARTIFACT_BROKER_TAILSCALE_SHARED_URL}). Check network connectivity and that your Straiker contact has provisioned shared-tailscale access for your account, then re-run." >&2
+            exit 1
+          fi
+          TAILSCALE_OAUTH_CLIENT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_id",""))' <<< "${tailscale_shared_response}" 2>/dev/null)"
+          TAILSCALE_OAUTH_CLIENT_SECRET="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_secret",""))' <<< "${tailscale_shared_response}" 2>/dev/null)"
+          if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID}" || -z "${TAILSCALE_OAUTH_CLIENT_SECRET}" ]]; then
+            echo "ERROR: Unexpected response from the artifact broker's shared-Tailscale endpoint: ${tailscale_shared_response}" >&2
+            exit 1
+          fi
+          TAILSCALE_HOSTNAME_PREFIX="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("hostname_prefix",""))' <<< "${tailscale_shared_response}" 2>/dev/null)"
+          TAILSCALE_TAILNET_DOMAIN="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tailnet_domain",""))' <<< "${tailscale_shared_response}" 2>/dev/null)"
+          if [[ -z "${TAILSCALE_TAILNET_DOMAIN}" ]]; then
+            echo "ERROR: Artifact broker's shared-Tailscale config is missing 'tailnet_domain': ${tailscale_shared_response}" >&2
+            exit 1
+          fi
+          set_metadata "tailscale_hostname_prefix" "${TAILSCALE_HOSTNAME_PREFIX}"
+          set_metadata "tailscale_tailnet_domain" "${TAILSCALE_TAILNET_DOMAIN}"
+        fi
+        ;;
+      *)
+        echo "ERROR: Unknown tailscale_account_mode '${TAILSCALE_ACCOUNT_MODE}' in state. Remove the 'tailscale_account_mode' key from ~/.straiker/install.json's metadata and re-run to be re-prompted." >&2
+        exit 1
+        ;;
+    esac
+  fi
 
   # AI provider mode + credential(s) for Ascend's recon-agent — only asked
   # when 'ascend' is selected. The credential value is collected here (not
@@ -3547,6 +4029,7 @@ run_phase() {
     straiker-inference) phase_straiker_inference ;;
     straiker-defend) phase_straiker_defend ;;
     straiker-ascend) phase_straiker_ascend ;;
+    tailscale-operator) phase_tailscale_operator ;;
     straiker-edge) phase_straiker_edge ;;
     *)
       echo "ERROR: phase '${phase}' is not implemented." >&2
