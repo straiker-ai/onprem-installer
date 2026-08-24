@@ -13,6 +13,33 @@ global:
   sharedNodeSelector:
     purpose: general
 
+# internal   — Caddy reverse proxy with self-signed "tls internal" certs
+#              (default, current behavior).
+# none       — install nothing; bring your own ingress/LoadBalancer pointed
+#              at routes[]'s targetService/targetPort Services directly.
+# tailscale  — one Ingress per routes[] entry, ingressClassName: tailscale,
+#              exposed via the Tailscale Kubernetes operator (installed
+#              separately) instead of Caddy. See tailscale.funnel below.
+edgeType: internal
+
+tailscale:
+  # Only used when edgeType: tailscale. true = publicly reachable via
+  # Tailscale Funnel; false = reachable only from devices on the tailnet.
+  funnel: true
+  # Only used when edgeType: tailscale. Prepended to each route's subdomain
+  # to build the actual Tailscale hostname (e.g. "acmecorp" ->
+  # acmecorp-app/acmecorp-defend/acmecorp-ascend instead of bare
+  # app/defend/ascend). MagicDNS hostnames must be unique tailnet-wide, and
+  # if one Tailscale account/tailnet is shared across multiple customers,
+  # each needs a distinct prefix to avoid colliding on the bare subdomain
+  # names. Convention: the first label of the customer's own production
+  # domain (acmecorp.com -> "acmecorp", example.co.uk -> "example") —
+  # mechanical and inherently collision-free, since domains are unique.
+  # Customer-first (not site-first) so one customer's app/defend/ascend
+  # machines sort together in the Tailscale admin console's machine list.
+  # Leave empty for a dedicated, single-tenant tailnet.
+  hostnamePrefix: ""
+
 image:
   repository: library/caddy
   tag: 2-alpine
@@ -46,13 +73,12 @@ service:
   httpNodePort: null
   httpsNodePort: null
 
-# Each entry becomes its own Caddy site block: <subdomain>.<global.appDomain>,
-# reverse-proxied to <targetService>:<targetPort> (bare Service name — this
-# chart must be installed into the same namespace as everything it routes
-# to). tls internal issues each host its own self-signed cert; this is a
-# thin in-cluster edge for direct TLS termination, not a production ingress
-# — disable a route (or this whole chart) and bring your own ingress/
-# LoadBalancer once ready for that.
+# Each entry becomes its own route regardless of edgeType (a Caddy site
+# block for "internal", a Tailscale Ingress for "tailscale"):
+# <subdomain>.<global.appDomain> (internal) or <subdomain>.<tailnet>.ts.net
+# (tailscale), reverse-proxied/forwarded to <targetService>:<targetPort>
+# (bare Service name — this chart must be installed into the same namespace
+# as everything it routes to).
 routes:
   - name: frontend
     subdomain: app

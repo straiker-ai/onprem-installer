@@ -52,13 +52,17 @@ data:
     # frontend app's dex-users.ts manages entries in it dynamically via Dex's
     # gRPC API (see dex-deployment.yaml's --grpc-addr/DEX_API_CONNECTORS_CRUD).
     enablePasswordDB: true
+    {{- if .Values.dex.staticAdminEnabled }}
     staticPasswords:
       # Default disposable admin login (admin@<appDomain>) — matches
       # frontend.bootstrapAdminEmail's default exactly (see
       # frontend.bootstrapAdminEmail in _helpers.tpl), or first login won't
-      # match the bootstrapped admin row.
+      # match the bootstrapped admin row. Same password hash on every onprem
+      # install — set dex.staticAdminEnabled: false once a real admin has
+      # been onboarded (see that value's own comment).
       - email: {{ include "frontend.bootstrapAdminEmail" . | quote }}
         hash: "$2b$10$1XzARfv7c/YldQ1qki2BPO.ZG.cMrglBHx1JLn6h12WsQO5dDH3MC"
         username: admin
         userID: {{ include "frontend.bootstrapAdminEmail" . | quote }}
+    {{- end }}
 {{- end }}

@@ -31,6 +31,16 @@ dex:
     id: straiker
     secret: "change-me-too"
 
+  # The bootstrap admin login (see dex-configmap.yaml's staticPasswords) uses
+  # the SAME password hash on every onprem install — fine to get a customer
+  # logged in on day one, not fine to leave enabled indefinitely. Set to
+  # false (e.g. via `install-straiker.sh --disable-builtin-admin`) once the
+  # customer has onboarded a real admin they can log in as instead — local
+  # login (dex's own dynamically-managed password-DB entries, created
+  # through the frontend UI) and any configured external OIDC IdP both keep
+  # working either way; this only removes the one static/shared entry.
+  staticAdminEnabled: true
+
 # TLS termination + routing to this Service (which proxies /dex/* to dex —
 # see dex-proxy.ts) now lives in the standalone charts/straiker-edge chart
 # (formerly a nested "internalEdge" component here, extracted once a second
