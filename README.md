@@ -45,6 +45,25 @@ This mode does **not** create a NAT gateway — your supplied private subnets mu
 own outbound internet routing. Like `--cloud-provider`/`--provision-strategy`, this is first-run-only:
 once set, it's permanent for the install recorded in `~/.straiker/install.json`.
 
+## Disable the default admin login
+
+Every install ships with a bootstrap admin login (`admin@straiker.internal`, fixed regardless of
+your own domain — it's a one-time bootstrap identity, unrelated to how the install is actually
+reached) so you can log in on day one — but it uses the same password hash on every onprem
+install, so it shouldn't stay enabled indefinitely. Your Straiker contact provides the password
+for this login as part of onboarding (it's not published here). Once you've onboarded a real admin
+(a local account created through the UI, or your own configured OIDC IdP), disable it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- --disable-builtin-admin
+```
+
+This is a standalone action, not a phase — it doesn't need `--phase`/`--rerun-phase`. It prompts
+for confirmation (type `disable`) unless you pass `--yes`, and only removes that one static login;
+dex's own dynamically-managed local logins and any configured external IdP are unaffected. To
+re-enable it later, run a normal install with `--values` setting
+`straiker-frontend.dex.staticAdminEnabled: true`.
+
 ## Uninstall
 
 ```bash

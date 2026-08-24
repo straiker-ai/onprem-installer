@@ -47,9 +47,13 @@ straiker/frontend-migrate Liquibase image, not something with a psql client). */
 
 {{/* Matches dex-configmap.yaml's seeded staticPasswords admin entry exactly
 — that's the OIDC email claim dex returns on login, which this bootstrap row
-must match for the bundled local IdP's admin login to work out of the box. */}}
+must match for the bundled local IdP's admin login to work out of the box.
+Fixed, not derived from global.appDomain — this is a one-time bootstrap
+identity (see dex.staticAdminEnabled/--disable-builtin-admin), unrelated to
+how the install is actually reached, so there's no reason to tie it to
+whatever domain a customer happens to route through. */}}
 {{- define "frontend.bootstrapAdminEmail" -}}
-{{- .Values.frontend.bootstrap.adminEmail | default (printf "admin@%s" .Values.global.appDomain) -}}
+{{- .Values.frontend.bootstrap.adminEmail | default "admin@straiker.internal" -}}
 {{- end }}
 
 {{- define "frontend.dbPasswordSecretName" -}}

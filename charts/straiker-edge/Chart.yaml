@@ -1,16 +1,19 @@
 apiVersion: v2
 name: straiker-edge
 description: >
-  Thin TLS edge (Caddy, self-signed "tls internal" certs) reverse-proxying a
-  values-driven list of subdomain routes to in-cluster Services. Extracted
-  from charts/straiker-core/charts/straiker-frontend's formerly-nested
-  "internal-edge" component (frontend-only, one hardcoded route) into its own
-  top-level chart once a second real consumer showed up
+  External exposure for a values-driven list of subdomain routes to
+  in-cluster Services, via one of three edgeType modes: "internal" (Caddy,
+  self-signed "tls internal" certs — default), "none" (bring your own
+  ingress/LoadBalancer), or "tailscale" (one Ingress per route, exposed
+  through the Tailscale Kubernetes operator + Funnel). The "internal" mode
+  was extracted from charts/straiker-core/charts/straiker-frontend's
+  formerly-nested "internal-edge" component (frontend-only, one hardcoded
+  route) into its own top-level chart once a second real consumer showed up
   (charts/straiker-defend's API), matching this repo's "small, independent
   charts" pattern (straiker-inference, straiker-artifact) over nesting a new
   subchart under straiker-core.
 type: application
-version: 0.1.2
+version: 0.3.0
 appVersion: "2-alpine"
 home: https://github.com/straiker-ai/onprem
 sources:
@@ -23,3 +26,5 @@ keywords:
   - edge
   - caddy
   - reverse-proxy
+  - ingress
+  - tailscale
