@@ -637,6 +637,37 @@ entries:
   straiker-edge:
   - apiVersion: v2
     appVersion: 2-alpine
+    created: "2026-08-24T17:28:54.563454018Z"
+    description: 'External exposure for a values-driven list of subdomain routes to
+      in-cluster Services, via one of three edgeType modes: "internal" (Caddy, self-signed
+      "tls internal" certs — default), "none" (bring your own ingress/LoadBalancer),
+      or "tailscale" (one Ingress per route, exposed through the Tailscale Kubernetes
+      operator + Funnel). The "internal" mode was extracted from charts/straiker-core/charts/straiker-frontend''s
+      formerly-nested "internal-edge" component (frontend-only, one hardcoded route)
+      into its own top-level chart once a second real consumer showed up (charts/straiker-defend''s
+      API), matching this repo''s "small, independent charts" pattern (straiker-inference,
+      straiker-artifact) over nesting a new subchart under straiker-core. '
+    digest: 2617995c0f8ac55dc0f6bec82e17a33773e94918b21f268c1d03647b5f1007bc
+    home: https://github.com/straiker-ai/onprem
+    keywords:
+    - straiker
+    - edge
+    - caddy
+    - reverse-proxy
+    - ingress
+    - tailscale
+    maintainers:
+    - email: platform@straiker.ai
+      name: Straiker Team
+    name: straiker-edge
+    sources:
+    - https://github.com/straiker-ai/onprem
+    type: application
+    urls:
+    - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-edge-0.3.0/straiker-edge-0.3.0.tgz
+    version: 0.3.0
+  - apiVersion: v2
+    appVersion: 2-alpine
     created: "2026-08-24T08:13:26.085760918Z"
     description: 'External exposure for a values-driven list of subdomain routes to
       in-cluster Services, via one of three edgeType modes: "internal" (Caddy, self-signed
@@ -1198,4 +1229,4 @@ entries:
     urls:
     - https://github.com/straiker-ai/onprem-installer/releases/download/straiker-system-1.0.0/straiker-system-1.0.0.tgz
     version: 1.0.0
-generated: "2026-08-24T08:13:26.085879991Z"
+generated: "2026-08-24T17:28:54.563539847Z"
