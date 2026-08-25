@@ -28,6 +28,10 @@ INSTALLER_BUNDLE_URL="${STRAIKER_INSTALLER_BUNDLE_URL:-}"
 TFBE_SRC="${REPO_ROOT}/terraform/aws/tfbe"
 EKS_SRC="${REPO_ROOT}/terraform/aws/eks"
 ARTIFACTS_SRC="${REPO_ROOT}/terraform/aws/artifacts"
+# Named EDGE_INFRA_* (not EDGE_*) to avoid colliding with the unrelated
+# charts/straiker-edge Helm-chart identifiers (EDGE_RELEASE/EDGE_TYPE/
+# EDGE_CHART_NAME) already used throughout this script.
+EDGE_INFRA_SRC="${REPO_ROOT}/terraform/aws/edge"
 
 # GCP equivalents — only used when CLOUD_PROVIDER=gke.
 GCP_TFBE_SRC="${REPO_ROOT}/terraform/gcp/tfbe"
@@ -42,6 +46,7 @@ TF_WORK_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
 TFBE_DIR="${TF_WORK_ROOT}/aws/tfbe"
 EKS_DIR="${TF_WORK_ROOT}/aws/eks"
 ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
+EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
 GCP_TFBE_DIR="${TF_WORK_ROOT}/gcp/tfbe"
 GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
 GCP_ARTIFACTS_DIR="${TF_WORK_ROOT}/gcp/artifacts"
@@ -57,6 +62,32 @@ KARPENTER_GCP_HELM_REPO_NAME="karpenter-provider-gcp"
 KARPENTER_GCP_HELM_REPO_URL="https://cloudpilot-ai.github.io/karpenter-provider-gcp"
 KARPENTER_GCP_NAMESPACE="karpenter-system"
 KARPENTER_GCP_VERSION="0.6.0"
+
+# terraform/aws/edge's alb_controller.tf provisions the IAM role/Pod Identity
+# association unconditionally, as part of phase_edge_infra (which only ever
+# runs for EDGE_TYPE=alb — see that function's own comment); this installs
+# the controller itself via its Helm chart. Lives in terraform/aws/edge
+# rather than terraform/aws/eks so it's created regardless of --install-eks
+# (bring-your-own-cluster customers choosing edgeType: alb need this too,
+# unlike Karpenter above which only manages nodes for clusters this
+# installer itself provisioned).
+ALB_CONTROLLER_HELM_REPO_NAME="eks"
+ALB_CONTROLLER_HELM_REPO_URL="https://aws.github.io/eks-charts"
+ALB_CONTROLLER_RELEASE="aws-load-balancer-controller"
+ALB_CONTROLLER_NAMESPACE="kube-system"
+ALB_CONTROLLER_SERVICE_ACCOUNT="aws-load-balancer-controller"
+ALB_CONTROLLER_VERSION="3.5.0"
+
+# terraform/aws/edge's external_dns.tf provisions the IAM role/Pod Identity
+# association for edgeType=xalb when Route53 automation is opted into
+# (see XALB_ROUTE53_AUTOMATION's declaration); this installs the controller
+# itself via its Helm chart, same split as the ALB controller above.
+EXTERNAL_DNS_HELM_REPO_NAME="external-dns"
+EXTERNAL_DNS_HELM_REPO_URL="https://kubernetes-sigs.github.io/external-dns/"
+EXTERNAL_DNS_RELEASE="external-dns"
+EXTERNAL_DNS_NAMESPACE="kube-system"
+EXTERNAL_DNS_SERVICE_ACCOUNT="external-dns"
+EXTERNAL_DNS_VERSION="1.21.1"
 
 # Shared provider plugin cache across tfbe and eks (both need hashicorp/aws)
 # and across invocations — avoids re-downloading the same large provider.
@@ -207,10 +238,14 @@ AI_TRIAL_BIFROST_BASE_URL=""
 
 # How straiker-edge exposes app/defend/ascend externally: internal (Caddy
 # reverse proxy, self-signed certs — current behavior, default), none (no
-# edge/ingress installed — bring your own), or tailscale (Tailscale
+# edge/ingress installed — bring your own), tailscale (Tailscale
 # Kubernetes operator + Funnel, one Ingress per charts/straiker-edge's
-# routes[] entry). Safe to change on a later run, same as AI_PROVIDER_MODE —
-# just re-run with --edge-type and re-run the affected phases.
+# routes[] entry), or alb (one Ingress covering all routes via host-based
+# rules, backed by a single internal AWS Application Load Balancer through
+# the AWS Load Balancer Controller — for no-public-internet customers, e.g.
+# accessed via WorkSpaces Secure Browser. Safe to change on a later run,
+# same as AI_PROVIDER_MODE — just re-run with --edge-type and re-run the
+# affected phases.
 EDGE_TYPE="${EDGE_TYPE:-}"
 
 # Which Tailscale account backs the 'tailscale' edge type: own (bring your
@@ -263,6 +298,57 @@ TAILSCALE_HELM_REPO_URL="https://pkgs.tailscale.com/helmcharts"
 TAILSCALE_OPERATOR_RELEASE="tailscale-operator"
 TAILSCALE_OPERATOR_NAMESPACE="tailscale"
 
+# Used when EDGE_TYPE=none or EDGE_TYPE=alb. Not a secret — persisted as
+# plain metadata. Same purpose as TAILSCALE_TAILNET_DOMAIN/
+# TAILSCALE_HOSTNAME_PREFIX (keeping straiker-core's/straiker-ascend's
+# OIDC-origin/CORS overrides in sync with wherever app/defend/ascend
+# actually routes), just for a customer-supplied domain instead of a
+# Tailscale one. With EDGE_TYPE=none, blank (default) means "unchanged" —
+# the customer sets frontend.origin/etc. overrides manually themselves.
+# With EDGE_TYPE=alb/xalb it's required (also becomes charts/straiker-edge's
+# alb.domain/xalb.domain) — those modes have no meaning without a domain.
+CUSTOM_ORIGIN_DOMAIN="${CUSTOM_ORIGIN_DOMAIN:-}"
+
+# Required for EDGE_TYPE=alb (always) and EDGE_TYPE=xalb unless Route53
+# automation is enabled (--xalb-route53) — charts/straiker-edge's
+# alb.certificateArn/xalb.certificateArn (see phase_straiker_edge). Not a
+# secret — persisted as plain metadata. ACM certificate ARN for the ALB's
+# HTTPS listener; the AWS Load Balancer Controller creates no HTTPS
+# listener without one. No self-signed fallback for either edge type —
+# request a real one via DNS validation, which works even with zero public
+# reachability (only a Route53 CNAME is needed to prove domain control).
+# The default for both edge types: bring your own ARN, works regardless of
+# which AWS account (or DNS provider) actually hosts the domain's zone —
+# --xalb-route53 (below) is an opt-in convenience only for the common case
+# where that zone happens to live in this same AWS account.
+ALB_CERTIFICATE_ARN="${ALB_CERTIFICATE_ARN:-}"
+# Only used when EDGE_TYPE=alb. Provisions a tiny EC2 bastion
+# (terraform/aws/edge) reachable via 'aws ssm start-session' port
+# forwarding, no public IP/SSH key, so whoever is installing can verify the
+# ALB is reachable before DNS/handoff is fully sorted out. Not a
+# customer-facing access path. (xalb has no equivalent — it's genuinely
+# public, so there's no reachability gap to bridge.)
+ALB_PROVISION_BASTION="${ALB_PROVISION_BASTION:-}"
+# Only used when EDGE_TYPE=xalb. Opt-in, off by default — pass --xalb-route53
+# to enable. When enabled: auto-issues+validates a real ACM certificate via
+# Route53 DNS validation (no --alb-certificate-arn needed) and installs
+# ExternalDNS to keep the app hostnames pointed at the ALB automatically.
+# Only works when the domain's Route53 zone is in this same AWS account —
+# the default (disabled) is the one that works regardless of DNS/account
+# topology, since it just requires an ARN you already have.
+XALB_ROUTE53_AUTOMATION="${XALB_ROUTE53_AUTOMATION:-}"
+# Optional, only used when EDGE_TYPE=alb — charts/straiker-edge's
+# alb.subnets. Comma-separated subnet IDs; blank means rely on the AWS Load
+# Balancer Controller's subnet auto-discovery
+# (kubernetes.io/role/internal-elb=1 tag on private subnets).
+ALB_SUBNETS="${ALB_SUBNETS:-}"
+# CIDR allowed to reach the ALB (e.g. the customer's corporate range, or a
+# narrower one like the subnets a WorkSpaces Secure Browser portal uses) —
+# required whenever EDGE_TYPE=alb, since the AWS Load Balancer Controller
+# has no restriction by default (0.0.0.0/0), which "internal" scheme alone
+# does not prevent.
+INTERNAL_LB_SOURCE_RANGES="${INTERNAL_LB_SOURCE_RANGES:-}"
+
 # ServiceAccount name this installer creates for bifrost — must match the
 # bifrost chart's own serviceAccountName value.
 BIFROST_SERVICE_ACCOUNT="straiker-bifrost"
@@ -288,6 +374,12 @@ FORCE_RERUN=false
 # One-off hardening action, not part of the normal phase pipeline — see
 # disable_builtin_admin()'s own comment.
 DISABLE_BUILTIN_ADMIN=false
+# One-off action, not part of the normal phase pipeline — see
+# update_alb_certificate()'s own comment.
+UPDATE_ALB_CERTIFICATE=false
+ALB_CERT_FILE="${ALB_CERT_FILE:-}"
+ALB_KEY_FILE="${ALB_KEY_FILE:-}"
+ALB_CHAIN_FILE="${ALB_CHAIN_FILE:-}"
 
 SELECT_PHASE=""
 START_PHASE=""
@@ -305,7 +397,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "edge-infra" "alb-controller" "external-dns" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -333,6 +425,18 @@ Options:
                                    entry is removed. Prompts for confirmation unless --yes.
                                    Reversible via a normal install with --values setting
                                    straiker-frontend.dex.staticAdminEnabled: true.
+  --update-alb-certificate         One-off action, not part of the normal install: re-imports
+                                   a certificate into the ACM ARN edge type 'alb'/'xalb' is
+                                   already using (same ARN — no Helm upgrade or re-install
+                                   needed, the ALB picks it up automatically) and exits.
+                                   Requires --alb-cert-file/--alb-key-file (and optionally
+                                   --alb-chain-file). Useful for rotating an imported
+                                   certificate that doesn't auto-renew (ACM-issued
+                                   DNS-validated certificates, e.g. xalb's default, renew
+                                   themselves and don't need this).
+  --alb-cert-file <path>          Required with --update-alb-certificate. PEM certificate file.
+  --alb-key-file <path>           Required with --update-alb-certificate. PEM private key file.
+  --alb-chain-file <path>         Optional with --update-alb-certificate. PEM certificate chain file.
   --phase <name>[,<name>...]       Run only the given phase(s), in the listed order.
   --from-phase <name>             Run from phase through the end.
   --rerun-phase                   Re-run selected phases even if already marked done.
@@ -421,16 +525,25 @@ Options:
                                    --phase aws-artifacts,ai-provider-secrets,straiker-core
                                    --rerun-phase. If omitted, you'll be prompted interactively
                                    the first time 'ascend' is selected.
-  --edge-type <internal|none|tailscale|straiker-tailscale>
+  --edge-type <internal|none|tailscale|straiker-tailscale|alb>
                                    How straiker-edge exposes app/defend/ascend externally
-                                   (default: internal). internal = Caddy reverse proxy with
-                                   self-signed certs (current behavior). none = install
-                                   nothing; bring your own ingress/LoadBalancer. tailscale =
+                                   (default: none). internal = Caddy reverse proxy with
+                                   self-signed certs. none = install nothing; bring your own
+                                   ingress/LoadBalancer (current default). tailscale =
                                    Tailscale Kubernetes operator + Funnel, one Ingress per
                                    route, using your own Tailscale account (see
                                    --tailscale-account-mode). straiker-tailscale = shorthand
                                    for 'tailscale' + --tailscale-account-mode shared in one
                                    flag — Straiker's own shared tailnet instead of yours.
+                                   alb = one Ingress covering all routes via host-based
+                                   rules, backed by a single internal AWS Application Load
+                                   Balancer — for customers with no public internet access
+                                   (e.g. accessed via WorkSpaces Secure Browser). The AWS
+                                   Load Balancer Controller itself is installed automatically
+                                   (phase 'alb-controller', IAM via terraform/aws/edge)
+                                   unless an 'alb' IngressClass already exists. See
+                                   --custom-domain/--alb-certificate-arn/
+                                   --internal-lb-source-ranges/--alb-subnets.
                                    Unlike --cloud-provider/--provision-strategy, safe to
                                    change on a later run — just pass this flag again and
                                    re-run --phase tailscale-operator,straiker-edge
@@ -452,6 +565,52 @@ Options:
                                    for your account first. If omitted, you'll be prompted
                                    interactively the first time 'tailscale' edge type is
                                    selected.
+  --custom-domain <domain>         Used when --edge-type none or --edge-type alb is
+                                   selected. Sets straiker-core's/straiker-ascend's
+                                   OIDC-redirect-URI/CORS overrides to
+                                   straiker.<domain>/straiker-defend.<domain>/straiker-ascend.<domain> — needed
+                                   whenever you already know the domain your own (or the
+                                   installed alb) ingress/LoadBalancer will route through, or
+                                   Dex's login will loop. With --edge-type none, leave unset
+                                   (and answer blank at the prompt) to set these overrides
+                                   yourself later via --values instead. With --edge-type alb
+                                   it's required — that mode has no meaning without a domain.
+  --alb-certificate-arn <arn>      Required with --edge-type alb (always), and with
+                                   --edge-type xalb unless --xalb-route53 is also passed.
+                                   No self-signed fallback for either edge type — ACM
+                                   certificate ARN for the Ingress's HTTPS listener, without
+                                   which the AWS Load Balancer Controller creates no HTTPS
+                                   listener at all. Request it via DNS validation; that works
+                                   even with zero public reachability, only a Route53 CNAME is
+                                   needed to prove domain control, and works regardless of
+                                   which AWS account (or DNS provider) hosts the domain's zone.
+  --alb-provision-bastion         Only used with --edge-type alb. Provisions a tiny EC2
+                                   bastion (no public IP, no SSH key — reachable via 'aws ssm
+                                   start-session' port-forwarding) so you can verify the ALB is
+                                   reachable before DNS/handoff is fully sorted out.
+  --xalb-route53                  Only used with --edge-type xalb. Opt-in convenience for the
+                                   common case where the domain's Route53 zone is in this same
+                                   AWS account: auto-issues+DNS-validates a real ACM
+                                   certificate (--alb-certificate-arn no longer needed) and
+                                   installs ExternalDNS to keep the app hostnames pointed at
+                                   the ALB automatically. Leave unset if the zone lives
+                                   elsewhere (a different AWS account, a different DNS
+                                   provider) — bring your own --alb-certificate-arn and point
+                                   DNS at the ALB yourself instead.
+  --internal-lb-source-ranges <cidr>
+                                   Optional with --edge-type alb. CIDR allowed to reach the
+                                   ALB — the AWS Load Balancer Controller has no restriction
+                                   by default otherwise (0.0.0.0/0), which "internal" scheme
+                                   alone does not prevent. If omitted, phase 'straiker-edge'
+                                   defaults it to this cluster's own VPC CIDR (looked up live,
+                                   not 0.0.0.0/0) — meaningfully narrow, and naturally covers
+                                   WorkSpaces Secure Browser's cross-account ENIs. Pass this
+                                   explicitly for something narrower, e.g. a VPN's client CIDR
+                                   pool.
+  --alb-subnets <ids>              Optional with --edge-type alb. Comma-separated subnet IDs
+                                   for the ALB. Leave unset to rely on the AWS Load Balancer
+                                   Controller's subnet auto-discovery
+                                   (kubernetes.io/role/internal-elb=1 tag on private subnets).
   --timeout <duration>            Helm wait timeout (default: 20m).
   -h, --help                      Show this help.
 EOF
@@ -829,16 +988,47 @@ Installer phases:
                              --tailscale-account-mode (own = you provided it; shared =
                              fetched from the artifact broker) — stored in
                              'straiker-secrets'. Provides the 'tailscale' IngressClass
-                             straiker-edge's Ingresses (mode 15 below) need.
- 15) straiker-edge        - install/upgrade release 'straiker-edge' (charts/straiker-edge).
-                             Always runs, in one of three edgeType modes (chosen via
-                             --edge-type, prompted first if omitted): internal (default) —
-                             thin TLS edge (Caddy) routing app.<appDomain> to
+                             straiker-edge's Ingresses (mode 17 below) need.
+ 15) edge-infra           - only when --edge-type alb or xalb is selected. Runs
+                             terraform/aws/edge, which unconditionally creates the AWS Load
+                             Balancer Controller's IAM role (phase 16, alb-controller, needs
+                             this either way). No self-signed certificate for either edge
+                             type — --alb-certificate-arn is required by default for both
+                             (works regardless of which AWS account/DNS provider hosts the
+                             domain's zone). If --xalb-route53 is passed instead (opt-in,
+                             only for when the domain's Route53 zone is in this same AWS
+                             account), auto-issues+validates a real ACM certificate via DNS
+                             validation and creates the ExternalDNS controller's IAM role
+                             (phase 17) instead of requiring the ARN. Optionally
+                             (--alb-provision-bastion, alb only) a tiny SSM-accessible EC2
+                             bastion for pre-handoff verification.
+ 16) alb-controller       - only when --edge-type alb or xalb is selected. Installs the AWS
+                             Load Balancer Controller via its Helm chart, using the IAM role
+                             phase 15 (edge-infra) created, through Pod Identity. Skips if
+                             an 'alb' IngressClass already exists (ours from a prior run, or
+                             a pre-existing controller on this cluster). Provides the 'alb'
+                             IngressClass straiker-edge's Ingress (mode 18 below) needs.
+ 17) external-dns         - only when --edge-type xalb is selected with --xalb-route53.
+                             Installs ExternalDNS via its Helm chart, using the IAM
+                             role phase 15 (edge-infra) created, through Pod Identity, so the
+                             app hostnames stay pointed at the ALB automatically. Skips if an
+                             'external-dns' Deployment already exists (ours from a prior run,
+                             or a pre-existing one).
+ 18) straiker-edge        - install/upgrade release 'straiker-edge' (charts/straiker-edge).
+                             Always runs, in one of five edgeType modes (chosen via
+                             --edge-type, prompted first if omitted): none (default) —
+                             installs nothing, bring your own ingress/LoadBalancer;
+                             internal — thin TLS edge (Caddy) routing app.<appDomain> to
                              straiker-core's frontend and defend.<appDomain> to
                              straiker-defend (502s until that phase has run, since
-                             straiker-defend is now always installed too); none — installs
-                             nothing, bring your own ingress/LoadBalancer; tailscale — one
-                             Ingress per route via the operator installed in phase 14.
+                             straiker-defend is now always installed too); tailscale — one
+                             Ingress per route via the operator installed in phase 14; alb —
+                             one Ingress covering all routes via host-based rules, backed by
+                             a single internal AWS Application Load Balancer through the AWS
+                             Load Balancer Controller installed in phase 16; xalb — same as
+                             alb but internet-facing, sharing an ALB with other Ingresses via
+                             IngressGroup, always backed by the real certificate phase 15
+                             issued.
 
 Notes:
   - If a phase preflight is not met, the installer marks that phase BLOCKED and exits cleanly.
@@ -1026,6 +1216,22 @@ parse_args() {
         DISABLE_BUILTIN_ADMIN=true
         shift
         ;;
+      --update-alb-certificate)
+        UPDATE_ALB_CERTIFICATE=true
+        shift
+        ;;
+      --alb-cert-file)
+        ALB_CERT_FILE=${2:-}
+        shift 2
+        ;;
+      --alb-key-file)
+        ALB_KEY_FILE=${2:-}
+        shift 2
+        ;;
+      --alb-chain-file)
+        ALB_CHAIN_FILE=${2:-}
+        shift 2
+        ;;
       --phase)
         SELECT_PHASE=${2:-}
         shift 2
@@ -1154,8 +1360,8 @@ parse_args() {
           EDGE_TYPE=tailscale
           TAILSCALE_ACCOUNT_MODE=shared
         fi
-        if [[ "${EDGE_TYPE}" != "internal" && "${EDGE_TYPE}" != "none" && "${EDGE_TYPE}" != "tailscale" ]]; then
-          echo "ERROR: --edge-type must be 'internal', 'none', 'tailscale', or 'straiker-tailscale', got '${2:-}'." >&2
+        if [[ "${EDGE_TYPE}" != "internal" && "${EDGE_TYPE}" != "none" && "${EDGE_TYPE}" != "tailscale" && "${EDGE_TYPE}" != "alb" && "${EDGE_TYPE}" != "xalb" ]]; then
+          echo "ERROR: --edge-type must be 'internal', 'none', 'tailscale', 'straiker-tailscale', 'alb', or 'xalb', got '${2:-}'." >&2
           exit 1
         fi
         shift 2
@@ -1166,6 +1372,30 @@ parse_args() {
           echo "ERROR: --tailscale-account-mode must be 'own' or 'shared', got '${TAILSCALE_ACCOUNT_MODE}'." >&2
           exit 1
         fi
+        shift 2
+        ;;
+      --custom-domain)
+        CUSTOM_ORIGIN_DOMAIN=${2:-}
+        shift 2
+        ;;
+      --alb-certificate-arn)
+        ALB_CERTIFICATE_ARN=${2:-}
+        shift 2
+        ;;
+      --alb-provision-bastion)
+        ALB_PROVISION_BASTION=true
+        shift
+        ;;
+      --alb-subnets)
+        ALB_SUBNETS=${2:-}
+        shift 2
+        ;;
+      --xalb-route53)
+        XALB_ROUTE53_AUTOMATION=true
+        shift
+        ;;
+      --internal-lb-source-ranges)
+        INTERNAL_LB_SOURCE_RANGES=${2:-}
         shift 2
         ;;
       --timeout)
@@ -1239,13 +1469,17 @@ require_terraform_dir() {
   return 0
 }
 
-# Copies just the .tf sources into the /tmp work dir, leaving .terraform/,
-# backend.tf, terraform.auto.tfvars, and any state already there untouched —
-# so re-running a phase doesn't re-download providers or lose local state.
+# Copies the .tf sources plus any static .json assets they reference via
+# file() (e.g. terraform/aws/edge's alb_controller_iam_policy.json) into the
+# /tmp work dir, leaving .terraform/, backend.tf, terraform.auto.tfvars, and
+# any state already there untouched — so re-running a phase doesn't
+# re-download providers or lose local state. The .json copy is best-effort
+# (suppressed error) since most modules don't have any.
 sync_terraform_workdir() {
   local src=$1 dest=$2
   mkdir -p "${dest}"
   cp -f "${src}"/*.tf "${dest}/"
+  cp -f "${src}"/*.json "${dest}/" 2>/dev/null || true
 }
 
 write_eks_backend_config() {
@@ -1287,6 +1521,22 @@ terraform {
   backend "s3" {
     bucket       = "${bucket_name}"
     key          = "s6r-onprem/artifacts.tfstate"
+    region       = "${AWS_REGION}"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+EOF
+}
+
+write_edge_infra_backend_config() {
+  local bucket_name=$1
+  cat > "${EDGE_INFRA_DIR}/backend.tf" <<EOF
+# Generated by scripts/install-straiker.sh — safe to delete between runs.
+terraform {
+  backend "s3" {
+    bucket       = "${bucket_name}"
+    key          = "s6r-onprem/edge.tfstate"
     region       = "${AWS_REGION}"
     encrypt      = true
     use_lockfile = true
@@ -2616,6 +2866,16 @@ tailscale_hostname() {
   fi
 }
 
+# $1=subdomain (e.g. "straiker"). Returns "<subdomain>.<CUSTOM_ORIGIN_DOMAIN>"
+# — only meaningful when EDGE_TYPE=none/alb and a domain was actually
+# captured; callers check that themselves before using this.
+custom_domain_hostname() {
+  local subdomain=$1
+  local domain
+  domain="$(get_metadata "custom_domain")"
+  printf '%s.%s' "${subdomain}" "${domain}"
+}
+
 # Application layer — frontend/bifrost/dex/caddy (charts/straiker-core,
 # a standalone chart). Runs after straiker-system since frontend connects
 # to that chart's postgres/opensearch directly (see straiker-core's
@@ -2713,6 +2973,23 @@ phase_straiker_core() {
     cmd+=(--set "straiker-frontend.frontend.origin=https://$(tailscale_hostname app).${tailnet_domain}")
     if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
       cmd+=(--set "straiker-frontend.frontend.irisControlPlanePublicEndpoint=https://$(tailscale_hostname ascend).${tailnet_domain}")
+    fi
+  fi
+
+  # EDGE_TYPE=none/alb/xalb + a captured CUSTOM_ORIGIN_DOMAIN: same reasoning
+  # as the tailscale block above, just for a customer-supplied domain
+  # instead of a Tailscale one. See CUSTOM_ORIGIN_DOMAIN's declaration.
+  # Identical either way — alb.domain/xalb.domain (see phase_straiker_edge)
+  # is the exact same value, just also driving charts/straiker-edge's
+  # Ingress instead of being left for the customer's own ingress to match.
+  if [[ "${EDGE_TYPE}" == "none" || "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ]]; then
+    local custom_domain
+    custom_domain="$(get_metadata "custom_domain")"
+    if [[ -n "${custom_domain}" ]]; then
+      cmd+=(--set "straiker-frontend.frontend.origin=https://$(custom_domain_hostname straiker)")
+      if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
+        cmd+=(--set "straiker-frontend.frontend.irisControlPlanePublicEndpoint=https://$(custom_domain_hostname straiker-ascend)")
+      fi
     fi
   fi
 
@@ -2955,6 +3232,7 @@ phase_straiker_defend() {
   if [[ -n "${CHART_VERSION}" ]]; then
     cmd+=(--version "${CHART_VERSION}")
   fi
+
   "${cmd[@]}"
 }
 
@@ -3087,6 +3365,18 @@ phase_straiker_ascend() {
     cmd+=(--set "corsAllowOrigins=https://$(tailscale_hostname app).${tailnet_domain}")
   fi
 
+  # EDGE_TYPE=none/alb/xalb + a captured CUSTOM_ORIGIN_DOMAIN: same reasoning
+  # as the tailscale block above, just for a customer-supplied domain
+  # instead of a Tailscale one. See CUSTOM_ORIGIN_DOMAIN's declaration.
+  if [[ "${EDGE_TYPE}" == "none" || "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ]]; then
+    local custom_domain
+    custom_domain="$(get_metadata "custom_domain")"
+    if [[ -n "${custom_domain}" ]]; then
+      cmd+=(--set "dataExfiltrationEndpoint=https://$(custom_domain_hostname straiker-ascend)")
+      cmd+=(--set "corsAllowOrigins=https://$(custom_domain_hostname straiker)")
+    fi
+  fi
+
   "${cmd[@]}"
 }
 
@@ -3097,7 +3387,7 @@ phase_straiker_ascend() {
 # before straiker-edge (which depends on this release being healthy).
 phase_tailscale_operator() {
   if [[ "${EDGE_TYPE}" != "tailscale" ]]; then
-    log "Edge type is '${EDGE_TYPE:-internal}', not 'tailscale' — skipping the Tailscale operator."
+    log "Edge type is '${EDGE_TYPE:-none}', not 'tailscale' — skipping the Tailscale operator."
     return
   fi
 
@@ -3160,6 +3450,207 @@ phase_tailscale_operator() {
   "${cmd[@]}"
 }
 
+# Installs the AWS Load Balancer Controller itself via its Helm chart —
+# relevant for EDGE_TYPE=alb or xalb (both render an ALB Ingress).
+# terraform/aws/edge's alb_controller.tf (run by phase_edge_infra, which
+# must run first) creates the IAM role/Pod Identity association this needs;
+# this phase just points the chart at the matching ServiceAccount name (Pod
+# Identity binds by namespace+name, no annotation needed, unlike IRSA).
+# Skips entirely if an 'alb' IngressClass already exists — could be
+# ours from a prior run (safe/idempotent to leave alone) or a customer's own
+# pre-existing controller for other workloads on this cluster (installing a
+# second, differently-configured controller managing the same IngressClass
+# would race/conflict with it rather than coexist).
+phase_alb_controller() {
+  if [[ "${EDGE_TYPE}" != "alb" && "${EDGE_TYPE}" != "xalb" ]]; then
+    log "Edge type is '${EDGE_TYPE:-none}', not 'alb'/'xalb' — skipping the AWS Load Balancer Controller."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "EDGE_TYPE not alb/xalb."
+    return
+  fi
+
+  require_command helm
+  require_command kubectl
+  ensure_k8s_ready_for_charts || return
+
+  if kubectl get ingressclass alb >/dev/null 2>&1; then
+    log "IngressClass 'alb' already exists — assuming a controller is already managing it (ours from a prior run, or a pre-existing one). Skipping install to avoid a conflicting second controller. If this is stale/broken, delete it and re-run this phase."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "IngressClass 'alb' already exists."
+    return
+  fi
+
+  local role_arn
+  role_arn="$(get_metadata "alb_controller_role_arn")"
+  if [[ -z "${role_arn}" ]]; then
+    mark_phase_blocked "Missing alb_controller_role_arn from install state. Re-run phase 'edge-infra' first (--phase edge-infra --rerun-phase)."
+    return
+  fi
+
+  local cluster_name
+  cluster_name="$(get_metadata "cluster_name")"
+
+  helm repo add --force-update "${ALB_CONTROLLER_HELM_REPO_NAME}" "${ALB_CONTROLLER_HELM_REPO_URL}" >/dev/null
+  helm repo update "${ALB_CONTROLLER_HELM_REPO_NAME}" >/dev/null
+
+  helm upgrade --install "${ALB_CONTROLLER_RELEASE}" "${ALB_CONTROLLER_HELM_REPO_NAME}/aws-load-balancer-controller" \
+    --version "${ALB_CONTROLLER_VERSION}" \
+    --namespace "${ALB_CONTROLLER_NAMESPACE}" \
+    --create-namespace \
+    --set "clusterName=${cluster_name}" \
+    --set "serviceAccount.create=true" \
+    --set "serviceAccount.name=${ALB_CONTROLLER_SERVICE_ACCOUNT}" \
+    --wait \
+    --timeout "${HELM_TIMEOUT}"
+}
+
+# Installs ExternalDNS via its Helm chart — only relevant for EDGE_TYPE=xalb
+# with Route53 automation opted into (XALB_ROUTE53_AUTOMATION, resolved by
+# capture_install_config's xalb block). terraform/aws/edge's
+# external_dns.tf (run by phase_edge_infra, which must run first) creates
+# the IAM role/Pod Identity association this needs. Skips (idempotent) if
+# an 'external-dns' Deployment already exists — same reasoning as
+# phase_alb_controller's IngressClass check: could be ours from a prior
+# run, or a pre-existing one managing other DNS on this cluster that a
+# second, differently-configured instance would conflict with.
+phase_external_dns() {
+  if [[ "${EDGE_TYPE}" != "xalb" || "$(get_metadata "xalb_route53_automation")" != "true" ]]; then
+    log "Skipping ExternalDNS — only needed for edge type 'xalb' with Route53 automation enabled."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "Not applicable for this edge type/Route53 choice."
+    return
+  fi
+
+  require_command helm
+  require_command kubectl
+  ensure_k8s_ready_for_charts || return
+
+  if kubectl get deployment -n "${EXTERNAL_DNS_NAMESPACE}" external-dns >/dev/null 2>&1; then
+    log "Deployment 'external-dns' already exists in namespace '${EXTERNAL_DNS_NAMESPACE}' — assuming it's already managing DNS (ours from a prior run, or a pre-existing one). Skipping install to avoid a conflicting second instance."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "external-dns Deployment already exists."
+    return
+  fi
+
+  local role_arn
+  role_arn="$(get_metadata "external_dns_role_arn")"
+  if [[ -z "${role_arn}" ]]; then
+    mark_phase_blocked "Missing external_dns_role_arn from install state. Re-run phase 'edge-infra' first (--phase edge-infra --rerun-phase)."
+    return
+  fi
+
+  local domain
+  domain="$(get_metadata "custom_domain")"
+  local cluster_name
+  cluster_name="$(get_metadata "cluster_name")"
+
+  helm repo add --force-update "${EXTERNAL_DNS_HELM_REPO_NAME}" "${EXTERNAL_DNS_HELM_REPO_URL}" >/dev/null
+  helm repo update "${EXTERNAL_DNS_HELM_REPO_NAME}" >/dev/null
+
+  helm upgrade --install "${EXTERNAL_DNS_RELEASE}" "${EXTERNAL_DNS_HELM_REPO_NAME}/external-dns" \
+    --version "${EXTERNAL_DNS_VERSION}" \
+    --namespace "${EXTERNAL_DNS_NAMESPACE}" \
+    --create-namespace \
+    --set "provider.name=aws" \
+    --set "policy=upsert-only" \
+    --set "txtOwnerId=${cluster_name}" \
+    --set "domainFilters[0]=${domain}" \
+    --set "serviceAccount.create=true" \
+    --set "serviceAccount.name=${EXTERNAL_DNS_SERVICE_ACCOUNT}" \
+    --wait \
+    --timeout "${HELM_TIMEOUT}"
+}
+
+# terraform/aws/edge — runs for every EDGE_TYPE=alb/xalb install. Always
+# creates the AWS Load Balancer Controller's IAM role (phase_alb_controller
+# needs this regardless of anything else). No self-signed certificate for
+# either edge type — both require an explicit --alb-certificate-arn by
+# default (see capture_install_config's alb/xalb blocks); xalb's opt-in
+# --xalb-route53 instead auto-issues+validates a real ACM certificate via
+# Route53 DNS validation and skips the ARN requirement, for the common case
+# where the domain's zone is in this same AWS account. alb also gets an
+# optional tiny SSM-accessible verification bastion when requested. Runs before
+# phase_alb_controller/phase_external_dns/phase_straiker_edge so
+# alb_controller_role_arn/alb_certificate_arn/external_dns_role_arn are
+# populated by the time those need them. Uses Terraform (not raw `aws` CLI
+# calls) so uninstall-straiker.sh's `tofu destroy` can clean all of this up
+# too.
+phase_edge_infra() {
+  require_command aws
+  require_command tofu
+
+  if [[ "${EDGE_TYPE}" != "alb" && "${EDGE_TYPE}" != "xalb" ]]; then
+    log "Edge type is '${EDGE_TYPE:-none}', not 'alb'/'xalb' — skipping edge infra."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "EDGE_TYPE not alb/xalb."
+    return
+  fi
+
+  require_terraform_dir "${EDGE_INFRA_SRC}" || return
+  sync_terraform_workdir "${EDGE_INFRA_SRC}" "${EDGE_INFRA_DIR}"
+
+  local bucket_name
+  bucket_name="$(get_metadata "bootstrap_bucket")"
+  if [[ -z "${bucket_name}" ]]; then
+    bucket_name="$(resolve_bucket_name)"
+  fi
+  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
+    mark_phase_blocked "Bootstrap bucket '${bucket_name}' not found. Run phase 'eks-tfbe' first."
+    return
+  fi
+  write_edge_infra_backend_config "${bucket_name}"
+
+  # Only xalb ever auto-wires a certificate + DNS (both need the same
+  # Route53 zone access, gated together); alb always brings its own ARN.
+  local enable_route53 domain
+  if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+    enable_route53="$(get_metadata "xalb_route53_automation")"
+    domain="$(get_metadata "custom_domain")"
+  else
+    enable_route53=false
+    domain=""
+  fi
+  local san_hostnames_json
+  san_hostnames_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
+    "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
+
+  tofu -chdir="${EDGE_INFRA_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu -chdir="${EDGE_INFRA_DIR}" apply -auto-approve -input=false \
+    -var="region=${AWS_REGION}" \
+    -var="prefix=${TF_PREFIX}" \
+    -var="cluster_name=${CLUSTER_NAME}" \
+    -var="san_hostnames=${san_hostnames_json}" \
+    -var="enable_bastion=$(get_metadata "alb_provision_bastion")" \
+    -var="alb_controller_namespace=${ALB_CONTROLLER_NAMESPACE}" \
+    -var="alb_controller_service_account_name=${ALB_CONTROLLER_SERVICE_ACCOUNT}" \
+    -var="enable_route53_automation=${enable_route53}" \
+    -var="domain=${domain}" \
+    -var="external_dns_namespace=${EXTERNAL_DNS_NAMESPACE}" \
+    -var="external_dns_service_account_name=${EXTERNAL_DNS_SERVICE_ACCOUNT}"
+
+  local controller_role_arn dns_cert_arn bastion_id external_dns_role_arn
+  controller_role_arn="$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw alb_controller_role_arn)"
+  dns_cert_arn="$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw dns_validated_certificate_arn)"
+  bastion_id="$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw bastion_instance_id)"
+  external_dns_role_arn="$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw external_dns_role_arn)"
+  set_metadata "alb_controller_role_arn" "${controller_role_arn}"
+  if [[ -n "${dns_cert_arn}" ]]; then
+    set_metadata "alb_certificate_arn" "${dns_cert_arn}"
+  fi
+  if [[ -n "${bastion_id}" ]]; then
+    set_metadata "alb_bastion_instance_id" "${bastion_id}"
+  fi
+  if [[ -n "${external_dns_role_arn}" ]]; then
+    set_metadata "external_dns_role_arn" "${external_dns_role_arn}"
+  fi
+
+  if [[ -n "${dns_cert_arn}" ]]; then
+    log "Issued a real, DNS-validated certificate: ${dns_cert_arn} — no browser warning."
+  fi
+  if [[ -n "${bastion_id}" ]]; then
+    log ""
+    log "Bastion '${bastion_id}' provisioned for pre-handoff verification. Connect with:"
+    log "  aws ssm start-session --target ${bastion_id} --document-name AWS-StartPortForwardingSessionToRemoteHost \\"
+    log "    --parameters '{\"host\":[\"<alb-dns-name>\"],\"portNumber\":[\"443\"],\"localPortNumber\":[\"8443\"]}'"
+    log "then browse to https://localhost:8443 (real certificate — no browser warning to expect)."
+  fi
+}
+
 # Thin TLS edge (charts/straiker-edge) — always runs (frontend needs it
 # regardless of product selection). Depends only on straiker-core's frontend
 # Service existing; doesn't check straiker-defend's status since its
@@ -3191,6 +3682,44 @@ phase_straiker_edge() {
     fi
   fi
 
+  if [[ "${EDGE_TYPE}" == "alb" ]]; then
+    # No --internal-lb-source-ranges given at capture time (see
+    # capture_install_config's alb block) — resolve it here instead, now
+    # that the EKS cluster actually exists to look up. Defaulting to the
+    # cluster's own VPC CIDR is meaningfully narrow (not 0.0.0.0/0) and
+    # naturally covers WorkSpaces Secure Browser's cross-account ENIs, which
+    # get addresses from inside this VPC by construction.
+    if [[ -z "$(get_metadata "internal_lb_source_ranges")" ]]; then
+      require_command aws
+      local vpc_id vpc_cidr
+      vpc_id="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)"
+      if [[ -n "${vpc_id}" && "${vpc_id}" != "None" ]]; then
+        vpc_cidr="$(aws ec2 describe-vpcs --vpc-ids "${vpc_id}" --region "${AWS_REGION}" --query 'Vpcs[0].CidrBlock' --output text 2>/dev/null || true)"
+      fi
+      if [[ -n "${vpc_cidr}" && "${vpc_cidr}" != "None" ]]; then
+        set_metadata "internal_lb_source_ranges" "${vpc_cidr}"
+        log "No --internal-lb-source-ranges given — defaulting the ALB's allowed CIDR to this cluster's own VPC (${vpc_cidr}). Pass --internal-lb-source-ranges explicitly for something narrower (e.g. a VPN's client CIDR pool)."
+      else
+        mark_phase_blocked "Could not auto-resolve this cluster's VPC CIDR (describe-cluster/describe-vpcs failed). Pass --internal-lb-source-ranges explicitly and re-run."
+        return
+      fi
+    fi
+
+    if [[ -z "$(get_metadata "custom_domain")" || -z "$(get_metadata "alb_certificate_arn")" || -z "$(get_metadata "internal_lb_source_ranges")" ]]; then
+      mark_phase_blocked "Missing custom_domain/alb_certificate_arn/internal_lb_source_ranges from install state. Re-run with --edge-type alb so they're captured."
+      return
+    fi
+  fi
+
+  if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+    # No CIDR requirement here, unlike alb — xalb is genuinely public by
+    # design, so there's no equivalent "default to something narrow" step.
+    if [[ -z "$(get_metadata "custom_domain")" || -z "$(get_metadata "alb_certificate_arn")" ]]; then
+      mark_phase_blocked "Missing custom_domain/alb_certificate_arn from install state. Re-run with --edge-type xalb so they're captured (--phase edge-infra --rerun-phase if the certificate specifically is missing)."
+      return
+    fi
+  fi
+
   require_file_inputs "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"
   ensure_k8s_ready_for_charts || return
 
@@ -3212,6 +3741,25 @@ phase_straiker_edge() {
     hostname_prefix="$(get_metadata "tailscale_hostname_prefix")"
     if [[ -n "${hostname_prefix}" ]]; then
       cmd+=(--set "tailscale.hostnamePrefix=${hostname_prefix}")
+    fi
+  fi
+  if [[ "${EDGE_TYPE}" == "alb" ]]; then
+    cmd+=(--set "alb.domain=$(get_metadata "custom_domain")")
+    cmd+=(--set "alb.certificateArn=$(get_metadata "alb_certificate_arn")")
+    cmd+=(--set "alb.inboundCidrs=$(get_metadata "internal_lb_source_ranges")")
+    local alb_subnets
+    alb_subnets="$(get_metadata "alb_subnets")"
+    if [[ -n "${alb_subnets}" ]]; then
+      cmd+=(--set "alb.subnets=${alb_subnets}")
+    fi
+  fi
+  if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+    cmd+=(--set "xalb.domain=$(get_metadata "custom_domain")")
+    cmd+=(--set "xalb.certificateArn=$(get_metadata "alb_certificate_arn")")
+    local xalb_cidrs
+    xalb_cidrs="$(get_metadata "internal_lb_source_ranges")"
+    if [[ -n "${xalb_cidrs}" ]]; then
+      cmd+=(--set "xalb.inboundCidrs=${xalb_cidrs}")
     fi
   fi
   if [[ -n "${ecr_registry}" ]]; then
@@ -3239,12 +3787,74 @@ phase_straiker_edge() {
 # a previous one.
 show_access_info() {
   if [[ "${EDGE_TYPE}" == "none" ]]; then
+    local custom_domain
+    custom_domain="$(get_metadata "custom_domain")"
     log ""
-    log "Straiker is installed. Edge type is 'none' — no ingress was installed for you."
-    log "Point your own ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
-    log "  App    : straiker-frontend-service:80"
-    log "  Defend : straiker-defend:80"
-    log "  Ascend : straiker-ascend-control-plane:80"
+    if [[ -n "${custom_domain}" ]]; then
+      log "Straiker is installed. Edge type is 'none' — OIDC/CORS are configured for:"
+      log "  Frontend : https://$(custom_domain_hostname straiker)/"
+      log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
+      log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+      log ""
+      log "No ingress was installed for these hostnames — point your own"
+      log "ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
+      log "  straiker-frontend-service:80, straiker-defend:80, straiker-ascend-control-plane:80"
+    else
+      log "Straiker is installed. Edge type is 'none' — no ingress was installed for you."
+      log "Point your own ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
+      log "  Frontend : straiker-frontend-service:80"
+      log "  Defend   : straiker-defend:80"
+      log "  Ascend   : straiker-ascend-control-plane:80"
+    fi
+    return
+  fi
+
+  if [[ "${EDGE_TYPE}" == "alb" ]]; then
+    local custom_domain
+    custom_domain="$(get_metadata "custom_domain")"
+    log ""
+    log "Straiker is installed. Edge type is 'alb' — reachable at:"
+    log "  Frontend : https://$(custom_domain_hostname straiker)/"
+    log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
+    log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    log ""
+    log "Find the ALB's DNS name with:"
+    log "  kubectl get ingress -n ${INFRA_NAMESPACE} ${EDGE_RELEASE}-alb"
+    log "then point ${custom_domain}'s DNS at it (Route53 ALIAS record, or however"
+    log "you manage that zone). Reachability from WorkSpaces Secure Browser (or"
+    log "whatever's on the other end) depends on its network having a path to this"
+    log "ALB's subnets — confirm that separately."
+    local bastion_id
+    bastion_id="$(get_metadata "alb_bastion_instance_id")"
+    if [[ -n "${bastion_id}" ]]; then
+      log ""
+      log "Verification bastion '${bastion_id}' is available. Connect with:"
+      log "  aws ssm start-session --target ${bastion_id} --document-name AWS-StartPortForwardingSessionToRemoteHost \\"
+      log "    --parameters '{\"host\":[\"<alb-dns-name>\"],\"portNumber\":[\"443\"],\"localPortNumber\":[\"8443\"]}'"
+      log "then browse to https://localhost:8443 (real certificate — no browser warning to expect)."
+    fi
+    return
+  fi
+
+  if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+    local custom_domain
+    custom_domain="$(get_metadata "custom_domain")"
+    log ""
+    log "Straiker is installed. Edge type is 'xalb' — reachable at:"
+    log "  Frontend : https://$(custom_domain_hostname straiker)/"
+    log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
+    log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    log ""
+    if [[ "$(get_metadata "xalb_route53_automation")" == "true" ]]; then
+      log "Certificate is real and DNS-validated — no browser trust warning."
+      log "DNS is managed automatically by ExternalDNS — the above hostnames should"
+      log "resolve on their own once the controller has synced (usually under a minute)."
+    else
+      log "Using the certificate from --alb-certificate-arn. Point ${custom_domain}'s"
+      log "DNS at the ALB yourself (Route53 ALIAS record, or however you manage that"
+      log "zone). Find its DNS name with:"
+      log "  kubectl get ingress -n ${INFRA_NAMESPACE} ${EDGE_RELEASE}-xalb"
+    fi
     return
   fi
 
@@ -3386,13 +3996,13 @@ EOF
     cat >&2 <<'EOF'
 
 How should straiker-edge expose app/defend/ascend externally?
-  1) internal          — Caddy reverse proxy with self-signed certs
-                          (default). Reachable via 'kubectl port-forward' —
-                          see the access instructions printed at the end of
-                          this install.
+  1) internal          — Caddy reverse proxy with self-signed certs.
+                          Reachable via 'kubectl port-forward' — see the
+                          access instructions printed at the end of this
+                          install.
   2) none               — install nothing; bring your own ingress/
                           LoadBalancer pointed at the frontend/defend/ascend
-                          Services directly.
+                          Services directly (default).
   3) tailscale          — expose via the Tailscale Kubernetes operator +
                           Funnel (one Ingress per route, publicly reachable
                           at https://<name>.<your-tailnet>.ts.net), using
@@ -3408,21 +4018,181 @@ How should straiker-edge expose app/defend/ascend externally?
                           yourself, but ask your Straiker contact to
                           provision shared-tailscale access for your
                           account first.
+  5) alb                — one Ingress covering all routes via host-based
+                          rules, backed by a single internal AWS
+                          Application Load Balancer. For customers with no
+                          public internet access (e.g. reached via
+                          WorkSpaces Secure Browser). The AWS Load Balancer
+                          Controller itself is installed automatically
+                          unless one is already present on this cluster.
+                          Requires --alb-certificate-arn — no self-signed
+                          fallback. The allowed CIDR defaults to this
+                          cluster's own VPC unless you pass
+                          --internal-lb-source-ranges.
+  6) xalb               — same as alb, but internet-facing and sharing an
+                          ALB with other Ingresses on this cluster
+                          (IngressGroup) instead of getting its own.
+                          Requires --alb-certificate-arn by default, same as
+                          alb — works regardless of which AWS account or DNS
+                          provider hosts your domain's zone. If that zone
+                          happens to be in this same AWS account, pass
+                          --xalb-route53 instead to auto-issue+validate a
+                          real ACM certificate and keep the app hostnames
+                          synced via ExternalDNS, with no ARN needed.
 EOF
     local edge_type_answer
-    edge_type_answer="$(prompt_line 'Edge type [internal/none/tailscale/straiker-tailscale] (default: internal): ' || true)"
+    edge_type_answer="$(prompt_line 'Edge type [internal/none/tailscale/straiker-tailscale/alb/xalb] (default: none): ' || true)"
     case "${edge_type_answer}" in
-      1|internal|"") EDGE_TYPE=internal ;;
-      2|none) EDGE_TYPE=none ;;
+      1|internal) EDGE_TYPE=internal ;;
+      2|none|"") EDGE_TYPE=none ;;
       3|tailscale) EDGE_TYPE=tailscale ;;
       4|straiker-tailscale) EDGE_TYPE=tailscale; TAILSCALE_ACCOUNT_MODE=shared ;;
+      5|alb) EDGE_TYPE=alb ;;
+      6|xalb) EDGE_TYPE=xalb ;;
       *)
-        echo "ERROR: Edge type must be 'internal', 'none', 'tailscale', or 'straiker-tailscale', got '${edge_type_answer}'." >&2
+        echo "ERROR: Edge type must be 'internal', 'none', 'tailscale', 'straiker-tailscale', 'alb', or 'xalb', got '${edge_type_answer}'." >&2
         exit 1
         ;;
     esac
   fi
   set_metadata "edge_type" "${EDGE_TYPE}"
+
+  if [[ "${EDGE_TYPE}" == "none" ]]; then
+    if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+      if [[ "$(get_metadata "custom_domain_set")" == "true" ]]; then
+        CUSTOM_ORIGIN_DOMAIN="$(get_metadata "custom_domain")"
+      else
+        cat >&2 <<'EOF'
+
+Since edge type is 'none', straiker-core's/straiker-ascend's OIDC redirect
+URIs and CORS origin still need to match wherever you actually route
+frontend/defend/ascend to (your own ingress/LoadBalancer) — otherwise Dex's
+login will loop. If you already know that domain, enter it now and this
+installer will set those overrides for you (straiker.<domain>,
+straiker-defend.<domain>, straiker-ascend.<domain>). Leave blank to set
+them yourself later via --values.
+EOF
+        CUSTOM_ORIGIN_DOMAIN="$(prompt_line "Custom origin domain (e.g. acmecorp.com; blank to skip): " || true)"
+      fi
+    fi
+    set_metadata "custom_domain" "${CUSTOM_ORIGIN_DOMAIN}"
+    set_metadata "custom_domain_set" "true"
+  fi
+
+  if [[ "${EDGE_TYPE}" == "alb" ]]; then
+    if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+      CUSTOM_ORIGIN_DOMAIN="$(get_metadata "custom_domain")"
+    fi
+    if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+      cat >&2 <<'EOF'
+
+Edge type 'alb' needs the domain frontend/defend/ascend will be reachable
+at — it drives both the ALB's Ingress host rules and straiker-core's/
+straiker-ascend's OIDC redirect URIs/CORS origin (straiker.<domain>,
+straiker-defend.<domain>, straiker-ascend.<domain>).
+EOF
+      CUSTOM_ORIGIN_DOMAIN="$(prompt_line "Custom origin domain (e.g. acmecorp.com): " || true)"
+      if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+        echo "ERROR: Edge type 'alb' requires a domain. Set CUSTOM_ORIGIN_DOMAIN in this shell, or re-run and answer the prompt." >&2
+        exit 1
+      fi
+    fi
+    set_metadata "custom_domain" "${CUSTOM_ORIGIN_DOMAIN}"
+
+    if [[ -z "${ALB_CERTIFICATE_ARN}" ]]; then
+      ALB_CERTIFICATE_ARN="$(get_metadata "alb_certificate_arn")"
+    fi
+    # No self-signed fallback — a real certificate ARN is required outright.
+    if [[ -z "${ALB_CERTIFICATE_ARN}" ]]; then
+      echo "ERROR: Edge type 'alb' requires --alb-certificate-arn. Request a certificate via DNS validation (works even with zero public reachability — only a Route53 CNAME is needed) and pass its ARN." >&2
+      exit 1
+    fi
+    set_metadata "alb_certificate_arn" "${ALB_CERTIFICATE_ARN}"
+
+    # No question asked here either — the bastion is purely an optional,
+    # opt-in verification convenience (see phase_edge_infra); pass
+    # --alb-provision-bastion explicitly if you want one.
+    set_metadata "alb_provision_bastion" "${ALB_PROVISION_BASTION:-false}"
+
+    # No question asked here either. Unlike a bare 0.0.0.0/0 fallback (which
+    # would open this up to anything that can route to the VPC — peered
+    # VPCs, VPNs, Transit Gateway, the broader corporate network), defaulting
+    # to the VPC's OWN CIDR is a meaningfully narrow, safe default: it's
+    # naturally inclusive of WorkSpaces Secure Browser's cross-account ENIs
+    # (which get addresses from inside this VPC by construction) without
+    # requiring the installer to know anything about WSB specifically. Actual
+    # resolution happens in phase_straiker_edge (needs the live EKS cluster
+    # to look up its VPC, which may not exist yet at this point in a fresh
+    # --install-eks run). Pass --internal-lb-source-ranges explicitly for
+    # anything narrower (e.g. just a VPN's client CIDR pool).
+    if [[ -n "${INTERNAL_LB_SOURCE_RANGES}" ]]; then
+      set_metadata "internal_lb_source_ranges" "${INTERNAL_LB_SOURCE_RANGES}"
+    fi
+
+    if [[ -z "${ALB_SUBNETS}" ]]; then
+      ALB_SUBNETS="$(get_metadata "alb_subnets")"
+    fi
+    if [[ -z "${ALB_SUBNETS}" && "$(get_metadata "alb_subnets_set")" != "true" ]]; then
+      cat >&2 <<'EOF'
+
+Comma-separated subnet IDs for the ALB, or blank to rely on the AWS Load
+Balancer Controller's subnet auto-discovery
+(kubernetes.io/role/internal-elb=1 tag on private subnets).
+EOF
+      ALB_SUBNETS="$(prompt_line "Subnet IDs (blank for auto-discovery): " || true)"
+    fi
+    set_metadata "alb_subnets" "${ALB_SUBNETS}"
+    set_metadata "alb_subnets_set" "true"
+  fi
+
+  if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+    if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+      CUSTOM_ORIGIN_DOMAIN="$(get_metadata "custom_domain")"
+    fi
+    if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+      cat >&2 <<'EOF'
+
+Edge type 'xalb' needs the domain frontend/defend/ascend will be reachable
+at — it drives the ALB's Ingress host rules, the DNS-validated
+certificate's SANs, and straiker-core's/straiker-ascend's OIDC redirect
+URIs/CORS origin (straiker.<domain>, straiker-defend.<domain>,
+straiker-ascend.<domain>). The Route53 zone for this domain must already
+exist in this AWS account.
+EOF
+      CUSTOM_ORIGIN_DOMAIN="$(prompt_line "Custom origin domain (e.g. acmecorp.com): " || true)"
+      if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
+        echo "ERROR: Edge type 'xalb' requires a domain. Set CUSTOM_ORIGIN_DOMAIN in this shell, or re-run and answer the prompt." >&2
+        exit 1
+      fi
+    fi
+    set_metadata "custom_domain" "${CUSTOM_ORIGIN_DOMAIN}"
+
+    # No question asked here either — Route53 automation (a real
+    # DNS-validated certificate + ExternalDNS keeping the app hostnames
+    # synced) is opt-in via --xalb-route53, off by default. Off is what
+    # works regardless of which AWS account/DNS provider hosts the domain's
+    # zone (bring your own --alb-certificate-arn, manage DNS yourself); on
+    # is a convenience only for the common case where that zone is in this
+    # same AWS account. No self-signed fallback either way.
+    if [[ -z "${XALB_ROUTE53_AUTOMATION}" ]]; then
+      XALB_ROUTE53_AUTOMATION="$(get_metadata "xalb_route53_automation")"
+    fi
+    if [[ -z "${XALB_ROUTE53_AUTOMATION}" ]]; then
+      XALB_ROUTE53_AUTOMATION=false
+    fi
+    set_metadata "xalb_route53_automation" "${XALB_ROUTE53_AUTOMATION}"
+
+    if [[ "${XALB_ROUTE53_AUTOMATION}" != "true" ]]; then
+      if [[ -z "${ALB_CERTIFICATE_ARN}" ]]; then
+        ALB_CERTIFICATE_ARN="$(get_metadata "alb_certificate_arn")"
+      fi
+      if [[ -z "${ALB_CERTIFICATE_ARN}" ]]; then
+        echo "ERROR: Edge type 'xalb' requires --alb-certificate-arn unless --xalb-route53 is passed (auto-issues one instead, only works when the domain's Route53 zone is in this AWS account). Request one via DNS validation and pass its ARN, or pass --xalb-route53 if the zone is here." >&2
+        exit 1
+      fi
+      set_metadata "alb_certificate_arn" "${ALB_CERTIFICATE_ARN}"
+    fi
+  fi
 
   # Only which Tailscale account to use is decided here — actual credential/
   # config resolution is deferred until after STRAIKER_CUSTOMER_NAME/KEY are
@@ -4056,6 +4826,9 @@ run_phase() {
     straiker-defend) phase_straiker_defend ;;
     straiker-ascend) phase_straiker_ascend ;;
     tailscale-operator) phase_tailscale_operator ;;
+    edge-infra) phase_edge_infra ;;
+    alb-controller) phase_alb_controller ;;
+    external-dns) phase_external_dns ;;
     straiker-edge) phase_straiker_edge ;;
     *)
       echo "ERROR: phase '${phase}' is not implemented." >&2
@@ -4140,6 +4913,59 @@ EOF
   log "Bootstrap admin login disabled — dex restarted automatically to pick up the change (config checksum changed). Confirm you can still log in as your real admin before closing this session."
 }
 
+# One-off action, not part of the normal phase pipeline: re-imports a
+# certificate into the ARN already recorded as alb_certificate_arn — useful
+# for rotating an imported certificate that doesn't auto-renew itself (the
+# --alb-certificate-arn you provide for alb, or for xalb without
+# --xalb-route53). Only works against an ARN that's itself an imported
+# certificate — ACM rejects `import-certificate --certificate-arn`
+# targeting an ACM-issued one, so this has no use (and isn't needed) for
+# xalb --xalb-route53's auto-issued/DNS-validated certificate, which
+# renews itself. Re-imports
+# into the SAME ARN, so charts/straiker-edge's Ingress (which references
+# the ARN, not the cert content) needs no changes, and no Helm
+# upgrade/restart is needed — the ALB picks up the new content
+# automatically.
+update_alb_certificate() {
+  require_command aws
+
+  local arn
+  arn="$(get_metadata "alb_certificate_arn")"
+  if [[ -z "${arn}" ]]; then
+    echo "ERROR: No ALB certificate ARN on record. Run the installer with --edge-type alb or xalb first." >&2
+    exit 1
+  fi
+  if [[ -z "${ALB_CERT_FILE}" || -z "${ALB_KEY_FILE}" ]]; then
+    echo "ERROR: --alb-cert-file and --alb-key-file are required." >&2
+    exit 1
+  fi
+  if [[ ! -f "${ALB_CERT_FILE}" ]]; then
+    echo "ERROR: Certificate file '${ALB_CERT_FILE}' not found." >&2
+    exit 1
+  fi
+  if [[ ! -f "${ALB_KEY_FILE}" ]]; then
+    echo "ERROR: Key file '${ALB_KEY_FILE}' not found." >&2
+    exit 1
+  fi
+  if [[ -n "${ALB_CHAIN_FILE}" && ! -f "${ALB_CHAIN_FILE}" ]]; then
+    echo "ERROR: Certificate chain file '${ALB_CHAIN_FILE}' not found." >&2
+    exit 1
+  fi
+
+  local cmd=(
+    aws acm import-certificate --certificate-arn "${arn}"
+    --certificate "fileb://${ALB_CERT_FILE}"
+    --private-key "fileb://${ALB_KEY_FILE}"
+    --region "${AWS_REGION}"
+  )
+  if [[ -n "${ALB_CHAIN_FILE}" ]]; then
+    cmd+=(--certificate-chain "fileb://${ALB_CHAIN_FILE}")
+  fi
+  "${cmd[@]}"
+
+  log "Certificate updated in place (ARN ${arn}). The ALB picks it up automatically — no Helm upgrade or restart needed."
+}
+
 main() {
   trap 'on_error $LINENO' ERR
   trap on_interrupt HUP INT TERM
@@ -4168,6 +4994,11 @@ main() {
 
   if [[ "${DISABLE_BUILTIN_ADMIN}" == true ]]; then
     disable_builtin_admin
+    exit 0
+  fi
+
+  if [[ "${UPDATE_ALB_CERTIFICATE}" == true ]]; then
+    update_alb_certificate
     exit 0
   fi
 

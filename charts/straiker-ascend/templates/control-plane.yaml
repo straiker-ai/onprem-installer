@@ -106,6 +106,10 @@ metadata:
   labels:
     {{- include "ascend.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
+  {{- with $cp.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ $cp.service.type }}
   selector:

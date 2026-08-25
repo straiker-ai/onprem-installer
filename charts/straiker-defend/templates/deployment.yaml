@@ -104,6 +104,19 @@ spec:
                   optional: true
             - name: SYS__ATTACHMENTS_S3_ENABLED
               value: "false"
+            # Frontier second-opinion for adaptive IPI (POC) - see argus's own
+            # ipi_frontier.py. Routes through charts/straiker-core's
+            # straiker-bifrost gateway (same namespace) rather than calling AWS
+            # Bedrock directly - this chart grants argus no AWS credentials of
+            # its own.
+            - name: SYS__FRONTIER_IPI_ENABLED
+              value: {{ .Values.frontier.enabled | quote }}
+            {{- if .Values.frontier.enabled }}
+            - name: SYS__BIFROST_BASE_URL
+              value: {{ include "defend.bifrostBaseUrl" . | quote }}
+            - name: SYS__BIFROST_API_KEY
+              value: {{ .Values.bifrost.apiKey | quote }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.service.targetPort }}
           startupProbe:
