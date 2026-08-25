@@ -1,0 +1,33 @@
+{{- if eq .Values.edgeType "alb" }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-alb
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: {{ required "alb.certificateArn is required when edgeType=alb" .Values.alb.certificateArn | quote }}
+    alb.ingress.kubernetes.io/inbound-cidrs: {{ required "alb.inboundCidrs is required when edgeType=alb" .Values.alb.inboundCidrs | quote }}
+    {{- if .Values.alb.subnets }}
+    alb.ingress.kubernetes.io/subnets: {{ .Values.alb.subnets | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.alb.ingressClassName }}
+  rules:
+    {{- range .Values.routes }}
+    - host: {{ printf "%s.%s" .subdomain $.Values.alb.domain | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .targetService }}
+                port:
+                  number: {{ .targetPort }}
+    {{- end }}
+{{- end }}
