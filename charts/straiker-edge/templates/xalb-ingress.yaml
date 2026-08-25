@@ -1,0 +1,33 @@
+{{- if eq .Values.edgeType "xalb" }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-xalb
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: {{ required "xalb.certificateArn is required when edgeType=xalb" .Values.xalb.certificateArn | quote }}
+    alb.ingress.kubernetes.io/group.name: {{ required "xalb.groupName is required when edgeType=xalb" .Values.xalb.groupName | quote }}
+    {{- if .Values.xalb.inboundCidrs }}
+    alb.ingress.kubernetes.io/inbound-cidrs: {{ .Values.xalb.inboundCidrs | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.xalb.ingressClassName }}
+  rules:
+    {{- range .Values.routes }}
+    - host: {{ printf "%s.%s" .albSubdomain $.Values.xalb.domain | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .targetService }}
+                port:
+                  number: {{ .targetPort }}
+    {{- end }}
+{{- end }}

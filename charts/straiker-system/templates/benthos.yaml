@@ -31,10 +31,10 @@ data:
           period: 5s
 
     # Routes each record to the OpenSearch index named by its own "stream"
-    # field (e.g. producers send stream: argus-turns / argus-turns-flagged /
-    # argus-turns-insights) — one output handles any stream name a producer
-    # sends, rather than a fixed fan_out branch per known stream that would
-    # need updating every time a new one's added.
+    # field (e.g. producers send stream: turns / turns-flagged /
+    # turns-insights, or iris) — one output handles any stream name a
+    # producer sends, rather than a fixed fan_out branch per known stream
+    # that would need updating every time a new one's added.
     # "elasticsearch" is not a real output component in redpanda-connect
     # (verified against redpanda-data/connect's internal/impl at v4.101.0 —
     # it only registers elasticsearch_v8, elasticsearch_v9, and opensearch);
