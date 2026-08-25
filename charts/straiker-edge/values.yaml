@@ -13,14 +13,46 @@ global:
   sharedNodeSelector:
     purpose: general
 
-# internal   — Caddy reverse proxy with self-signed "tls internal" certs
-#              (default, current behavior).
 # none       — install nothing; bring your own ingress/LoadBalancer pointed
-#              at routes[]'s targetService/targetPort Services directly.
+#              at routes[]'s targetService/targetPort Services directly
+#              (default).
+# internal   — Caddy reverse proxy with self-signed "tls internal" certs.
 # tailscale  — one Ingress per routes[] entry, ingressClassName: tailscale,
 #              exposed via the Tailscale Kubernetes operator (installed
 #              separately) instead of Caddy. See tailscale.funnel below.
-edgeType: internal
+# alb        — one Ingress covering all of routes[] (host-based rules),
+#              ingressClassName: alb, backed by a single internal AWS
+#              Application Load Balancer via the AWS Load Balancer
+#              Controller (installed separately). See alb.* below.
+edgeType: none
+
+# Only used when edgeType: alb. Requires the AWS Load Balancer Controller
+# to be running in the cluster — this chart doesn't install it itself, but
+# scripts/install-straiker.sh's phase_alb_controller does (via
+# terraform/aws/edge + its Helm chart) — it's what turns this Ingress into
+# an actual ALB.
+alb:
+  # Base domain for hostnames: <route.albSubdomain>.<domain>, e.g.
+  # "acmecorp.com" -> straiker.acmecorp.com, straiker-defend.acmecorp.com,
+  # straiker-ascend.acmecorp.com. Required when edgeType: alb.
+  domain: ""
+  # ACM certificate ARN. Required — without it the ALB gets no HTTPS
+  # listener at all (the AWS Load Balancer Controller only adds one when a
+  # cert is present). Request via DNS validation; that works even with
+  # zero public reachability, only a Route53 CNAME is needed to prove
+  # domain control.
+  certificateArn: ""
+  # CIDR(s) allowed to reach the ALB. Required — the AWS Load Balancer
+  # Controller has no restriction by default otherwise (0.0.0.0/0).
+  inboundCidrs: ""
+  # Comma-separated subnet IDs. Leave blank to rely on the AWS Load
+  # Balancer Controller's subnet auto-discovery
+  # (kubernetes.io/role/internal-elb=1 tag on private subnets).
+  subnets: ""
+  # IngressClass created by the AWS Load Balancer Controller. Default
+  # matches its out-of-the-box name; override only if the customer's
+  # install uses a non-default one.
+  ingressClassName: alb
 
 tailscale:
   # Only used when edgeType: tailscale. true = publicly reachable via
@@ -78,18 +110,25 @@ service:
 # <subdomain>.<global.appDomain> (internal) or <subdomain>.<tailnet>.ts.net
 # (tailscale), reverse-proxied/forwarded to <targetService>:<targetPort>
 # (bare Service name — this chart must be installed into the same namespace
-# as everything it routes to).
+# as everything it routes to). albSubdomain is a separate naming convention
+# used only by edgeType: alb's Ingress (templates/alb-ingress.yaml) against
+# a customer-supplied domain — kept independent of subdomain above so
+# renaming one doesn't silently rename the other (internal/tailscale keep
+# their own conventions unchanged).
 routes:
   - name: frontend
     subdomain: app
+    albSubdomain: straiker
     targetService: straiker-frontend-service
     targetPort: 80
   - name: defend-api
     subdomain: defend
+    albSubdomain: straiker-defend
     targetService: straiker-defend
     targetPort: 80
   - name: ascend-api
     subdomain: ascend
+    albSubdomain: straiker-ascend
     # charts/straiker-ascend's control-plane Service - matches its own
     # "ascend.externalUrl" helper default (https://ascend.<appDomain>:<port>),
     # used as SYS__DATA_EXFILTRATION_ENDPOINT's default.
