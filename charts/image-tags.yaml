@@ -21,7 +21,7 @@ images:
   straiker/frontend-migrate:
     tag: onprem-v2026.8.3
   straiker/argus:
-    tag: onprem-v2026.7.29.2
+    tag: onprem-v2026.8.24
   straiker/iris:
     tag: onprem-v2026.8.13.10
   straiker/vllm:

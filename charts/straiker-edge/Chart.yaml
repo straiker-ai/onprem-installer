@@ -2,18 +2,24 @@ apiVersion: v2
 name: straiker-edge
 description: >
   External exposure for a values-driven list of subdomain routes to
-  in-cluster Services, via one of three edgeType modes: "internal" (Caddy,
-  self-signed "tls internal" certs — default), "none" (bring your own
-  ingress/LoadBalancer), or "tailscale" (one Ingress per route, exposed
-  through the Tailscale Kubernetes operator + Funnel). The "internal" mode
-  was extracted from charts/straiker-core/charts/straiker-frontend's
-  formerly-nested "internal-edge" component (frontend-only, one hardcoded
-  route) into its own top-level chart once a second real consumer showed up
+  in-cluster Services, via one of five edgeType modes: "none" (bring your
+  own ingress/LoadBalancer — default), "internal" (Caddy, self-signed "tls
+  internal" certs), "tailscale" (same Caddy, but a real cert-manager/Let's
+  Encrypt certificate for the customer's own domain, Service exposed onto
+  their Tailscale tailnet at L3 via the Tailscale Kubernetes operator), "alb" (one Ingress covering all
+  routes via host-based rules, backed by a single internal AWS Application
+  Load Balancer through the AWS Load Balancer Controller), or "xalb" (same
+  as alb but internet-facing, sharing an ALB with other Ingresses on the
+  cluster via IngressGroup, always backed by a real DNS-validated
+  certificate). The "internal" mode was extracted from
+  charts/straiker-core/charts/straiker-frontend's formerly-nested
+  "internal-edge" component (frontend-only, one hardcoded route) into its
+  own top-level chart once a second real consumer showed up
   (charts/straiker-defend's API), matching this repo's "small, independent
   charts" pattern (straiker-inference, straiker-artifact) over nesting a new
   subchart under straiker-core.
 type: application
-version: 0.3.0
+version: 0.6.0
 appVersion: "2-alpine"
 home: https://github.com/straiker-ai/onprem
 sources:

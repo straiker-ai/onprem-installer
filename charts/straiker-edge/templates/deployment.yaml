@@ -1,4 +1,4 @@
-{{- if eq .Values.edgeType "internal" }}
+{{- if or (eq .Values.edgeType "internal") (eq .Values.edgeType "tailscale") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,6 +38,11 @@ spec:
               mountPath: /data
             - name: config-dir
               mountPath: /config
+            {{- if eq .Values.edgeType "tailscale" }}
+            - name: tls
+              mountPath: /etc/caddy-tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -47,6 +52,13 @@ spec:
           emptyDir: {}
         - name: config-dir
           emptyDir: {}
+        {{- if eq .Values.edgeType "tailscale" }}
+        # Written by cert-manager's Certificate (templates/cert-manager.yaml)
+        # -- real, browser-trusted cert for tailscale.domain, not disposable.
+        - name: tls
+          secret:
+            secretName: {{ .Values.tailscale.certificateSecretName }}
+        {{- end }}
       nodeSelector:
         {{- include "edge.nodeSelector" . | nindent 8 }}
       {{- with .Values.tolerations }}

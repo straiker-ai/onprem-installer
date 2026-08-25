@@ -18,7 +18,7 @@ resources:
 
 image:
   repository: straiker/argus
-  tag: onprem-v2026.7.29.2
+  tag: onprem-v2026.8.24
   pullPolicy: IfNotPresent
 
 nodeSelector: {}
@@ -33,6 +33,11 @@ service:
   type: ClusterIP
   port: 80
   targetPort: 8080
+  # Only useful when service.type is LoadBalancer (e.g. edgeType: none
+  # customers exposing this directly via the AWS Load Balancer Controller
+  # instead of their own ingress) — e.g. aws-load-balancer-type/-scheme/
+  # -nlb-target-type/load-balancer-source-ranges. Empty/no-op otherwise.
+  annotations: {}
 
 hpa:
   enabled: false
@@ -135,3 +140,23 @@ llmEndpoints:
   imageDetection:
     model: wanda
     path: /v1/chat/completions
+
+# Bifrost LLM gateway (charts/straiker-core/charts/straiker-bifrost) — same
+# namespace, deployed as part of the straiker-core release. Only consumed by
+# argus when frontier.enabled is true below; empty baseUrl auto-derives to
+# that chart's own Service in this same namespace. apiKey is a Bifrost
+# virtual/attribution key (Bifrost doesn't reject unrecognized keys), not a
+# rotated credential — safe as a plain value rather than a straiker-secrets
+# entry.
+bifrost:
+  baseUrl: ""
+  apiKey: "sk-bf-argus"
+
+# Frontier second-opinion for adaptive IPI (POC) — see argus's own
+# ipi_frontier.py. Off by default. Enabling this on-prem also requires
+# straiker-core's straiker-bifrost subchart to be installed with a real
+# Bedrock and/or Anthropic provider configured (argus has no AWS credentials
+# of its own in this chart) — otherwise the check always fails safe (keeps
+# the fine-tuned verdict) and never actually overturns anything.
+frontier:
+  enabled: false

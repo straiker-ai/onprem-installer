@@ -1,0 +1,43 @@
+{{- if eq .Values.edgeType "tailscale" }}
+# Requires cert-manager itself already installed and running (see
+# scripts/install-straiker.sh's phase_cert_manager, which must run before
+# straiker-edge) -- this chart only supplies the ClusterIssuer/Certificate,
+# not the controller/CRDs.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: straiker-edge-letsencrypt
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.tailscale.clusterIssuerEmail | quote }}
+    privateKeySecretRef:
+      name: straiker-edge-letsencrypt-account-key
+    solvers:
+      - dns01:
+          route53:
+            region: {{ .Values.tailscale.region | quote }}
+            hostedZoneID: {{ .Values.tailscale.hostedZoneId | quote }}
+            # No accessKeyID/secretAccessKey -- cert-manager's ServiceAccount
+            # authenticates via IRSA/Pod Identity (terraform/aws/edge's
+            # cert_manager.tf), same convention as ExternalDNS's IAM role.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: straiker-edge-tailscale
+  namespace: {{ include "edge.namespace" . }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.tailscale.certificateSecretName }}
+  issuerRef:
+    name: straiker-edge-letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    {{- range .Values.routes }}
+    - {{ printf "%s.%s" .albSubdomain $.Values.tailscale.domain | quote }}
+    {{- end }}
+{{- end }}

@@ -232,6 +232,11 @@ controlPlane:
     type: ClusterIP
     port: 80
     targetPort: 8081
+    # Only useful when service.type is LoadBalancer (e.g. edgeType: none
+    # customers exposing this directly via the AWS Load Balancer Controller
+    # instead of their own ingress) — e.g. aws-load-balancer-type/-scheme/
+    # -nlb-target-type/load-balancer-source-ranges. Empty/no-op otherwise.
+    annotations: {}
   hpa:
     enabled: false
     minReplicas: 1

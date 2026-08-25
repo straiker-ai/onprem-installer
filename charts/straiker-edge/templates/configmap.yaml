@@ -1,4 +1,4 @@
-{{- if eq .Values.edgeType "internal" }}
+{{- if or (eq .Values.edgeType "internal") (eq .Values.edgeType "tailscale") }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,6 +7,18 @@ metadata:
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 data:
+  {{- if eq .Values.edgeType "tailscale" }}
+  # albSubdomain reused here (same field alb/xalb use) rather than a
+  # separate naming convention -- tailscale's hostnames follow the exact
+  # same <route.albSubdomain>.<domain> shape as alb/xalb's.
+  Caddyfile: |
+    {{- range .Values.routes }}
+    {{ .albSubdomain }}.{{ $.Values.tailscale.domain }}:{{ $.Values.httpsPort }} {
+      tls /etc/caddy-tls/tls.crt /etc/caddy-tls/tls.key
+      reverse_proxy {{ .targetService }}:{{ .targetPort }}
+    }
+    {{- end }}
+  {{- else }}
   Caddyfile: |
     {{- range .Values.routes }}
     {{ .subdomain }}.{{ $.Values.global.appDomain }}:{{ $.Values.httpsPort }} {
@@ -14,4 +26,5 @@ data:
       reverse_proxy {{ .targetService }}:{{ .targetPort }}
     }
     {{- end }}
+  {{- end }}
 {{- end }}

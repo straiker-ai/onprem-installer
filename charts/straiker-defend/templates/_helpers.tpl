@@ -59,6 +59,20 @@ Archive endpoint — charts/straiker-system's single shared Redpanda Connect
 {{- end }}
 
 {{/*
+Bifrost gateway base URL — charts/straiker-core/charts/straiker-bifrost's own
+Service, in this same namespace. Only rendered into the deployment when
+Values.frontier.enabled is true (see deployment.yaml) — argus falls back to
+calling AWS Bedrock directly via boto3 when unset.
+*/}}
+{{- define "defend.bifrostBaseUrl" -}}
+{{- if .Values.bifrost.baseUrl -}}
+{{- .Values.bifrost.baseUrl -}}
+{{- else -}}
+{{- printf "http://straiker-bifrost-service.%s.svc.cluster.local:8090/v1" (include "defend.namespace" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 NodeSelector — merges Values.nodeSelector with charts/straiker-system's
 shared, untainted NodePool label. No dedicated "straiker-argus" NodePool:
 this chart runs alongside opensearch/postgres/redis on the same shared

@@ -84,7 +84,7 @@ imageMirror:
       tag: onprem-v2026.8.3
       destRepository: straiker/frontend-migrate
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
-      tag: onprem-v2026.7.29.2
+      tag: onprem-v2026.8.24
       destRepository: straiker/argus
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
       tag: onprem-v2026.8.13.10

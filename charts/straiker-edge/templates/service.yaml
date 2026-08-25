@@ -1,4 +1,4 @@
-{{- if eq .Values.edgeType "internal" }}
+{{- if or (eq .Values.edgeType "internal") (eq .Values.edgeType "tailscale") }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -6,6 +6,16 @@ metadata:
   namespace: {{ include "edge.namespace" . }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
+  {{- if eq .Values.edgeType "tailscale" }}
+  annotations:
+    # L3-only exposure onto the customer's tailnet -- Tailscale never
+    # terminates TLS here, Caddy still does that itself (see deployment.yaml
+    # /configmap.yaml) using a cert-manager-issued cert for tailscale.domain.
+    # The Tailscale Kubernetes operator (installed separately by
+    # scripts/install-straiker.sh's phase_tailscale_operator) creates a
+    # proxy Pod with its own tailnet identity/IP for this Service.
+    tailscale.com/expose: "true"
+  {{- end }}
 spec:
   # ClusterIP by default — don't assume the customer's cluster has a cloud
   # LoadBalancer or wants a NodePort. Override once real external access is wanted.
