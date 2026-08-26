@@ -4,6 +4,6 @@ dependencies:
   version: 0.1.2
 - name: straiker-frontend
   repository: ""
-  version: 0.2.2
-digest: sha256:1f131f2857f11a6e3671d3fdf23fb420e565f75082412b7cb27910923562586a
-generated: "2026-08-24T15:29:45.537035-07:00"
+  version: 0.2.3
+digest: sha256:214173e629e6a42390b918cf23d2319056d05bdcf19e8e77a5fb6c92694ac3ee
+generated: "2026-08-26T21:40:35.614473-07:00"

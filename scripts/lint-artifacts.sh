@@ -361,6 +361,17 @@ for chart_dir in chart_dirs:
         "db.host=postgres.straiker.svc.cluster.local",
         "--set",
         "postgres.storage.storageClassName=gp3",
+        # straiker-frontend's dex.staticAdminPasswordHash has no default
+        # (install-straiker.sh's phase_shared_secrets supplies it at
+        # install time) -- a placeholder here, same reasoning as db.host
+        # above, just to let this chart render at all. Set both bare (for
+        # straiker-frontend rendered standalone) and prefixed (for it
+        # rendered as straiker-core's subchart) -- harmless no-op on charts
+        # that don't have this value.
+        "--set",
+        "dex.staticAdminPasswordHash=$2y$10$lintplaceholderlintplaceholderlintpla",
+        "--set",
+        "straiker-frontend.dex.staticAdminPasswordHash=$2y$10$lintplaceholderlintplaceholderlintpla",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

@@ -365,9 +365,6 @@ AUTO_YES=false
 PLAN_ONLY=false
 STATUS_ONLY=false
 FORCE_RERUN=false
-# One-off hardening action, not part of the normal phase pipeline — see
-# disable_builtin_admin()'s own comment.
-DISABLE_BUILTIN_ADMIN=false
 # One-off action, not part of the normal phase pipeline — see
 # update_alb_certificate()'s own comment.
 UPDATE_ALB_CERTIFICATE=false
@@ -407,18 +404,6 @@ Options:
   --plan                          Show installer phases and exit.
   --status                        Show a per-phase summary (which is done/next/blocked) and exit.
                                    For the full raw state, read ~/.straiker/install.json directly.
-  --disable-builtin-admin         One-off hardening action, not part of the normal install:
-                                   removes straiker-core's bootstrap admin login
-                                   (admin@<appDomain>, same password hash on every onprem
-                                   install) from dex's config and exits. Run this any time
-                                   after onboarding a real admin (a local account created
-                                   through the UI, or your own configured OIDC IdP) — do NOT
-                                   run it before you've confirmed you can log in as someone
-                                   else, since dex's dynamic local logins and any configured
-                                   OIDC IdP are unaffected either way, only this one static
-                                   entry is removed. Prompts for confirmation unless --yes.
-                                   Reversible via a normal install with --values setting
-                                   straiker-frontend.dex.staticAdminEnabled: true.
   --update-alb-certificate         One-off action, not part of the normal install: re-imports
                                    a certificate into the ACM ARN edge type 'alb'/'xalb' is
                                    already using (same ARN — no Helm upgrade or re-install
@@ -1222,10 +1207,6 @@ parse_args() {
         ;;
       --status)
         STATUS_ONLY=true
-        shift
-        ;;
-      --disable-builtin-admin)
-        DISABLE_BUILTIN_ADMIN=true
         shift
         ;;
       --update-alb-certificate)
@@ -2687,6 +2668,7 @@ phase_straiker_system() {
 phase_shared_secrets() {
   require_command kubectl
   require_command openssl
+  require_command htpasswd
 
   if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
     ensure_k8s_ready_for_charts || return
@@ -2712,6 +2694,19 @@ phase_shared_secrets() {
   fi
   if ! secret_key_exists "IRIS_ADMIN_API_KEY"; then
     patch_shared_secret "IRIS_ADMIN_API_KEY" "$(openssl rand -hex 32)"
+  fi
+
+  # Straiker-core's dex bootstrap admin login (see straiker-frontend's
+  # dex.staticAdminPasswordHash) — a random password generated once per
+  # install, instead of the same hardcoded hash every onprem install used
+  # to ship. Plaintext is only ever stored here (retrieve with `kubectl get
+  # secret ... -o jsonpath` — see show_bootstrap_admin_reminder); only the
+  # bcrypt hash is passed to helm in phase_straiker_core.
+  if ! secret_key_exists "BOOTSTRAP_ADMIN_PASSWORD"; then
+    local bootstrap_password
+    bootstrap_password="$(openssl rand -base64 24)"
+    patch_shared_secret "BOOTSTRAP_ADMIN_PASSWORD" "${bootstrap_password}"
+    patch_shared_secret "BOOTSTRAP_ADMIN_PASSWORD_HASH" "$(bcrypt_hash "${bootstrap_password}")"
   fi
   log "Secret '${SHARED_SECRETS_NAME}' has all expected service-to-service credentials."
 }
@@ -2740,6 +2735,18 @@ patch_shared_secret() {
   local patch_json
   patch_json="$(python3 -c 'import json,sys; print(json.dumps({"stringData": {sys.argv[1]: sys.argv[2]}}))' "${key}" "${value}")"
   kubectl patch secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" --type=merge -p "${patch_json}" >/dev/null
+}
+
+# $1=plaintext password. Prints its bcrypt hash (cost 10) on stdout — dex's
+# staticPasswords entries require bcrypt, which openssl can't produce.
+# htpasswd emits "$2y$" (Apache's bcrypt variant marker); dex's bcrypt
+# library (golang.org/x/crypto/bcrypt) decodes "$2y$" identically to
+# "$2a$"/"$2b$", so this verifies correctly against dex without translation.
+# Password goes over stdin (-i), never as a command-line argument, so it
+# doesn't show up in this machine's process listing.
+bcrypt_hash() {
+  local password=$1
+  printf '%s' "${password}" | htpasswd -inBC 10 admin | cut -d: -f2
 }
 
 # Removes one key from the shared secret without touching others.
@@ -2936,6 +2943,19 @@ phase_straiker_core() {
   # create an unused top-level key instead.
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
+
+  # dex's staticPasswords hash has to be baked into its rendered ConfigMap
+  # (there's no secretKeyRef-style indirection for a value embedded inside a
+  # ConfigMap's config.yaml blob) — generated once by phase_shared_secrets,
+  # read back out of the shared secret here. Only the hash crosses into
+  # `helm get values`/release history, never the plaintext.
+  local bootstrap_password_hash
+  bootstrap_password_hash="$(kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD_HASH}' 2>/dev/null | base64 -d || true)"
+  if [[ -z "${bootstrap_password_hash}" ]]; then
+    mark_phase_blocked "Missing BOOTSTRAP_ADMIN_PASSWORD_HASH in '${SHARED_SECRETS_NAME}' — fix and re-run 'shared-secrets' first (--phase shared-secrets --rerun-phase)."
+    return
+  fi
+  cmd+=(--set-string "straiker-frontend.dex.staticAdminPasswordHash=${bootstrap_password_hash}")
 
   # Unconditional — straiker-defend is always installed now (see
   # phase_straiker_defend), regardless of product selection.
@@ -3977,6 +3997,27 @@ show_access_info() {
   log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
 }
 
+# Reminder printed at the end of every successful run — the bootstrap admin
+# (see phase_shared_secrets/phase_straiker_core) always exists whichever
+# edge type was used, so this runs unconditionally rather than living inside
+# show_access_info's per-edge-type branches. Doesn't print the plaintext
+# password itself — same reasoning as elsewhere in this script, no secret
+# material goes into terminal scrollback/log files that don't need it;
+# ops fetch it themselves when ready to log in.
+show_bootstrap_admin_reminder() {
+  log ""
+  log "Bootstrap admin login: admin@straiker.internal — a random password was"
+  log "generated for this install. Retrieve it with:"
+  log "  kubectl get secret ${SHARED_SECRETS_NAME} -n ${INFRA_NAMESPACE} -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d; echo"
+  log ""
+  log "Once you can log in, onboard a real admin (a local account through the UI,"
+  log "or your own configured OIDC IdP), then delete the bootstrap admin's user"
+  log "account from within Straiker itself so it can no longer reach the product."
+  log "Its dex-level static login can't be deleted outright (dex treats"
+  log "staticPasswords entries as read-only) — only fully disabled, via a normal"
+  log "install with --values setting straiker-frontend.dex.staticAdminEnabled: false."
+}
+
 # Prompts on /dev/tty (never stdin — this must work under `curl | bash`, which
 # consumes stdin as the script source) with the prompt text written directly to
 # /dev/tty rather than via `read -p` — `read -p`'s prompt goes to stderr, and a
@@ -4833,76 +4874,6 @@ run_phase() {
   set_phase_status "${phase}" "done"
 }
 
-# One-off hardening action (--disable-builtin-admin), not part of the normal
-# phase pipeline — run any time after a customer has onboarded a real admin
-# (a local login created through the UI, or their own OIDC IdP) to remove
-# straiker-core's bootstrap admin, whose password hash is identical across
-# every onprem install. Only removes that one static entry — dex's own
-# dynamically-managed local logins and any configured external IdP are
-# untouched either way. Reversible via a normal install with --values
-# setting straiker-frontend.dex.staticAdminEnabled: true.
-disable_builtin_admin() {
-  require_command helm
-  require_command kubectl
-
-  local namespace="${INFRA_NAMESPACE:-}"
-  [[ -z "${namespace}" ]] && namespace="$(get_metadata "namespace")"
-  namespace="${namespace:-straiker}"
-
-  ensure_k8s_ready_for_charts || exit 1
-
-  local core_status
-  core_status="$(helm status "${APP_RELEASE}" -n "${namespace}" -o json 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("info",{}).get("status",""))' 2>/dev/null || true)"
-  if [[ "${core_status}" != "deployed" ]]; then
-    echo "ERROR: Release '${APP_RELEASE}' in namespace '${namespace}' is not healthy (status: '${core_status:-not installed}'). Nothing to disable." >&2
-    exit 1
-  fi
-
-  if [[ "${AUTO_YES}" != true ]]; then
-    cat >&2 <<'EOF'
-
-This will disable the default bootstrap admin login (admin@<appDomain>) by
-removing it from dex's config entirely — every onprem install ships with the
-SAME password hash for this account, so leaving it enabled indefinitely is a
-real risk. Before continuing, make sure you can already log in as a
-different admin: either a local account created through the UI, or your own
-configured OIDC IdP. This is reversible (re-run with --values setting
-straiker-frontend.dex.staticAdminEnabled: true), but you'd need working
-admin access to even do that.
-
-Type 'disable' and press Enter to continue.
-EOF
-    local typed
-    if ! typed="$(prompt_line '> ')"; then
-      echo "ERROR: No interactive terminal available to confirm. Re-run with --yes if you're sure." >&2
-      exit 1
-    fi
-    if [[ "${typed}" != "disable" ]]; then
-      echo "ERROR: Not confirmed; aborting. No changes made." >&2
-      exit 1
-    fi
-  fi
-
-  helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
-  helm repo update "${HELM_REPO_NAME}" >/dev/null
-
-  local cmd=(
-    helm upgrade --install "${APP_RELEASE}" "${HELM_REPO_NAME}/${APP_CHART_NAME}"
-    --namespace "${namespace}"
-    --reuse-values
-    --set "straiker-frontend.dex.staticAdminEnabled=false"
-    --wait
-    --timeout "${HELM_TIMEOUT}"
-  )
-  if [[ -n "${CHART_VERSION}" ]]; then
-    cmd+=(--version "${CHART_VERSION}")
-  fi
-  "${cmd[@]}"
-
-  log "Bootstrap admin login disabled — dex restarted automatically to pick up the change (config checksum changed). Confirm you can still log in as your real admin before closing this session."
-}
-
 # One-off action, not part of the normal phase pipeline: re-imports a
 # certificate into the ARN already recorded as alb_certificate_arn — useful
 # for rotating an imported certificate that doesn't auto-renew itself (the
@@ -4982,11 +4953,6 @@ main() {
     exit 0
   fi
 
-  if [[ "${DISABLE_BUILTIN_ADMIN}" == true ]]; then
-    disable_builtin_admin
-    exit 0
-  fi
-
   if [[ "${UPDATE_ALB_CERTIFICATE}" == true ]]; then
     update_alb_certificate
     exit 0
@@ -5018,6 +4984,7 @@ main() {
   log "Install completed successfully."
   log "State file: ${STATE_FILE}"
   show_access_info
+  show_bootstrap_admin_reminder
 }
 
 main "$@"

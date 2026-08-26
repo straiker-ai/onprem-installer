@@ -1,0 +1,816 @@
+<title>Straiker On-Prem Guide</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --bg:#ffffff;
+  --bg-page:#f4f6fb;
+  --sidebar-bg:#f7f9fc;
+  --text:#20242c;
+  --heading:#1f2a44;
+  --accent:#2e5aac;
+  --accent-soft:#e7edf8;
+  --muted:#5b6270;
+  --border:#e1e5ee;
+  --note-bg:#eef1f7;
+  --note-border:#2e5aac;
+  --note-text:#333c4d;
+  --flag-bg:#fbeeee;
+  --flag-border:#b23b3b;
+  --flag-text:#7a2c2c;
+  --th-bg:#1f2a44;
+  --th-text:#ffffff;
+  --row-alt:#f7f9fc;
+  --code-bg:#eef1f7;
+  --link:#2e5aac;
+  --shadow: 0 1px 3px rgba(20,30,60,0.08);
+}
+:root:not([data-theme="light"]) {
+  @media (prefers-color-scheme: dark) {
+    --bg:#151a24;
+    --bg-page:#10141c;
+    --sidebar-bg:#131722;
+    --text:#dbe1ee;
+    --heading:#eef2fb;
+    --accent:#6f9ceb;
+    --accent-soft:#1c2740;
+    --muted:#9aa4b8;
+    --border:#262d3d;
+    --note-bg:#1a2338;
+    --note-border:#4d76c4;
+    --note-text:#c9d3e6;
+    --flag-bg:#301c1c;
+    --flag-border:#c05a5a;
+    --flag-text:#e3b0b0;
+    --th-bg:#0e1420;
+    --th-text:#e9edf6;
+    --row-alt:#171d29;
+    --code-bg:#1a2130;
+    --link:#8ab0ef;
+    --shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#151a24;
+  --bg-page:#10141c;
+  --sidebar-bg:#131722;
+  --text:#dbe1ee;
+  --heading:#eef2fb;
+  --accent:#6f9ceb;
+  --accent-soft:#1c2740;
+  --muted:#9aa4b8;
+  --border:#262d3d;
+  --note-bg:#1a2338;
+  --note-border:#4d76c4;
+  --note-text:#c9d3e6;
+  --flag-bg:#301c1c;
+  --flag-border:#c05a5a;
+  --flag-text:#e3b0b0;
+  --th-bg:#0e1420;
+  --th-text:#e9edf6;
+  --row-alt:#171d29;
+  --code-bg:#1a2130;
+  --link:#8ab0ef;
+  --shadow: 0 1px 3px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; }
+html,body{ margin:0; padding:0; }
+body{
+  background: var(--bg-page);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+}
+a { color: var(--link); }
+.layout{ display:flex; max-width:1400px; margin:0 auto; min-height:100vh; }
+
+/* Sidebar */
+.sidebar{
+  width: 280px;
+  flex-shrink:0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top:0;
+  align-self: flex-start;
+  height:100vh;
+  overflow-y:auto;
+  padding: 22px 18px;
+}
+.sidebar-brand{ font-weight:700; letter-spacing:0.06em; color:var(--accent); font-size:12px; text-transform:uppercase; margin-bottom:2px;}
+.sidebar-title{ font-weight:700; color:var(--heading); font-size:17px; margin-bottom:18px; }
+.toc{ list-style:none; margin:0; padding:0; }
+.toc a{ display:block; text-decoration:none; color:var(--text); padding:5px 8px; border-radius:6px; font-size:13.5px; }
+.toc a:hover{ background: var(--accent-soft); color:var(--accent); }
+.toc .l1 > a{ font-weight:600; margin-top:8px; }
+.toc .l2 a{ padding-left:20px; color:var(--muted); font-size:13px; }
+.toc .l2 a:hover{ color:var(--accent); }
+
+/* Main content */
+.content{ flex:1; min-width:0; padding: 36px 48px 80px; }
+.mobile-toc{ display:none; }
+
+.doc-header{ margin-bottom: 28px; }
+.eyebrow{ color:var(--accent); font-weight:700; letter-spacing:0.08em; font-size:12px; text-transform:uppercase; }
+h1.doc-title{ color:var(--heading); font-size:32px; margin:6px 0 8px; }
+.doc-sub{ color:var(--muted); font-size:15.5px; max-width:760px; }
+.badges{ display:flex; flex-wrap:wrap; gap:8px; margin-top:16px; }
+.badge{ display:inline-block; background:var(--accent-soft); color:var(--accent); border-radius:999px; padding:4px 12px; font-size:12.5px; font-weight:600; }
+.badge.muted{ background:var(--code-bg); color:var(--muted); }
+
+.top-flag{
+  margin-top:18px;
+  background: var(--flag-bg);
+  border-left: 4px solid var(--flag-border);
+  color: var(--flag-text);
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 13.8px;
+}
+.top-flag b{ color:var(--flag-text); }
+
+section{ margin-top:44px; scroll-margin-top: 20px; }
+section h2{
+  color: var(--heading);
+  font-size: 22px;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 8px;
+  margin-bottom: 16px;
+}
+h3{ color: var(--accent); font-size:16.5px; margin: 26px 0 10px; }
+p{ margin: 0 0 14px; }
+
+.callout{ border-radius:8px; padding:12px 16px; margin: 14px 0; font-size:14px; }
+.callout.note{ background:var(--note-bg); border-left:4px solid var(--note-border); color:var(--note-text); }
+.callout.flag{ background:var(--flag-bg); border-left:4px solid var(--flag-border); color:var(--flag-text); }
+.callout b{ color:inherit; }
+
+ul.bullets{ margin:0 0 14px; padding-left:22px; }
+ul.bullets li{ margin-bottom:8px; }
+
+.table-wrap{ overflow-x:auto; margin: 14px 0 20px; border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); }
+table{ border-collapse:collapse; width:100%; min-width:560px; font-size:13.6px; background:var(--bg); }
+thead th{ background:var(--th-bg); color:var(--th-text); text-align:left; padding:9px 12px; font-weight:600; white-space:nowrap; }
+tbody td{ padding:9px 12px; border-top:1px solid var(--border); vertical-align:top; }
+tbody tr:nth-child(even){ background: var(--row-alt); }
+code{ background:var(--code-bg); padding:1px 6px; border-radius:4px; font-size:0.92em; }
+pre.cmd{ background:#161d2b; color:#eaf0ff; border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.55; margin:10px 0 18px; box-shadow:var(--shadow); }
+pre.cmd code{ background:none; padding:0; color:inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.diagram-wrap{ background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:18px; box-shadow:var(--shadow); overflow-x:auto; }
+.diagram-wrap svg{ max-width:100%; height:auto; display:block; margin:0 auto; }
+:root[data-theme="dark"] .diagram-wrap svg, :root:not([data-theme="light"]) .diagram-wrap svg {
+  @media (prefers-color-scheme: dark) { filter: invert(0.92) hue-rotate(180deg); }
+}
+:root[data-theme="dark"] .diagram-wrap svg{ filter: invert(0.92) hue-rotate(180deg); }
+
+.back-to-top{ display:inline-block; margin-top:10px; font-size:12.5px; color:var(--muted); text-decoration:none; }
+.back-to-top:hover{ color:var(--accent); }
+
+footer.doc-footer{ margin-top:60px; padding-top:20px; border-top:1px solid var(--border); color:var(--muted); font-size:12.5px; }
+
+@media (max-width: 900px){
+  .sidebar{ display:none; }
+  .content{ padding: 24px 20px 60px; }
+  .mobile-toc{ display:block; margin-bottom:24px; background:var(--sidebar-bg); border:1px solid var(--border); border-radius:8px; padding:10px 14px; }
+  .mobile-toc summary{ cursor:pointer; font-weight:600; color:var(--heading); }
+  .mobile-toc .toc{ margin-top:10px; }
+}
+</style>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="sidebar-brand">Straiker</div>
+    <div class="sidebar-title">On-Prem Deployment Guide</div>
+    <ul class="toc">
+      <li class="l1"><a href="#sec1">1. What "on-prem" means</a></li>
+      <li class="l2"><a href="#sec1-1">1.1 Product components</a></li>
+      <li class="l2"><a href="#sec1-2">1.2 Install phases</a></li>
+      <li class="l2"><a href="#sec1-3">1.3 Architecture diagram</a></li>
+      <li class="l2"><a href="#sec1-4">1.4 Quick start commands</a></li>
+      <li class="l1"><a href="#sec2">2. Prerequisites</a></li>
+      <li class="l2"><a href="#sec2-1">2.1 Tooling</a></li>
+      <li class="l2"><a href="#sec2-2">2.2 AWS account &amp; IAM</a></li>
+      <li class="l2"><a href="#sec2-3">2.3 Kubernetes</a></li>
+      <li class="l2"><a href="#sec2-4">2.4 Network, DNS, certs</a></li>
+      <li class="l2"><a href="#sec2-5">2.5 Secrets &amp; credentials</a></li>
+      <li class="l2"><a href="#sec2-6">2.6 GPU capacity</a></li>
+      <li class="l1"><a href="#sec3">3. Sizing &amp; specs</a></li>
+      <li class="l2"><a href="#sec3-1">3.1 Cluster topology</a></li>
+      <li class="l2"><a href="#sec3-2">3.2 Karpenter NodePools</a></li>
+      <li class="l2"><a href="#sec3-3">3.3 Per-model GPU</a></li>
+      <li class="l2"><a href="#sec3-4">3.4 Core service resources</a></li>
+      <li class="l1"><a href="#sec4">4. Cost estimate</a></li>
+      <li class="l2"><a href="#sec4-1">4.1 POV scenarios</a></li>
+      <li class="l1"><a href="#sec5">5. Model delivery</a></li>
+      <li class="l1"><a href="#sec6">6. Updates &amp; upgrades</a></li>
+      <li class="l1"><a href="#sec7">7. Edge / networking</a></li>
+      <li class="l1"><a href="#sec8">8. POV-readiness questions</a></li>
+      <li class="l1"><a href="#sec9">9. Flag early</a></li>
+    </ul>
+  </nav>
+
+  <main class="content">
+    <details class="mobile-toc">
+      <summary>Contents</summary>
+      <ul class="toc">
+        <li class="l1"><a href="#sec1">1. What "on-prem" means</a></li>
+        <li class="l1"><a href="#sec2">2. Prerequisites</a></li>
+        <li class="l1"><a href="#sec3">3. Sizing &amp; specs</a></li>
+        <li class="l1"><a href="#sec4">4. Cost estimate</a></li>
+        <li class="l1"><a href="#sec5">5. Model delivery</a></li>
+        <li class="l1"><a href="#sec6">6. Updates &amp; upgrades</a></li>
+        <li class="l1"><a href="#sec7">7. Edge / networking</a></li>
+        <li class="l1"><a href="#sec8">8. POV-readiness questions</a></li>
+        <li class="l1"><a href="#sec9">9. Flag early</a></li>
+      </ul>
+    </details>
+
+    <div class="doc-header">
+      <div class="eyebrow">Internal · SE / FDE reference</div>
+      <h1 class="doc-title">On-Prem Deployment Guide</h1>
+      <p class="doc-sub">Architecture, prerequisites, sizing, cost, model delivery, and update mechanics — and the questions to ask before committing to an on-prem POV.</p>
+      <div class="badges">
+        <span class="badge">Scope: AWS / EKS</span>
+        <span class="badge muted">GCP (GKE) supported; broader multi-cloud on roadmap</span>
+        <span class="badge muted">Last updated Aug 26, 2026 · onprem-installer @ main</span>
+      </div>
+      <div class="top-flag">
+        <b>Pre-Discover 2.0 architecture.</b> Everything in this guide reflects onprem-installer as it exists today: straiker-system's Postgres/OpenSearch/Valkey are the only data stores, and there is no dedicated data platform component. Discover 2.0 is expected to change this — treat this as current-state, not a commitment for a Discover 2.0-era POV.
+      </div>
+    </div>
+
+    <section id="sec1">
+      <h2>1. What "on-prem" means here</h2>
+      <p>Straiker's on-prem offering is not software the customer installs on bare metal — it's a self-managed deployment into the customer's own AWS account. A phased installer script provisions an EKS cluster (or attaches to one the customer already runs), then installs Straiker's product as a set of Helm releases into it. Everything — compute, data, model weights — stays inside the customer's account and VPC; nothing about inference or detection calls back out to Straiker at runtime.</p>
+      <p>The installer is public and self-service (a single <code>curl | bash</code> one-liner), but a real deployment is rarely fully self-service on a first POV — an FDE is normally in the loop for AWS IAM/quota issues, AI provider setup, and DNS/edge decisions. This guide gives SEs and FDEs a shared, source-verified picture of what that install actually does, what it costs, and what to check before agreeing to run one.</p>
+
+      <h3 id="sec1-1">1.1 Product components</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:22%">Component (Helm chart)</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td>straiker-system</td><td>Shared infrastructure: Postgres, OpenSearch, Valkey (Redis), Benthos, the NVIDIA device plugin, and the Karpenter NodePools everything else schedules onto.</td></tr>
+          <tr><td>straiker-artifact</td><td>One-time-per-install mirroring layer: copies Straiker's container images into the customer's own ECR and syncs the model weights the customer actually needs into the customer's own S3 bucket.</td></tr>
+          <tr><td>straiker-core</td><td>Shared app layer: the frontend UI, Bifrost (LLM gateway, third-party/maximhq, not a Straiker fork), Dex (OIDC), and Caddy.</td></tr>
+          <tr><td>straiker-inference</td><td>Self-hosted model serving. One Helm release (vLLM) per GPU model actually required by the selected products, each pulling weights from the customer's own S3 bucket.</td></tr>
+          <tr><td>straiker-defend</td><td>Argus — the detection engine. Installed on every deployment regardless of which products are licensed, because Ascend calls Argus's detection API directly. Can optionally route borderline calls to a frontier LLM (via Bifrost) as a second opinion to cut false positives — its own AI-provider dependency, independent of Ascend (see 2.5).</td></tr>
+          <tr><td>straiker-ascend</td><td>Iris — automated red-teaming (control plane, probe workers, recon workers, report workers). Installed only if Ascend is part of the deal.</td></tr>
+          <tr><td>straiker-edge</td><td>Thin TLS ingress (Caddy) in front of the frontend, Defend API, and Ascend API. Always installed; how traffic reaches it depends on edge type (Section 7).</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="sec1-2">1.2 Install phases</h3>
+      <p>The installer runs a fixed sequence of phases, each idempotent — re-running is a Helm upgrade, not a reinstall. Only phases relevant to the chosen flags actually execute.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th style="width:16%">Phase</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>eks-tfbe</td><td>Creates the S3 bucket that holds Terraform state. Always runs.</td></tr>
+          <tr><td>2</td><td>eks-cluster</td><td>Provisions VPC + EKS cluster + Karpenter IAM (Terraform). Only with <code>--install-eks</code>.</td></tr>
+          <tr><td>3</td><td>karpenter</td><td>Installs the Karpenter autoscaler controller. Only with <code>--install-eks</code>.</td></tr>
+          <tr><td>4</td><td>k8s-preflight</td><td>Confirms the cluster is reachable, resolves a StorageClass for Postgres/OpenSearch, and — on a customer-supplied cluster — validates the customer's own Karpenter is healthy.</td></tr>
+          <tr><td>5</td><td>aws-artifacts</td><td>Provisions the customer's own ECR mirror repos, models S3 bucket, and IAM roles for the mirroring job.</td></tr>
+          <tr><td>6</td><td>artifacts-sync</td><td>Runs the image-mirror and model-sync jobs in-cluster. Blocks until both finish — can take hours on a slow link.</td></tr>
+          <tr><td>7</td><td>straiker-system</td><td>Installs Postgres, OpenSearch, Valkey, Benthos, and the Karpenter NodePools.</td></tr>
+          <tr><td>8</td><td>shared-secrets</td><td>Generates the internal service-to-service credentials used between components.</td></tr>
+          <tr><td>9</td><td>ai-provider-secrets</td><td>Writes AI-provider credentials (own-keys / Bedrock / trial-key) for Bifrost. As coded today, only runs when Ascend is selected — see the flag in 2.5 if Defend's frontier second-opinion needs the same credentials on a Defend-only install.</td></tr>
+          <tr><td>10</td><td>straiker-core</td><td>Installs the frontend, Bifrost, Dex, and Caddy.</td></tr>
+          <tr><td>11</td><td>straiker-inference</td><td>Installs one vLLM release per required model, in batches of 4 concurrent installs.</td></tr>
+          <tr><td>12</td><td>straiker-defend</td><td>Installs Argus. Always runs.</td></tr>
+          <tr><td>13</td><td>straiker-ascend</td><td>Installs Iris. Only if Ascend is selected.</td></tr>
+          <tr><td>14</td><td>tailscale-operator</td><td>Installs the Tailscale Kubernetes operator. Only with <code>--edge-type tailscale</code>.</td></tr>
+          <tr><td>15</td><td>edge-infra</td><td>Provisions edge networking (Terraform). Only for alb / xalb / tailscale.</td></tr>
+          <tr><td>16</td><td>cert-manager</td><td>Installs cert-manager for Let's Encrypt DNS-01 issuance. Only with <code>--edge-type tailscale</code>.</td></tr>
+          <tr><td>17</td><td>alb-controller</td><td>Installs the AWS Load Balancer Controller. Only for alb / xalb.</td></tr>
+          <tr><td>18</td><td>external-dns</td><td>Installs ExternalDNS. Only for xalb with <code>--xalb-route53</code>.</td></tr>
+          <tr><td>19</td><td>straiker-edge</td><td>Installs the TLS edge. Always runs.</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout note"><b>Note:</b> <code>--plan</code> prints this phase list with rationale; <code>--status</code> prints per-phase done/blocked/next against a running install. Individual phases can be re-targeted with <code>--phase</code>, <code>--from-phase</code>, and <code>--rerun-phase</code> without repeating the whole install.</div>
+
+      <h3 id="sec1-3">1.3 Architecture diagram</h3>
+      <div class="diagram-wrap">
+<svg width="1271pt" height="639pt"
+ viewBox="0.00 0.00 1270.86 639.38" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 635.38)">
+<title>Architecture</title>
+<polygon fill="white" stroke="transparent" points="-4,4 -4,-635.38 1266.86,-635.38 1266.86,4 -4,4"/>
+<g id="clust1" class="cluster">
+<title>cluster_broker</title>
+<polygon fill="white" stroke="#999999" stroke-dasharray="5,2" points="379,-496.38 379,-568.38 939,-568.38 939,-496.38 379,-496.38"/>
+<text text-anchor="middle" x="659" y="-555.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#595959">Straiker&#45;hosted (SaaS side)</text>
+</g>
+<g id="clust2" class="cluster">
+<title>cluster_account</title>
+<polygon fill="#f7f9fc" stroke="#2e5aac" points="126,-8 126,-458.38 945,-458.38 945,-8 126,-8"/>
+<text text-anchor="middle" x="535.5" y="-443.98" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="13.00" fill="#1f2a44">Customer AWS account / VPC</text>
+</g>
+<g id="clust3" class="cluster">
+<title>cluster_eks</title>
+<polygon fill="#ffffff" stroke="#2e5aac" points="146,-123.44 146,-428.38 805,-428.38 805,-123.44 146,-123.44"/>
+<text text-anchor="middle" x="475.5" y="-414.78" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="12.00" fill="#1f2a44">EKS cluster</text>
+</g>
+<!-- users -->
+<g id="node1" class="node">
+<title>users</title>
+<ellipse fill="#ffffff" stroke="#595959" cx="134" cy="-613.38" rx="88.6" ry="18"/>
+<text text-anchor="middle" x="134" y="-610.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">End users / browser</text>
+</g>
+<!-- edge_ -->
+<g id="node7" class="node">
+<title>edge_</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M256,-540.38C256,-540.38 12,-540.38 12,-540.38 6,-540.38 0,-534.38 0,-528.38 0,-528.38 0,-516.38 0,-516.38 0,-510.38 6,-504.38 12,-504.38 12,-504.38 256,-504.38 256,-504.38 262,-504.38 268,-510.38 268,-516.38 268,-516.38 268,-528.38 268,-528.38 268,-534.38 262,-540.38 256,-540.38"/>
+<text text-anchor="middle" x="134" y="-525.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;edge</text>
+<text text-anchor="middle" x="134" y="-513.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(Caddy TLS: internal / ALB / xALB / Tailscale)</text>
+</g>
+<!-- users&#45;&gt;edge_ -->
+<g id="edge1" class="edge">
+<title>users&#45;&gt;edge_</title>
+<path fill="none" stroke="#666666" d="M134,-595.22C134,-582.66 134,-565.36 134,-550.88"/>
+<polygon fill="#666666" stroke="#666666" points="137.5,-550.49 134,-540.49 130.5,-550.49 137.5,-550.49"/>
+</g>
+<!-- broker -->
+<g id="node2" class="node">
+<title>broker</title>
+<path fill="#fbeeee" stroke="#b23b3b" d="M730.5,-540.38C730.5,-540.38 573.5,-540.38 573.5,-540.38 567.5,-540.38 561.5,-534.38 561.5,-528.38 561.5,-528.38 561.5,-516.38 561.5,-516.38 561.5,-510.38 567.5,-504.38 573.5,-504.38 573.5,-504.38 730.5,-504.38 730.5,-504.38 736.5,-504.38 742.5,-510.38 742.5,-516.38 742.5,-516.38 742.5,-528.38 742.5,-528.38 742.5,-534.38 736.5,-540.38 730.5,-540.38"/>
+<text text-anchor="middle" x="652" y="-525.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Artifact broker</text>
+<text text-anchor="middle" x="652" y="-513.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(auth: customer key &#45;&gt; SKU)</text>
+</g>
+<!-- artifact -->
+<g id="node13" class="node">
+<title>artifact</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M647,-399.38C647,-399.38 471,-399.38 471,-399.38 465,-399.38 459,-393.38 459,-387.38 459,-387.38 459,-363.38 459,-363.38 459,-357.38 465,-351.38 471,-351.38 471,-351.38 647,-351.38 647,-351.38 653,-351.38 659,-357.38 659,-363.38 659,-363.38 659,-387.38 659,-387.38 659,-393.38 653,-399.38 647,-399.38"/>
+<text text-anchor="middle" x="559" y="-384.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;artifact</text>
+<text text-anchor="middle" x="559" y="-372.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">image&#45;mirror + model&#45;sync jobs</text>
+<text text-anchor="middle" x="559" y="-360.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">&#45;&#45; install&#45;time only</text>
+</g>
+<!-- broker&#45;&gt;artifact -->
+<g id="edge17" class="edge">
+<title>broker&#45;&gt;artifact</title>
+<path fill="none" stroke="#b23b3b" stroke-dasharray="5,2" d="M640.97,-504.18C625.84,-480.59 598.37,-437.77 579.43,-408.24"/>
+<polygon fill="#b23b3b" stroke="#b23b3b" points="582.19,-406.06 573.85,-399.53 576.3,-409.84 582.19,-406.06"/>
+<text text-anchor="middle" x="667" y="-474.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#8a2e2e">short&#45;lived token</text>
+</g>
+<!-- srcimg -->
+<g id="node3" class="node">
+<title>srcimg</title>
+<path fill="#fbeeee" stroke="#b23b3b" d="M531,-540.38C531,-540.38 399,-540.38 399,-540.38 393,-540.38 387,-534.38 387,-528.38 387,-528.38 387,-516.38 387,-516.38 387,-510.38 393,-504.38 399,-504.38 399,-504.38 531,-504.38 531,-504.38 537,-504.38 543,-510.38 543,-516.38 543,-516.38 543,-528.38 543,-528.38 543,-534.38 537,-540.38 531,-540.38"/>
+<text text-anchor="middle" x="465" y="-525.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Source ECR registry</text>
+<text text-anchor="middle" x="465" y="-513.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">+ source models bucket</text>
+</g>
+<!-- srcimg&#45;&gt;artifact -->
+<g id="edge18" class="edge">
+<title>srcimg&#45;&gt;artifact</title>
+<path fill="none" stroke="#b23b3b" stroke-dasharray="5,2" d="M476.15,-504.18C491.45,-480.59 519.21,-437.77 538.35,-408.24"/>
+<polygon fill="#b23b3b" stroke="#b23b3b" points="541.49,-409.83 543.99,-399.53 535.61,-406.02 541.49,-409.83"/>
+<text text-anchor="middle" x="550.5" y="-479.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#8a2e2e">one&#45;time mirror</text>
+<text text-anchor="middle" x="550.5" y="-469.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#8a2e2e">(install / upgrade time)</text>
+</g>
+<!-- aiproviders_saas -->
+<g id="node4" class="node">
+<title>aiproviders_saas</title>
+<path fill="#fbeeee" stroke="#b23b3b" d="M919,-540.38C919,-540.38 773,-540.38 773,-540.38 767,-540.38 761,-534.38 761,-528.38 761,-528.38 761,-516.38 761,-516.38 761,-510.38 767,-504.38 773,-504.38 773,-504.38 919,-504.38 919,-504.38 925,-504.38 931,-510.38 931,-516.38 931,-516.38 931,-528.38 931,-528.38 931,-534.38 925,-540.38 919,-540.38"/>
+<text text-anchor="middle" x="846" y="-525.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Straiker trial&#45;key AI credits</text>
+<text text-anchor="middle" x="846" y="-513.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(POC only, &lt;=30 days)</text>
+</g>
+<!-- core -->
+<g id="node8" class="node">
+<title>core</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M694.5,-293.38C694.5,-293.38 431.5,-293.38 431.5,-293.38 425.5,-293.38 419.5,-287.38 419.5,-281.38 419.5,-281.38 419.5,-269.38 419.5,-269.38 419.5,-263.38 425.5,-257.38 431.5,-257.38 431.5,-257.38 694.5,-257.38 694.5,-257.38 700.5,-257.38 706.5,-263.38 706.5,-269.38 706.5,-269.38 706.5,-281.38 706.5,-281.38 706.5,-287.38 700.5,-293.38 694.5,-293.38"/>
+<text text-anchor="middle" x="563" y="-278.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;core</text>
+<text text-anchor="middle" x="563" y="-266.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Frontend + Bifrost (LLM gateway) + Dex (OIDC)</text>
+</g>
+<!-- aiproviders_saas&#45;&gt;core -->
+<g id="edge19" class="edge">
+<title>aiproviders_saas&#45;&gt;core</title>
+<path fill="none" stroke="#b23b3b" stroke-dasharray="5,2" d="M851.03,-504.12C860.97,-466.03 878.37,-374.14 832,-323.38 815.14,-304.93 745.62,-309.64 721,-305.38 702.51,-302.19 682.83,-298.67 663.86,-295.22"/>
+<polygon fill="#b23b3b" stroke="#b23b3b" points="664.48,-291.77 654.01,-293.42 663.22,-298.66 664.48,-291.77"/>
+<text text-anchor="middle" x="905.5" y="-373.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#8a2e2e">trial&#45;key mode only</text>
+</g>
+<!-- ecr -->
+<g id="node5" class="node">
+<title>ecr</title>
+<path fill="#ffffff" stroke="#2e5aac" d="M937,-295.43C937,-297.89 909.66,-299.88 876,-299.88 842.34,-299.88 815,-297.89 815,-295.43 815,-295.43 815,-255.33 815,-255.33 815,-252.88 842.34,-250.88 876,-250.88 909.66,-250.88 937,-252.88 937,-255.33 937,-255.33 937,-295.43 937,-295.43"/>
+<path fill="none" stroke="#2e5aac" d="M937,-295.43C937,-292.97 909.66,-290.97 876,-290.97 842.34,-290.97 815,-292.97 815,-295.43"/>
+<text text-anchor="middle" x="876" y="-278.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Customer ECR</text>
+<text text-anchor="middle" x="876" y="-266.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(mirrored images)</text>
+</g>
+<!-- s3models -->
+<g id="node6" class="node">
+<title>s3models</title>
+<path fill="#ffffff" stroke="#2e5aac" d="M446,-60.8C446,-63.26 420.9,-65.25 390,-65.25 359.1,-65.25 334,-63.26 334,-60.8 334,-60.8 334,-20.7 334,-20.7 334,-18.24 359.1,-16.25 390,-16.25 420.9,-16.25 446,-18.24 446,-20.7 446,-20.7 446,-60.8 446,-60.8"/>
+<path fill="none" stroke="#2e5aac" d="M446,-60.8C446,-58.34 420.9,-56.34 390,-56.34 359.1,-56.34 334,-58.34 334,-60.8"/>
+<text text-anchor="middle" x="390" y="-43.95" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Customer S3</text>
+<text text-anchor="middle" x="390" y="-31.95" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(model weights)</text>
+</g>
+<!-- edge_&#45;&gt;core -->
+<g id="edge2" class="edge">
+<title>edge_&#45;&gt;core</title>
+<path fill="none" stroke="#666666" d="M130.74,-504.32C125.34,-470.42 118.69,-394.2 158,-351.38 196.5,-309.45 353.82,-314.59 410,-305.38 428.63,-302.33 448.48,-298.78 467.5,-295.24"/>
+<polygon fill="#666666" stroke="#666666" points="468.17,-298.68 477.36,-293.39 466.88,-291.8 468.17,-298.68"/>
+<text text-anchor="middle" x="178" y="-373.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">frontend</text>
+</g>
+<!-- defend -->
+<g id="node9" class="node">
+<title>defend</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M389,-305.38C389,-305.38 225,-305.38 225,-305.38 219,-305.38 213,-299.38 213,-293.38 213,-293.38 213,-257.38 213,-257.38 213,-251.38 219,-245.38 225,-245.38 225,-245.38 389,-245.38 389,-245.38 395,-245.38 401,-251.38 401,-257.38 401,-257.38 401,-293.38 401,-293.38 401,-299.38 395,-305.38 389,-305.38"/>
+<text text-anchor="middle" x="307" y="-290.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;defend</text>
+<text text-anchor="middle" x="307" y="-278.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Argus (detection engine)</text>
+<text text-anchor="middle" x="307" y="-266.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">&#45;&#45; always installed</text>
+<text text-anchor="middle" x="307" y="-254.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(optional frontier 2nd opinion)</text>
+</g>
+<!-- edge_&#45;&gt;defend -->
+<g id="edge3" class="edge">
+<title>edge_&#45;&gt;defend</title>
+<path fill="none" stroke="#666666" d="M104.22,-504.15C88.5,-493.25 70.72,-477.59 62,-458.38 42.35,-415.08 36.72,-391.66 62,-351.38 96.47,-296.46 137.88,-319.34 203.18,-306.32"/>
+<polygon fill="#666666" stroke="#666666" points="204,-309.72 212.99,-304.13 202.47,-302.89 204,-309.72"/>
+<text text-anchor="middle" x="87" y="-373.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">Defend API</text>
+</g>
+<!-- ascend -->
+<g id="node10" class="node">
+<title>ascend</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M313.5,-399.38C313.5,-399.38 218.5,-399.38 218.5,-399.38 212.5,-399.38 206.5,-393.38 206.5,-387.38 206.5,-387.38 206.5,-363.38 206.5,-363.38 206.5,-357.38 212.5,-351.38 218.5,-351.38 218.5,-351.38 313.5,-351.38 313.5,-351.38 319.5,-351.38 325.5,-357.38 325.5,-363.38 325.5,-363.38 325.5,-387.38 325.5,-387.38 325.5,-393.38 319.5,-399.38 313.5,-399.38"/>
+<text text-anchor="middle" x="266" y="-384.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;ascend</text>
+<text text-anchor="middle" x="266" y="-372.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Iris (red&#45;teaming)</text>
+<text text-anchor="middle" x="266" y="-360.58" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">&#45;&#45; if licensed</text>
+</g>
+<!-- edge_&#45;&gt;ascend -->
+<g id="edge4" class="edge">
+<title>edge_&#45;&gt;ascend</title>
+<path fill="none" stroke="#666666" d="M149.66,-504.18C171.41,-480.28 211.13,-436.66 238.04,-407.1"/>
+<polygon fill="#666666" stroke="#666666" points="240.78,-409.29 244.92,-399.53 235.6,-404.57 240.78,-409.29"/>
+<text text-anchor="middle" x="205.5" y="-474.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">Ascend API</text>
+</g>
+<!-- inference -->
+<g id="node11" class="node">
+<title>inference</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M684,-179.44C684,-179.44 496,-179.44 496,-179.44 490,-179.44 484,-173.44 484,-167.44 484,-167.44 484,-143.44 484,-143.44 484,-137.44 490,-131.44 496,-131.44 496,-131.44 684,-131.44 684,-131.44 690,-131.44 696,-137.44 696,-143.44 696,-143.44 696,-167.44 696,-167.44 696,-173.44 690,-179.44 684,-179.44"/>
+<text text-anchor="middle" x="590" y="-164.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;inference</text>
+<text text-anchor="middle" x="590" y="-152.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">per&#45;model vLLM pods (GPU nodes:</text>
+<text text-anchor="middle" x="590" y="-140.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">g4dn / g5 / g6e)</text>
+</g>
+<!-- core&#45;&gt;inference -->
+<g id="edge6" class="edge">
+<title>core&#45;&gt;inference</title>
+<path fill="none" stroke="#666666" d="M579.04,-257.05C585.66,-248.73 592.58,-238.22 596,-227.38 599.77,-215.44 599.62,-201.84 598.06,-189.76"/>
+<polygon fill="#666666" stroke="#666666" points="601.47,-188.92 596.38,-179.62 594.56,-190.06 601.47,-188.92"/>
+<text text-anchor="middle" x="643" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">LLM calls via Bifrost</text>
+</g>
+<!-- system_ -->
+<g id="node12" class="node">
+<title>system_</title>
+<path fill="#eef1f7" stroke="#2e5aac" d="M426.5,-179.44C426.5,-179.44 183.5,-179.44 183.5,-179.44 177.5,-179.44 171.5,-173.44 171.5,-167.44 171.5,-167.44 171.5,-143.44 171.5,-143.44 171.5,-137.44 177.5,-131.44 183.5,-131.44 183.5,-131.44 426.5,-131.44 426.5,-131.44 432.5,-131.44 438.5,-137.44 438.5,-143.44 438.5,-143.44 438.5,-167.44 438.5,-167.44 438.5,-173.44 432.5,-179.44 426.5,-179.44"/>
+<text text-anchor="middle" x="305" y="-164.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">straiker&#45;system</text>
+<text text-anchor="middle" x="305" y="-152.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Postgres + OpenSearch + Valkey + Benthos</text>
+<text text-anchor="middle" x="305" y="-140.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(Karpenter NodePools)</text>
+</g>
+<!-- core&#45;&gt;system_ -->
+<g id="edge5" class="edge">
+<title>core&#45;&gt;system_</title>
+<path fill="none" stroke="#666666" d="M471.03,-257.34C410.54,-245.8 341.54,-231.87 336,-227.38 324.24,-217.84 316.83,-202.96 312.21,-189.29"/>
+<polygon fill="#666666" stroke="#666666" points="315.54,-188.21 309.32,-179.64 308.84,-190.22 315.54,-188.21"/>
+<text text-anchor="middle" x="371.5" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">app data / auth</text>
+</g>
+<!-- ownkeys -->
+<g id="node14" class="node">
+<title>ownkeys</title>
+<ellipse fill="#ffffff" stroke="#595959" cx="1108" cy="-155.44" rx="154.71" ry="33.88"/>
+<text text-anchor="middle" x="1108" y="-164.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">Customer&#45;owned AI providers</text>
+<text text-anchor="middle" x="1108" y="-152.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">(OpenAI / Anthropic / xAI / Bedrock)</text>
+<text text-anchor="middle" x="1108" y="-140.64" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#1f2a44">&#45;&#45; if own&#45;keys or bedrock mode</text>
+</g>
+<!-- core&#45;&gt;ownkeys -->
+<g id="edge12" class="edge">
+<title>core&#45;&gt;ownkeys</title>
+<path fill="none" stroke="#666666" stroke-dasharray="5,2" d="M645.96,-257.33C670.07,-252.87 696.51,-248.45 721,-245.38 837.69,-230.74 872.5,-261.64 985,-227.38 1009.77,-219.84 1034.92,-206.54 1055.96,-193.49"/>
+<polygon fill="#666666" stroke="#666666" points="1057.85,-196.43 1064.42,-188.12 1054.1,-190.53 1057.85,-196.43"/>
+<text text-anchor="middle" x="1073.5" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">Ascend (LLM calls)</text>
+</g>
+<!-- defend&#45;&gt;inference -->
+<g id="edge9" class="edge">
+<title>defend&#45;&gt;inference</title>
+<path fill="none" stroke="#666666" d="M377.47,-245.35C387.74,-239.97 397.9,-233.95 407,-227.38 416.94,-220.21 415.59,-213.85 426,-207.38 441.7,-197.62 459.42,-189.6 477.26,-183.05"/>
+<polygon fill="#666666" stroke="#666666" points="478.9,-186.18 487.17,-179.56 476.57,-179.58 478.9,-186.18"/>
+<text text-anchor="middle" x="509" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">antman/hulk/quicksilver/thor (g4dn)</text>
+</g>
+<!-- defend&#45;&gt;system_ -->
+<g id="edge11" class="edge">
+<title>defend&#45;&gt;system_</title>
+<path fill="none" stroke="#666666" d="M294.69,-245.22C292.75,-239.41 291.03,-233.28 290,-227.38 287.83,-215.01 289.63,-201.51 292.64,-189.63"/>
+<polygon fill="#666666" stroke="#666666" points="296.1,-190.27 295.52,-179.69 289.37,-188.32 296.1,-190.27"/>
+<text text-anchor="middle" x="301.5" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">state</text>
+</g>
+<!-- defend&#45;&gt;ownkeys -->
+<g id="edge13" class="edge">
+<title>defend&#45;&gt;ownkeys</title>
+<path fill="none" stroke="#666666" stroke-dasharray="5,2" d="M401.19,-247.2C404.49,-246.54 407.77,-245.93 411,-245.38 533.94,-224.52 567.14,-241.86 691,-227.38 790.7,-215.73 902.82,-196.29 985.67,-180.71"/>
+<polygon fill="#666666" stroke="#666666" points="986.45,-184.13 995.63,-178.83 985.15,-177.25 986.45,-184.13"/>
+<text text-anchor="middle" x="884" y="-220.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">Defend frontier</text>
+<text text-anchor="middle" x="884" y="-210.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">(optional, off by default)</text>
+</g>
+<!-- ascend&#45;&gt;defend -->
+<g id="edge7" class="edge">
+<title>ascend&#45;&gt;defend</title>
+<path fill="none" stroke="#666666" d="M275.72,-351.16C280.24,-340.35 285.74,-327.2 290.86,-314.96"/>
+<polygon fill="#666666" stroke="#666666" points="294.23,-315.98 294.86,-305.41 287.77,-313.28 294.23,-315.98"/>
+<text text-anchor="middle" x="318" y="-326.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">/api/v1/detect</text>
+</g>
+<!-- ascend&#45;&gt;inference -->
+<g id="edge8" class="edge">
+<title>ascend&#45;&gt;inference</title>
+<path fill="none" stroke="#666666" d="M325.68,-366.25C446.6,-349.65 709.66,-312.77 716,-305.38 745.28,-271.27 724.56,-237.29 691,-207.38 681.13,-198.58 669.46,-190.89 657.63,-184.33"/>
+<polygon fill="#666666" stroke="#666666" points="659.05,-181.12 648.57,-179.53 655.77,-187.3 659.05,-181.12"/>
+<text text-anchor="middle" x="756" y="-273.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">thanos (g5)</text>
+</g>
+<!-- ascend&#45;&gt;system_ -->
+<g id="edge10" class="edge">
+<title>ascend&#45;&gt;system_</title>
+<path fill="none" stroke="#666666" d="M223.37,-351.07C206.95,-339.65 189.99,-324.26 181,-305.38 169.53,-281.31 164.94,-266.67 181,-245.38 198.54,-222.13 219.47,-243.08 244,-227.38 259.75,-217.3 273.67,-201.94 284.22,-188.09"/>
+<polygon fill="#666666" stroke="#666666" points="287.26,-189.86 290.34,-179.72 281.61,-185.73 287.26,-189.86"/>
+<text text-anchor="middle" x="192.5" y="-273.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">state</text>
+</g>
+<!-- inference&#45;&gt;s3models -->
+<g id="edge14" class="edge">
+<title>inference&#45;&gt;s3models</title>
+<path fill="none" stroke="#666666" stroke-dasharray="5,2" d="M540.24,-126.4C506.42,-107.35 462.24,-82.46 430.56,-64.6"/>
+<polygon fill="#666666" stroke="#666666" points="538.61,-129.5 549.04,-131.36 542.05,-123.41 538.61,-129.5"/>
+<text text-anchor="middle" x="529" y="-96.3" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">pull weights</text>
+<text text-anchor="middle" x="529" y="-86.3" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">(init container)</text>
+</g>
+<!-- artifact&#45;&gt;ecr -->
+<g id="edge15" class="edge">
+<title>artifact&#45;&gt;ecr</title>
+<path fill="none" stroke="#666666" stroke-dasharray="5,2" d="M659.38,-355.98C687.39,-349.84 717.64,-342.26 745,-333.38 770.4,-325.14 797.61,-313.75 820.61,-303.32"/>
+<polygon fill="#666666" stroke="#666666" points="822.23,-306.42 829.86,-299.07 819.31,-300.06 822.23,-306.42"/>
+<text text-anchor="middle" x="802" y="-326.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">mirror images</text>
+</g>
+<!-- artifact&#45;&gt;s3models -->
+<g id="edge16" class="edge">
+<title>artifact&#45;&gt;s3models</title>
+<path fill="none" stroke="#666666" stroke-dasharray="5,2" d="M458.81,-362.92C349.21,-349.43 186.3,-326.22 166,-305.38 108.97,-246.83 110.51,-184.16 163,-121.5 202.6,-74.22 272.04,-54.95 323.72,-47.11"/>
+<polygon fill="#666666" stroke="#666666" points="324.39,-50.55 333.81,-45.68 323.41,-43.61 324.39,-50.55"/>
+<text text-anchor="middle" x="169.5" y="-215.18" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#444444">sync model weights</text>
+</g>
+</g>
+</svg>
+      </div>
+      <div class="callout note"><b>Note:</b> Solid arrows are runtime traffic inside the customer's VPC. Dashed red arrows only happen at install/upgrade time (or continuously, for trial-key mode) and cross back to Straiker-hosted services; everything else never leaves the customer's AWS account. Defend's link to customer-owned AI providers is optional (frontier second opinion, off by default) — Ascend's is not optional.</div>
+
+      <h3 id="sec1-4">1.4 Quick start commands</h3>
+      <p>Covers the full lifecycle: install, verify, lock down the default admin, and tear down.</p>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">1. Install — self-provisioned EKS cluster</h4>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- --install-eks --aws-region us-east-1</code></pre>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">1. Install — attach to a cluster the customer already has</h4>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash</code></pre>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">1. Install — non-interactive (all required flags supplied up front)</h4>
+      <p><code>--straiker-customer-name</code>, <code>--straiker-customer-key</code>, and <code>--products</code> are required either way — the bare commands above just prompt for them interactively. Spell them out for a scripted/FDE-led run:</p>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- \
+  --install-eks --aws-region us-east-1 \
+  --straiker-customer-name &lt;name&gt; --straiker-customer-key &lt;key&gt; \
+  --products defend,ascend --yes</code></pre>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">2. Check status</h4>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- --status</code></pre>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">3. Required — remove the builtin admin</h4>
+      <div class="callout flag"><b>Required, not optional:</b> This has to happen before handing the deployment to the customer — it isn't a hardening nice-to-have. Every on-prem install ships the same static bootstrap login (<code>admin@&lt;domain&gt;</code>) with the same password hash across every install — leaving it enabled means a live credential shared across every Straiker on-prem customer, not a POV-only convenience. Treat it as a blocking item on the install checklist:
+        <ol style="margin:10px 0 4px; padding-left:20px;">
+          <li>Help the customer create their own initial admin user — a local account through the UI, or their OIDC IdP once wired in.</li>
+          <li>Remove the builtin admin from within the Straiker admin console.</li>
+        </ol>
+        This isn't a CLI flag; it's done in-product, and the step isn't done until (2) is confirmed complete.
+      </div>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">4. Pick up new artifacts / models (--rerun-phase)</h4>
+      <p>Whenever Straiker publishes new model weights, container images, or a newer chart/bundle version and it doesn't warrant a full reinstall, re-target just the affected phase(s). <code>--rerun-phase</code> forces an already-"done" phase to run again — most phase state is idempotency-cached in <code>~/.straiker/install.json</code> and is otherwise skipped on a plain re-run:</p>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- \
+  --phase artifacts-sync --rerun-phase</code></pre>
+      <p>That alone just re-mirrors images/models into the customer's own ECR/S3 — it doesn't roll anything out. To actually move the running model pods onto the new version, chain <code>straiker-inference</code> in the same run (add <code>--chart-version</code> if you're also pinning a specific chart release):</p>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- \
+  --phase artifacts-sync,straiker-inference --rerun-phase</code></pre>
+
+      <h4 style="margin:18px 0 6px;color:var(--heading);font-size:14.5px;">5. Uninstall / teardown</h4>
+      <pre class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/uninstall.sh | bash -s -- --destroy-eks --yes</code></pre>
+
+      <div class="callout note"><b>Note:</b> Before running any of these: confirm which AWS account/region the shell's credentials actually point at (there's no dry-run) and have the customer name/key ready — omitting them just means an interactive prompt mid-install, not a skip.</div>
+    </section>
+
+    <section id="sec2">
+      <h2>2. Prerequisites</h2>
+
+      <h3 id="sec2-1">2.1 Tooling (wherever the installer is run from)</h3>
+      <p><code>kubectl</code>, <code>helm</code>, <code>aws</code> CLI, <code>python3</code>, <code>openssl</code>, <code>curl</code>, <code>unzip</code>, and <code>tofu</code> (OpenTofu, pinned to 1.11.6 — the installer can fetch it itself with <code>--install-tofu</code>). <code>gcloud</code> is only needed on the GCP path.</p>
+
+      <h3 id="sec2-2">2.2 AWS account &amp; IAM</h3>
+      <ul class="bullets">
+        <li>Standard path (installer provisions the VPC): needs the usual EC2/VPC create permissions (<code>CreateVpc</code>, <code>CreateSubnet</code>, <code>CreateNatGateway</code>, etc.) plus EKS and IAM permissions to stand up the cluster.</li>
+        <li>Bring-your-own-VPC path (<code>--vpc-id</code> + subnet IDs): for accounts whose Organizations SCP blocks <code>ec2:CreateVpc</code>. Only needs <code>ec2:DescribeVpcs</code>, <code>DescribeSubnets</code>, <code>DescribeRouteTables</code>, <code>CreateTags</code>, <code>DeleteTags</code> — but the installer will not create a NAT gateway in this mode, so the customer's private subnets must already have outbound routing.</li>
+        <li>Karpenter's IAM role needs inline <code>CreateInstanceProfile</code>/<code>DeleteInstanceProfile</code> permissions (the upstream terraform-aws-modules/karpenter module doesn't ship these).</li>
+        <li>If AI provider mode is Bedrock: the installer calls <code>bedrock-runtime invoke-model</code> during preflight to catch SCP denials or missing model access before deploying anything.</li>
+      </ul>
+
+      <h3 id="sec2-3">2.3 Kubernetes</h3>
+      <p>If the customer brings their own cluster instead of <code>--install-eks</code>: Kubernetes ≥ 1.28 (charts declare <code>kubeVersion: ">=1.28.0-0"</code>), a working Karpenter installation with healthy CRDs/controller, and a resolvable default StorageClass. If the installer provisions EKS itself, it defaults to cluster version 1.35.</p>
+
+      <h3 id="sec2-4">2.4 Network, DNS, and certificates</h3>
+      <ul class="bullets">
+        <li>Bring-your-own-VPC needs ≥ 2 private subnets across ≥ 2 AZs, plus public subnets — all three flags supplied together or none.</li>
+        <li><code>alb</code> / <code>xalb</code> edge types need an ACM certificate ARN by default, or an existing Route53 hosted zone in the same account to auto-issue and DNS-validate one.</li>
+        <li><code>tailscale</code> edge type needs a Route53 zone for the custom domain in the same account (cert-manager writes DNS-01 challenge records there), plus manual DNS records the customer adds after install, pointed at the assigned Tailscale IP.</li>
+      </ul>
+
+      <h3 id="sec2-5">2.5 Secrets &amp; credentials to have on hand</h3>
+      <ul class="bullets">
+        <li>Straiker customer name + customer key — required; gates image mirroring and model sync via Straiker's artifact broker, and resolves the account's product SKU.</li>
+        <li>An AI provider is no longer an Ascend-only concern. Defend's Argus can route borderline detections to a frontier LLM as a second opinion to reduce false positives (<code>frontier.enabled</code> in straiker-defend's values, off by default) — enabling it needs Bifrost configured with a real Bedrock and/or Anthropic provider, same as Ascend. The three modes are the same either way: own-keys (customer supplies OpenAI/Anthropic/xAI keys), bedrock (no static keys, but requires Bedrock model-access grants for Claude Haiku 4.5 and Claude Sonnet 4.6 in-region), or trial-key (Straiker-hosted key, capped at 30 days, POC use only).</li>
+        <li>If edge type is tailscale: a Tailscale OAuth client (customer's own tailnet, scoped to <code>tag:k8s-operator</code>) plus a cluster-issuer email for Let's Encrypt.</li>
+      </ul>
+      <div class="callout flag"><b>Flag for SE/FDE:</b> The installer's automatic <code>ai-provider-secrets</code> phase only fires when Ascend is selected. On a Defend-only POV where the customer wants frontier false-positive reduction turned on, nobody automates the Bifrost/Bedrock credential wiring — an FDE has to set it up manually (values override + writing the secret) outside the standard phase flow. Confirm during scoping whether Defend-only means "no AI provider needed" or "frontier is wanted, so plan the manual step."</div>
+
+      <h3 id="sec2-6">2.6 GPU capacity</h3>
+      <p>Model serving runs on GPU-backed Karpenter nodes (instance families g4dn, g5, g6e). The installer throttles itself to 4 concurrent model installs specifically to avoid tripping the account's GPU instance quota mid-install — but if the target region's default vCPU/GPU quota for those families is low (a common default for accounts that have never run GPU workloads), the install stalls waiting for nodes Karpenter can't launch.</p>
+      <div class="callout flag"><b>Flag for SE/FDE:</b> A customer's first-ever GPU workload in an AWS account is one of the most common places a POV install stalls. Request a quota increase for the relevant instance families in the target region before the install date, not during it.</div>
+    </section>
+
+    <section id="sec3">
+      <h2>3. Sizing &amp; specs</h2>
+
+      <h3 id="sec3-1">3.1 Cluster topology (--provision-strategy)</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Strategy</th><th>System node group (min/max/desired)</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>min (default)</td><td>1 / 1 / 1</td><td>Single AZ, single NAT gateway. Cheapest, fastest to stand up, and what most POVs run — but explicitly a POC-only topology: an AZ outage takes the whole install down.</td></tr>
+          <tr><td>ha</td><td>2 / 3 / 2</td><td>Multi-AZ, one NAT gateway per AZ.</td></tr>
+          <tr><td>max</td><td>3 / 5 / 3</td><td>Multi-AZ, one NAT gateway per AZ, higher ceiling.</td></tr>
+        </tbody>
+      </table></div>
+      <p>System nodes run only Karpenter and cluster add-ons (tainted <code>CriticalAddonsOnly</code>) on <code>m5.large</code> / <code>m5a.large</code>. <code>--provision-strategy</code>, <code>--cloud-provider</code>, and any <code>--vpc-id</code>/subnet flags are first-run-only — changing them later means deleting <code>~/.straiker/install.json</code> and starting over, since neither cloud's Terraform provider supports live topology migration.</p>
+
+      <h3 id="sec3-2">3.2 Karpenter NodePools (where workloads actually land)</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Pool</th><th>Instance families</th><th>Taint</th><th>Limits</th></tr></thead>
+        <tbody>
+          <tr><td>straiker-gpu</td><td>g4dn, g5, g6e</td><td><code>nvidia.com/gpu:NoSchedule</code></td><td>20 GPUs total; 200Gi gp3 root volume per node</td></tr>
+          <tr><td>straiker-argus</td><td>m6g/c6g/m7g/c7g (arm64), xlarge–4xlarge</td><td><code>purpose=straiker-argus:NoSchedule</code></td><td>100 vCPU / 400Gi memory</td></tr>
+          <tr><td>straiker-iris</td><td>m6g/c6g/m7g/c7g (arm64), xlarge–2xlarge</td><td><code>purpose=straiker-iris:NoSchedule</code></td><td>100 vCPU / 400Gi memory</td></tr>
+          <tr><td>straiker-shared</td><td>m6g/c6g/m7g/c7g (arm64), large–xlarge</td><td>none (untainted)</td><td>50 vCPU / 200Gi memory — hosts Postgres/OpenSearch/Redis/Benthos</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="sec3-3">3.3 Per-model GPU requirements (straiker-inference)</h3>
+      <p>Each product model gets its own Helm release and its own GPU node. Default tier by model:</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>GPU tier</th><th>GPU / VRAM</th><th>Host resources (req → limit)</th><th>Models on this tier by default</th></tr></thead>
+        <tbody>
+          <tr><td>g4dn</td><td>T4, 16GB</td><td>2 vCPU / 8Gi → 4 vCPU / 12Gi</td><td>antman, hulk, quicksilver, thor (Defend/Argus backends)</td></tr>
+          <tr><td>g5</td><td>A10G, 24GB</td><td>4 vCPU / 16Gi → 8 vCPU / 24Gi</td><td>thanos (Ascend/Iris's UnalignedLLM), quantized by default</td></tr>
+          <tr><td>g6e</td><td>L40S, 48GB</td><td>8 vCPU / 32Gi → 16 vCPU / 48Gi</td><td>available for thanos unquantized</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout note"><b>Note:</b> vision and wanda are temporarily disabled as of this writing; confirm the current model set against <code>charts/image-tags.yaml</code> at demo time — this list moves.</div>
+
+      <h3 id="sec3-4">3.4 Core service resource requests</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Service</th><th>Requests → Limits</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Postgres</td><td>500m/1Gi → 2 vCPU/4Gi</td><td>20Gi PVC</td></tr>
+          <tr><td>OpenSearch</td><td>500m/1Gi → 2 vCPU/2Gi</td><td>10Gi PVC, single-node</td></tr>
+          <tr><td>Valkey (Redis)</td><td>100m/256Mi → 500m/512Mi</td><td></td></tr>
+          <tr><td>Bifrost (LLM gateway)</td><td>250m/128Mi → 1 vCPU/512Mi</td><td>1 replica</td></tr>
+          <tr><td>Frontend</td><td>250m/256Mi → 1 vCPU/1Gi</td><td>1 replica</td></tr>
+          <tr><td>Argus (Defend)</td><td>500m/3Gi → uncapped CPU/6Gi</td><td>HPA available, disabled by default (min 2 / max 10)</td></tr>
+          <tr><td>Iris control plane (Ascend)</td><td>500m/512Mi → 1Gi</td><td>HPA-capable, disabled by default</td></tr>
+          <tr><td>Straiker-edge (Caddy)</td><td>100m/64Mi → 500m/256Mi</td><td>1 replica</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="sec4">
+      <h2>4. Cost (AWS list pricing, us-east-1, on-demand)</h2>
+      <p>These are rough, illustrative monthly figures from public on-demand pricing — confirm against the AWS Pricing Calculator for the actual target region and any committed-use discounts. They exclude data transfer, support plan, and Straiker license/subscription cost.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>Unit price</th><th>Est. monthly (1 unit)</th><th>Where it's used</th></tr></thead>
+        <tbody>
+          <tr><td>EKS control plane</td><td>$0.10/hr</td><td>~$73</td><td>Always — one per cluster</td></tr>
+          <tr><td>m5.large (system node)</td><td>$0.096/hr</td><td>~$70</td><td>System node group, 1–3 nodes by strategy</td></tr>
+          <tr><td>NAT gateway</td><td>$0.045/hr + $0.045/GB processed</td><td>~$33 + data</td><td>1 (min) to 3 (max) by strategy</td></tr>
+          <tr><td>g4dn.xlarge (T4 GPU)</td><td>$0.526/hr</td><td>~$384</td><td>Per Defend/Argus model instance</td></tr>
+          <tr><td>g5.xlarge (A10G GPU)</td><td>$1.006/hr</td><td>~$734</td><td>Per Ascend/Iris (thanos) model instance</td></tr>
+          <tr><td>g6e.xlarge (L40S GPU)</td><td>$1.86/hr</td><td>~$1,357</td><td>Only if thanos runs unquantized</td></tr>
+          <tr><td>gp3 EBS + S3 (models/state)</td><td>~$0.08/GB-mo (EBS), ~$0.023/GB-mo (S3)</td><td>$20–$100 typical POV</td><td>Node root volumes, model weight storage</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="sec4-1">4.1 Illustrative POV scenarios</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Scenario</th><th>What's running</th><th>Rough monthly compute</th></tr></thead>
+        <tbody>
+          <tr><td>Defend-only POV, min strategy</td><td>EKS + 1 system node + 1 NAT + 1 GPU model (g4dn)</td><td>~$560–$650</td></tr>
+          <tr><td>Defend + Ascend POV, min strategy</td><td>Above + Ascend's thanos on g5</td><td>~$1,300–$1,450</td></tr>
+          <tr><td>HA pilot (ha strategy)</td><td>Multi-AZ system nodes + multi-NAT + same model set</td><td>add ~$150–$250 to the above</td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout note"><b>Note:</b> These assume one instance per required model and don't include the shared-pool node running Postgres/OpenSearch/Redis (typically another m-family instance, ~$70–$140/mo) or storage. Treat as a starting order-of-magnitude for a customer budget conversation, not a quote.</div>
+    </section>
+
+    <section id="sec5">
+      <h2>5. How new models get delivered</h2>
+      <p>Models are not pulled from the internet at inference time — they're mirrored into the customer's own account once, then served from there.</p>
+      <ul class="bullets">
+        <li>Straiker maintains a source ECR registry and a source models bucket. During install, the aws-artifacts phase provisions a customer-owned ECR mirror and S3 bucket; the artifacts-sync phase runs in-cluster jobs that mirror ~17 container images and rclone-sync only the model weights the selected products actually need (about 10GB per model) — authenticated via the customer's Straiker customer key against Straiker's artifact broker.</li>
+        <li>straiker-inference then pulls each model's weights from the customer's own S3 bucket via an init container, never from the internet directly.</li>
+        <li>New model releases: Straiker bumps a central image-tags file and re-runs its own lint/propagation tooling, which updates every consuming chart and bumps chart versions. Customers pick these up by re-running the installer against a newer published chart/bundle version — typically <code>--rerun-phase</code> on <code>artifacts-sync</code> and <code>straiker-inference</code>, or a targeted <code>--phase</code> run.</li>
+        <li>Install concurrency for models is capped at 4 simultaneous Helm installs (to avoid GPU quota spikes), which also bounds how fast a large model rollout lands.</li>
+        <li>There's no separate license-key file mechanism — the customer key doubles as the entitlement check (it resolves a product SKU that determines which images/models the install will even attempt).</li>
+      </ul>
+    </section>
+
+    <section id="sec6">
+      <h2>6. Updates &amp; upgrades</h2>
+      <ul class="bullets">
+        <li>Every phase does a <code>helm upgrade --install</code>, so re-running the installer against a newer version is an in-place upgrade, not a reinstall.</li>
+        <li>The installer itself ships as a versioned bundle (installer script + Terraform modules) published to a <code>dist</code> branch; <code>--upgrade-installer</code> forces a re-download of the latest bundle.</li>
+        <li><code>--chart-version</code> pins/bumps chart versions explicitly (per-model overrides exist too); <code>--phase</code>, <code>--from-phase</code>, and <code>--rerun-phase</code> let an SE/FDE re-target just the phases that changed instead of running the full sequence.</li>
+        <li>Settings like <code>--ai-provider-mode</code> and <code>--edge-type</code> can be changed on a later run. <code>--cloud-provider</code>, <code>--provision-strategy</code>, and VPC/subnet flags are first-run-only and permanent for that install.</li>
+        <li>Progress and configuration live in <code>~/.straiker/install.json</code> (per-phase status, resolved region/cluster/ARNs/flags); <code>--status</code> renders it as a human-readable summary.</li>
+        <li>Certificate rotation for alb/xalb is a standalone action (<code>--update-alb-certificate</code>) that doesn't require a phase re-run; Route53-validated ACM certs auto-renew and don't need this.</li>
+        <li>Uninstall runs the exact same way as install — <code>curl -fsSL .../dist/uninstall.sh | bash</code> (see 1.4) — not a locally-downloaded script. It reads the same <code>~/.straiker/install.json</code> state file to know what to tear down; <code>--destroy-eks</code> additionally destroys the cluster and Terraform state bucket and is interactive-by-default (types the cluster name to confirm). <code>nuke-eks.sh</code> is the one exception — a manual, interactive-only escape hatch for teardowns that get stuck (orphaned NAT/LB/IAM), and it deliberately refuses to run via <code>curl | bash</code>.</li>
+      </ul>
+      <div class="callout flag"><b>Flag for SE/FDE:</b> <code>--destroy-eks</code> and <code>nuke-eks.sh</code> are genuinely destructive and <code>nuke-eks.sh</code> deliberately refuses to run non-interactively — factor this into repeated POV teardown/rebuild cycles; it can't be scripted headless.</div>
+    </section>
+
+    <section id="sec7">
+      <h2>7. Edge / networking options (--edge-type)</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Type</th><th>How traffic reaches the app</th><th>Needs</th></tr></thead>
+        <tbody>
+          <tr><td>none (default)</td><td>No ingress installed — customer brings their own</td><td>—</td></tr>
+          <tr><td>internal</td><td>Caddy reverse proxy, self-signed certs</td><td>Nothing external</td></tr>
+          <tr><td>tailscale</td><td>Customer's own tailnet as L3 transport; Caddy + cert-manager issue a real browser-trusted cert via Let's Encrypt DNS-01</td><td>Tailscale OAuth client, Route53 zone in-account, manual DNS records post-install</td></tr>
+          <tr><td>alb</td><td>Internal-only AWS ALB, host-based routing</td><td>ACM cert ARN or Route53 auto-issue</td></tr>
+          <tr><td>xalb</td><td>Internet-facing ALB, same as above plus optional ExternalDNS</td><td>ACM cert ARN or Route53 auto-issue; <code>--xalb-route53</code> for automatic DNS records</td></tr>
+        </tbody>
+      </table></div>
+      <p>The alb path also supports an optional SSM-only bastion (t3.micro, no public IP or SSH) for pre-handoff verification, and defaults inbound access to the VPC CIDR rather than 0.0.0.0/0.</p>
+    </section>
+
+    <section id="sec8">
+      <h2>8. Questions to ask before committing to an on-prem POV</h2>
+
+      <h3>8.1 AWS account &amp; access</h3>
+      <ul class="bullets">
+        <li>Is this a fresh AWS account/VPC, or does it have an Organizations SCP that blocks VPC creation? (Determines standard vs. bring-your-own-VPC path.)</li>
+        <li>Who can grant IAM permissions for cluster creation — and how long does that approval typically take in this org?</li>
+        <li>What is the account's current GPU instance quota (g4dn/g5/g6e) in the target region? Has this account ever run a GPU workload before?</li>
+        <li>Is there an existing EKS cluster we should attach to instead of provisioning one, and if so, is Karpenter already installed and healthy on it?</li>
+      </ul>
+
+      <h3>8.2 Networking, DNS, and identity</h3>
+      <ul class="bullets">
+        <li>Do they control a Route53 hosted zone for the domain we'll use, or will DNS be handled entirely outside AWS?</li>
+        <li>Is the deployment reachable only internally (VPN/Tailscale/internal ALB) or does it need to be internet-facing?</li>
+        <li>Do they have an existing OIDC IdP they want wired in immediately, or is the built-in bootstrap admin acceptable for the length of the POV?</li>
+      </ul>
+
+      <h3>8.3 AI / model providers</h3>
+      <ul class="bullets">
+        <li>Which product(s) are in scope — Defend only, or Defend + Ascend? Don't assume Defend-only means no AI provider is needed: Ascend always needs one (and adds the thanos GPU model), but Defend now can too if the customer wants its frontier LLM second opinion for false-positive reduction turned on.</li>
+        <li>Whichever component needs it: own API keys, Bedrock, or the 30-day trial key? If Bedrock, has the customer already requested model access for the required Claude models in-region?</li>
+        <li>If it's Defend-only with frontier wanted, flag that the credential wiring isn't automated by the installer the way it is for Ascend — budget FDE time for the manual setup (2.5).</li>
+        <li>Any data-residency or model-provider constraints (e.g. no calls to a specific third-party provider) that rule out one of the AI provider modes?</li>
+      </ul>
+
+      <h3>8.4 Scale, timeline, and support model</h3>
+      <ul class="bullets">
+        <li>Is this a short evaluation (min strategy is fine) or does it need to demonstrate production-grade resilience (ha/max, multi-AZ)?</li>
+        <li>Who owns the AWS bill for the POV, and is there a budget ceiling we should size the deployment against (Section 4)?</li>
+        <li>Who on the customer side will actually run the installer and hold AWS credentials — their own platform team, or does this need to be FDE-led end to end?</li>
+        <li>What's the expected teardown/rebuild cadence? (Repeated destroy/recreate cycles hit the interactive-only guardrails in Section 6.)</li>
+        <li>Is a security review of the shared bootstrap admin credential and default topology (min strategy) required before sign-off, and by when?</li>
+      </ul>
+    </section>
+
+    <section id="sec9">
+      <h2>9. Summary: things to flag early</h2>
+      <ul class="bullets">
+        <li>min provisioning strategy (the default) is single-AZ and explicitly POC-only — don't let it become the production topology by default.</li>
+        <li>The built-in bootstrap admin login shares the same password hash across every on-prem install. Help the customer create their own initial admin user (local account through the UI, or OIDC), then remove the builtin admin from within the Straiker admin console — don't leave it enabled past onboarding.</li>
+        <li><code>--cloud-provider</code>, <code>--provision-strategy</code>, and VPC/subnet choices are permanent once set — get these right on the first run.</li>
+        <li>GPU quota is the most common install-day blocker; check it ahead of time, not during the install.</li>
+        <li>Bedrock mode has an AWS-console prerequisite (model access grants) that lives outside the installer entirely — confirm it's done before kickoff.</li>
+        <li>Teardown of EKS/VPC infrastructure is intentionally interactive-only and cannot be scripted headless — plan POV rebuild cycles accordingly.</li>
+        <li>"Defend only" is no longer a reliable shorthand for "no AI provider needed" — Defend's frontier false-positive reduction has the same Bifrost/Bedrock/Anthropic dependency Ascend does, just off by default and not wired into the automatic secrets phase.</li>
+        <li>Everything above is the pre-Discover 2.0 design — there's no data platform component in this architecture today. Don't present this as the long-term architecture in a deal that will land post-Discover 2.0; confirm with product/engineering what's changing before committing to specifics with a customer.</li>
+      </ul>
+      <a class="back-to-top" href="#sec1">↑ Back to top</a>
+    </section>
+
+    <footer class="doc-footer">
+      Source-verified against onprem-installer @ main (install-straiker.sh, terraform/aws, charts/*) on 2026-08-26. Re-check version-sensitive details (model list, chart versions, pricing) before quoting to a customer.
+    </footer>
+  </main>
+</div>

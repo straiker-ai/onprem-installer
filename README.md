@@ -49,20 +49,23 @@ once set, it's permanent for the install recorded in `~/.straiker/install.json`.
 
 Every install ships with a bootstrap admin login (`admin@straiker.internal`, fixed regardless of
 your own domain — it's a one-time bootstrap identity, unrelated to how the install is actually
-reached) so you can log in on day one — but it uses the same password hash on every onprem
-install, so it shouldn't stay enabled indefinitely. Your Straiker contact provides the password
-for this login as part of onboarding (it's not published here). Once you've onboarded a real admin
-(a local account created through the UI, or your own configured OIDC IdP), disable it:
+reached) so you can log in on day one. Its password is randomly generated per-install (not the
+same across installs, and not published anywhere) — retrieve it with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/install.sh | bash -s -- --disable-builtin-admin
+kubectl get secret straiker-secrets -n straiker -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
-This is a standalone action, not a phase — it doesn't need `--phase`/`--rerun-phase`. It prompts
-for confirmation (type `disable`) unless you pass `--yes`, and only removes that one static login;
-dex's own dynamically-managed local logins and any configured external IdP are unaffected. To
-re-enable it later, run a normal install with `--values` setting
-`straiker-frontend.dex.staticAdminEnabled: true`.
+(adjust the namespace if you didn't use the default). Once you've onboarded a real admin (a local
+account created through the UI, or your own configured OIDC IdP), delete the bootstrap admin's
+user account from within Straiker itself so it can no longer reach the product. Its dex-level
+static login can't be deleted outright — dex treats `staticPasswords` entries as read-only — only
+fully disabled, with a normal install passing `--values` setting
+`straiker-frontend.dex.staticAdminEnabled: false`. To re-enable it later, run a normal install with
+`--values` setting `straiker-frontend.dex.staticAdminEnabled: true` — this restores the same
+password generated on first install (retrieved the same way above), not a new one; to force a new
+one, delete the `BOOTSTRAP_ADMIN_PASSWORD`/`BOOTSTRAP_ADMIN_PASSWORD_HASH` keys from the
+`straiker-secrets` Secret first and re-run `--phase shared-secrets --rerun-phase` before re-enabling.
 
 ## Uninstall
 
