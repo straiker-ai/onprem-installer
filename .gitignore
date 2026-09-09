@@ -1,4 +1,5 @@
 CLAUDE.md
+.DS_Store
 *.tgz
 /dist/
 .claude/

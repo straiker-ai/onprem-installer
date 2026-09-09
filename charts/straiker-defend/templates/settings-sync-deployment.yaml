@@ -44,11 +44,7 @@ spec:
             - name: SYS__REDIS_URL
               value: {{ include "defend.redisUrl" . | quote }}
           resources:
-            requests:
-              cpu: 500m
-              memory: "1Gi"
-            limits:
-              memory: "1Gi"
+            {{- toYaml .Values.settingsSync.resources | nindent 12 }}
       {{- include "defend.nodeSelector" . | nindent 6 }}
       {{- with .Values.tolerations }}
       tolerations:

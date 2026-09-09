@@ -8,12 +8,27 @@ imagePullSecrets: []
 
 replicas: 1
 
-# Baseline Argus sizing from prior on-prem defaults.
+# Argus is the detection *frontend* — it runs no models itself, it fans out to
+# charts/straiker-inference's per-model Services and blocks on them (see
+# llmEndpoints below, and CUSTOMER__RUNTIME__IO_TIMEOUT). That request path is
+# I/O-bound, so the CPU request is sized for steady state, not peak: bursts are
+# absorbed by node headroom, since no cpu limit is set (deliberate — a limit
+# here would mean CFS throttling on exactly the latency-sensitive path).
+#
+# 300m replaces an unmeasured 500m carried over from prior on-prem defaults.
+# The 500m was above steady-state need and, combined with settingsSync's own
+# request, could exhaust allocatable CPU on 2-vCPU shared-pool nodes once a
+# customer DaemonSet (e.g. GuardDuty's 200m) joined — leaving argus unable to
+# schedule at all.
+#
+# Raise this for high-QPS installs, or enable the hpa below. Setting
+# limits.cpu is supported but off by default.
 resources:
   requests:
-    cpu: "500m"
+    cpu: "300m"
     memory: "3Gi"
   limits:
+    # cpu: omitted by default — see above. Set to enable a hard CPU ceiling.
     memory: "6Gi"
 
 image:
@@ -57,6 +72,18 @@ pdb:
 # settings sync specifically), not a signal to disable it here.
 settingsSync:
   enabled: true
+
+  # A single-replica polling daemon (argus.daemons.settings_synchronizer) that
+  # pulls settings from Foundation into Redis — not on any request path. These
+  # were previously hardcoded in settings-sync-deployment.yaml at 500m/1Gi,
+  # i.e. the same CPU request as the main detection service and unreachable by
+  # --values. Sized down to match what the daemon actually does.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      memory: "512Mi"
 
 foundation:
   # Foundation (tenant/app/settings control plane) is straiker-frontend in

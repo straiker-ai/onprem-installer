@@ -158,12 +158,25 @@ code{ background:var(--code-bg); padding:1px 6px; border-radius:4px; font-size:0
 pre.cmd{ background:#161d2b; color:#eaf0ff; border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.55; margin:10px 0 18px; box-shadow:var(--shadow); }
 pre.cmd code{ background:none; padding:0; color:inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
-.diagram-wrap{ background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:18px; box-shadow:var(--shadow); overflow-x:auto; }
-.diagram-wrap svg{ max-width:100%; height:auto; display:block; margin:0 auto; }
-:root[data-theme="dark"] .diagram-wrap svg, :root:not([data-theme="light"]) .diagram-wrap svg {
+.diagram-wrap{ background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:18px; box-shadow:var(--shadow); overflow-x:auto; position:relative; cursor:zoom-in; }
+.diagram-wrap:hover{ box-shadow: 0 2px 10px rgba(20,30,60,0.14); }
+.diagram-surface svg{ max-width:100%; height:auto; display:block; margin:0 auto; }
+:root[data-theme="dark"] .diagram-surface svg, :root:not([data-theme="light"]) .diagram-surface svg {
   @media (prefers-color-scheme: dark) { filter: invert(0.92) hue-rotate(180deg); }
 }
-:root[data-theme="dark"] .diagram-wrap svg{ filter: invert(0.92) hue-rotate(180deg); }
+:root[data-theme="dark"] .diagram-surface svg{ filter: invert(0.92) hue-rotate(180deg); }
+
+.zoom-hint{ position:absolute; top:10px; right:10px; background:var(--accent-soft); color:var(--accent); font-size:11.5px; font-weight:600; padding:4px 10px; border-radius:999px; pointer-events:none; z-index:1; }
+
+.diagram-overlay{ display:none; position:fixed; inset:0; background:rgba(8,11,18,0.86); z-index:1000; padding:5vh 4vw; overflow:auto; cursor:zoom-out; }
+.diagram-overlay.open{ display:flex; align-items:flex-start; justify-content:center; }
+.diagram-overlay .diagram-surface{ background:var(--bg); border-radius:12px; padding:28px; cursor:default; margin:auto; }
+.diagram-overlay .diagram-surface svg{ width:1500px; max-width:none; }
+.diagram-close{ position:fixed; top:22px; right:28px; width:40px; height:40px; border-radius:50%; border:none; background:rgba(255,255,255,0.14); color:#fff; font-size:20px; line-height:1; cursor:pointer; z-index:1001; }
+.diagram-close:hover{ background:rgba(255,255,255,0.26); }
+@media (max-width: 700px){
+  .diagram-overlay .diagram-surface svg{ width:1100px; }
+}
 
 .back-to-top{ display:inline-block; margin-top:10px; font-size:12.5px; color:var(--muted); text-decoration:none; }
 .back-to-top:hover{ color:var(--accent); }
@@ -289,7 +302,9 @@ footer.doc-footer{ margin-top:60px; padding-top:20px; border-top:1px solid var(-
       <div class="callout note"><b>Note:</b> <code>--plan</code> prints this phase list with rationale; <code>--status</code> prints per-phase done/blocked/next against a running install. Individual phases can be re-targeted with <code>--phase</code>, <code>--from-phase</code>, and <code>--rerun-phase</code> without repeating the whole install.</div>
 
       <h3 id="sec1-3">1.3 Architecture diagram</h3>
-      <div class="diagram-wrap">
+      <div class="diagram-wrap" id="diagramWrap" role="button" tabindex="0" aria-label="Click to view the diagram full screen">
+        <span class="zoom-hint">🔍 Click to enlarge</span>
+        <div class="diagram-surface" id="diagramSurface">
 <svg width="1271pt" height="639pt"
  viewBox="0.00 0.00 1270.86 639.38" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 635.38)">
@@ -553,8 +568,9 @@ footer.doc-footer{ margin-top:60px; padding-top:20px; border-top:1px solid var(-
 </g>
 </g>
 </svg>
+        </div>
       </div>
-      <div class="callout note"><b>Note:</b> Solid arrows are runtime traffic inside the customer's VPC. Dashed red arrows only happen at install/upgrade time (or continuously, for trial-key mode) and cross back to Straiker-hosted services; everything else never leaves the customer's AWS account. Defend's link to customer-owned AI providers is optional (frontier second opinion, off by default) — Ascend's is not optional.</div>
+      <div class="callout note"><b>Note:</b> Click the diagram to view it full screen (press Esc or click outside to close). Solid arrows are runtime traffic inside the customer's VPC. Dashed red arrows only happen at install/upgrade time (or continuously, for trial-key mode) and cross back to Straiker-hosted services; everything else never leaves the customer's AWS account. Defend's link to customer-owned AI providers is optional (frontier second opinion, off by default) — Ascend's is not optional.</div>
 
       <h3 id="sec1-4">1.4 Quick start commands</h3>
       <p>Covers the full lifecycle: install, verify, lock down the default admin, and tear down.</p>
@@ -814,3 +830,44 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
     </footer>
   </main>
 </div>
+
+<div class="diagram-overlay" id="diagramOverlay">
+  <button class="diagram-close" id="diagramClose" aria-label="Close full-screen diagram">✕</button>
+</div>
+
+<script>
+(function () {
+  var wrap = document.getElementById('diagramWrap');
+  var surface = document.getElementById('diagramSurface');
+  var overlay = document.getElementById('diagramOverlay');
+  var closeBtn = document.getElementById('diagramClose');
+  if (!wrap || !surface || !overlay || !closeBtn) return;
+
+  var homeParent = surface.parentNode;
+  var homeNext = surface.nextSibling;
+
+  function openZoom() {
+    overlay.appendChild(surface);
+    overlay.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeZoom() {
+    if (homeNext) { homeParent.insertBefore(surface, homeNext); }
+    else { homeParent.appendChild(surface); }
+    overlay.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  wrap.addEventListener('click', openZoom);
+  wrap.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openZoom(); }
+  });
+  closeBtn.addEventListener('click', closeZoom);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeZoom();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && overlay.classList.contains('open')) closeZoom();
+  });
+})();
+</script>

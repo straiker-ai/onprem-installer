@@ -143,11 +143,7 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
           resources:
-            requests:
-              cpu: {{ .Values.resources.requests.cpu | quote }}
-              memory: {{ .Values.resources.requests.memory | quote }}
-            limits:
-              memory: {{ .Values.resources.limits.memory | quote }}
+            {{- toYaml .Values.resources | nindent 12 }}
       {{- include "defend.nodeSelector" . | nindent 6 }}
       {{- with .Values.tolerations }}
       tolerations:
