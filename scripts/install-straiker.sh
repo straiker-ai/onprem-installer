@@ -3466,17 +3466,31 @@ phase_straiker_defend() {
   "${cmd[@]}"
 }
 
-# Helm 4 defaults to server-side apply, where --force-conflicts is needed to
-# resolve a field-manager conflict from an out-of-band edit (e.g. `kubectl
-# set env`) instead of failing the upgrade outright. Helm 3's default
-# client-side apply doesn't hit that conflict in the first place and, on at
-# least some 3.x versions, doesn't have the flag at all -- passing an
-# unrecognized flag is a hard "unknown flag" error, not a harmless no-op, so
-# this must be feature-detected rather than assumed (confirmed live: AWS
-# CloudShell's preinstalled helm is older than a locally-installed Helm 4 and
-# rejected this flag outright).
-helm_supports_force_conflicts() {
-  helm upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'
+# --force-conflicts resolves a field-manager conflict from an out-of-band edit
+# (e.g. `kubectl set env`) instead of failing the upgrade outright. It is only
+# meaningful under server-side apply, and Helm rejects it outright otherwise:
+#   invalid client update option(s): forceConflicts enabled when serverSideApply disabled
+#
+# Helm 4 does NOT simply default to server-side apply, despite what an earlier
+# version of this comment claimed. Per `helm upgrade --help`, --server-side
+# defaults to "auto", and auto "defaults the value from the previous chart
+# release's method" -- so a release first installed by an older client-side
+# Helm keeps resolving to client-side on every later upgrade, no matter how new
+# the client is. That is exactly the Omada case: the release was created by AWS
+# CloudShell's preinstalled Helm, so a Helm 4 client passing --force-conflicts
+# alone still failed.
+#
+# Hence both flags travel together: --server-side=true is what makes
+# --force-conflicts meaningful, and --force-conflicts is what makes the
+# resulting client-side -> server-side field-ownership handover succeed rather
+# than erroring on every field Helm's old client-side manager owned.
+#
+# Still feature-detected, not assumed: Helm 3 has neither flag, and passing an
+# unrecognized one is a hard "unknown flag" error, not a harmless no-op.
+helm_ssa_conflict_flags() {
+  local help
+  help="$(helm upgrade --help 2>/dev/null || true)"
+  [[ "${help}" == *"--force-conflicts"* && "${help}" == *"--server-side"* ]]
 }
 
 # Iris automated red-teaming engine (Straiker's "Ascend" product) — only
@@ -3537,12 +3551,12 @@ phase_straiker_ascend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
-  # See helm_supports_force_conflicts's declaration above for why this can't
-  # just always be passed. (Note: `kubectl patch --type=json remove
-  # metadata/managedFields` does NOT work as an alternative fix on Helm 4 --
-  # the API server recomputes managedFields from the request and ignores a
-  # direct edit to that field.)
-  helm_supports_force_conflicts && cmd+=(--force-conflicts)
+  # See helm_ssa_conflict_flags's declaration above for why these can't just
+  # always be passed, and why they must be passed together. (Note: `kubectl
+  # patch --type=json remove metadata/managedFields` does NOT work as an
+  # alternative fix on Helm 4 -- the API server recomputes managedFields from
+  # the request and ignores a direct edit to that field.)
+  helm_ssa_conflict_flags && cmd+=(--server-side=true --force-conflicts)
   if [[ -n "${CHART_VERSION}" ]]; then
     cmd+=(--version "${CHART_VERSION}")
   fi
