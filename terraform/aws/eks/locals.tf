@@ -26,7 +26,12 @@ locals {
   # provision_strategy's concrete effects, computed once here rather than
   # inlined at each use site (network.tf's NAT/discovery-tag subnets, eks.tf's
   # system node group).
-  single_nat_gateway = var.provision_strategy == "min"
+  #
+  # var.single_nat_gateway decouples NAT count from provision_strategy so an
+  # ha/max install can still present one stable egress IP for downstream
+  # allow-listing (see that variable's own description). null = keep the
+  # historical coupling.
+  single_nat_gateway = var.single_nat_gateway != null ? var.single_nat_gateway : var.provision_strategy == "min"
 
   # Karpenter's EC2NodeClasses (charts/straiker-system) discover subnets by
   # the karpenter.sh/discovery tag (applied per-AZ via the vpc module's

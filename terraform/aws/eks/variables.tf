@@ -115,3 +115,79 @@ variable "provision_strategy" {
     error_message = "provision_strategy must be one of: min, ha, max"
   }
 }
+
+variable "single_nat_gateway" {
+  description = <<-EOT
+    Overrides how many NAT gateways (and therefore how many Elastic IPs) the
+    created VPC gets, independently of provision_strategy. null (default)
+    keeps the historical coupling: one NAT under provision_strategy=min, one
+    per registered AZ under ha/max.
+
+    Set true to run multi-AZ nodes (ha/max) behind a SINGLE NAT gateway. The
+    reason to want this is usually egress-IP allow-listing, not cost: one NAT
+    means one stable source address for a downstream firewall/vendor allowlist
+    to pin, where ha/max otherwise present 3 different egress IPs that all
+    have to be listed and re-listed whenever a NAT is replaced.
+
+    Trade-offs: the single NAT becomes an AZ-level single point of failure for
+    outbound traffic (nodes in the other AZs keep running, but lose egress if
+    that AZ goes away), and their egress crosses AZ boundaries, which incurs
+    inter-AZ data transfer charges. Ignored entirely in bring-your-own-VPC
+    mode -- this module creates no NAT gateway there at all.
+  EOT
+  type        = bool
+  default     = null
+}
+
+variable "cluster_endpoint_public_access" {
+  description = <<-EOT
+    Whether the Kubernetes API server is reachable from the internet. true
+    (default) preserves this installer's historical behaviour.
+
+    Set false for a private-only endpoint. AWS then resolves the cluster
+    endpoint through PUBLIC DNS to its PRIVATE VPC address, so kubectl works
+    from anywhere with routed connectivity to the VPC (Transit Gateway, Direct
+    Connect, VPN) with no bastion, no Route 53 Resolver inbound endpoint and
+    no CloudShell VPC environment. It does NOT work from a host that can only
+    reach the VPC over the public internet.
+
+    Two things must hold before flipping this, or you lock yourself out:
+      - cluster_endpoint_private_access_cidrs below must cover whatever
+        network your operators (and any CI running helm) actually come from.
+      - The nodes keep working either way; private access is already enabled
+        unconditionally by the upstream module's own default.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "cluster_endpoint_public_access_cidrs" {
+  description = <<-EOT
+    Source CIDRs allowed to reach the PUBLIC API endpoint. Defaults to
+    0.0.0.0/0 (AWS's own default). Narrowing this to a corporate egress range
+    is the lighter-touch alternative to disabling public access outright --
+    it needs no VPC routing at all, so it is often the right first step for a
+    customer who wants the endpoint off the open internet but is not ready to
+    depend on Transit Gateway/Direct Connect reachability. Ignored when
+    cluster_endpoint_public_access is false.
+  EOT
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "cluster_endpoint_private_access_cidrs" {
+  description = <<-EOT
+    Source CIDRs allowed to reach the PRIVATE API endpoint on 443, added to
+    the EKS-managed cluster security group. Empty (default) leaves that group
+    as the upstream module builds it, which admits the node security group and
+    nothing else -- fine while public access is on, but it means a
+    connected-network operator cannot reach a private-only endpoint.
+
+    Set this to the on-prem/corporate ranges that reach the VPC over Transit
+    Gateway, Direct Connect or VPN whenever cluster_endpoint_public_access is
+    false. AWS documents this cluster-security-group rule as a requirement for
+    the "connected network" access pattern.
+  EOT
+  type        = list(string)
+  default     = []
+}

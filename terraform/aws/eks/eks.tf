@@ -8,7 +8,29 @@ module "eks" {
   vpc_id     = local.vpc_id
   subnet_ids = local.private_subnet_ids
 
-  cluster_endpoint_public_access           = true
+  # Both variables default to today's behaviour (public endpoint, open to
+  # 0.0.0.0/0). See their descriptions in variables.tf before flipping either:
+  # a private-only endpoint depends on the operator's network actually routing
+  # to this VPC, and on cluster_endpoint_private_access_cidrs below.
+  cluster_endpoint_public_access       = var.cluster_endpoint_public_access
+  cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
+
+  # Reaching a private-only endpoint from a connected network (Transit
+  # Gateway/Direct Connect/VPN) needs an explicit 443 ingress rule on the
+  # EKS-managed cluster security group -- the module's own default admits the
+  # node security group and nothing else. Empty list = no rule, preserving the
+  # previous behaviour exactly.
+  cluster_security_group_additional_rules = length(var.cluster_endpoint_private_access_cidrs) > 0 ? {
+    connected_network_https = {
+      description = "Kubernetes API from connected networks (TGW/DX/VPN)"
+      protocol    = "tcp"
+      from_port   = 443
+      to_port     = 443
+      type        = "ingress"
+      cidr_blocks = var.cluster_endpoint_private_access_cidrs
+    }
+  } : {}
+
   enable_cluster_creator_admin_permissions = true
   bootstrap_self_managed_addons            = false
 

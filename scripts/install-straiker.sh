@@ -202,6 +202,28 @@ GCP_PROJECT_OPT="${GOOGLE_CLOUD_PROJECT:-}"
 # meaningful when this installer provisions the cluster (--install-eks).
 PROVISION_STRATEGY="${PROVISION_STRATEGY:-min}"
 
+# Kubernetes API server exposure, and the NAT gateway count that
+# provision_strategy would otherwise dictate on its own. All three get the
+# same first-run-only treatment as PROVISION_STRATEGY, for a reason specific
+# to each:
+#   - CLUSTER_PUBLIC_ACCESS: a customer who has deliberately taken their
+#     control plane off the internet must never have it silently put back by
+#     a later `tofu apply` (which runs -auto-approve, so nobody sees the
+#     plan). phase_eks_cluster additionally refuses to re-enable public
+#     access it finds disabled on the live cluster, covering the case where
+#     the change was made by hand outside this installer.
+#   - CLUSTER_API_ALLOWED_CIDRS: pairs with the above -- disabling public
+#     access without this locks every operator out.
+#   - SINGLE_NAT_GATEWAY: changing NAT topology replaces the gateway and
+#     therefore its Elastic IP, which breaks any downstream allowlist pinned
+#     to that egress address.
+# Empty CLUSTER_PUBLIC_ACCESS_CIDRS defers to terraform's own 0.0.0.0/0
+# default rather than encoding it twice.
+CLUSTER_PUBLIC_ACCESS="${CLUSTER_PUBLIC_ACCESS:-true}"
+CLUSTER_PUBLIC_ACCESS_CIDRS="${CLUSTER_PUBLIC_ACCESS_CIDRS:-}"
+CLUSTER_API_ALLOWED_CIDRS="${CLUSTER_API_ALLOWED_CIDRS:-}"
+SINGLE_NAT_GATEWAY="${SINGLE_NAT_GATEWAY:-}"
+
 # How Ascend's recon-agent reaches an AI provider: own-keys (bring-your-own
 # OpenAI/Anthropic/xAI key(s)), bedrock (AWS Bedrock via Pod Identity — no
 # static keys), or trial-key (a Straiker-hosted temporary virtual key,
@@ -352,6 +374,12 @@ CLUSTER_NAME=""
 INSTALL_EKS=false
 INSTALL_EKS_EXPLICIT=false
 PROVISION_STRATEGY_EXPLICIT=false
+# Set by --private-api-endpoint/--api-public-cidrs/--api-allowed-cidrs/
+# --single-nat-gateway. Distinguishes "operator asked for the default" from
+# "operator said nothing", so the first-run prompt is skipped only when an
+# explicit choice was made (same contract as PROVISION_STRATEGY_EXPLICIT).
+CLUSTER_ENDPOINT_EXPLICIT=false
+SINGLE_NAT_GATEWAY_EXPLICIT=false
 # Bring-your-own-VPC (terraform/aws/eks's vpc_id variable) — for customers
 # whose IAM/SCP denies ec2:CreateVpc. All three empty (the default) means
 # "let this installer create its own VPC," unchanged from today. Foundational
@@ -442,6 +470,37 @@ Options:
                                    first-run-only treatment as --cloud-provider: permanent once
                                    set, ignored on later invocations. Irrelevant for bring-your-
                                    own-cluster installs.
+  --private-api-endpoint          Disable public internet access to the Kubernetes API server
+                                   (default: public access enabled, as today). AWS resolves the
+                                   cluster endpoint through public DNS to its private VPC address,
+                                   so kubectl keeps working from any network that ROUTES to the
+                                   VPC (Transit Gateway / Direct Connect / VPN) — no bastion and
+                                   no CloudShell VPC environment needed. Requires
+                                   --api-allowed-cidrs, otherwise nothing can reach the API at
+                                   all. First-run-only, like --provision-strategy: once set it is
+                                   permanent for this install and later invocations cannot flip
+                                   it back. This installer also refuses to re-enable public access
+                                   on a live cluster where it was disabled by hand.
+  --api-public-cidrs <cidrs>      Comma-separated CIDRs allowed to reach the PUBLIC API endpoint
+                                   (default: 0.0.0.0/0). Narrowing this to your corporate egress
+                                   range is the lighter-touch alternative to
+                                   --private-api-endpoint — it needs no VPC routing. Ignored when
+                                   --private-api-endpoint is set. First-run-only.
+  --api-allowed-cidrs <cidrs>     Comma-separated CIDRs allowed to reach the PRIVATE API endpoint
+                                   on 443, added to the EKS-managed cluster security group. Set
+                                   this to the on-prem/corporate ranges that reach the VPC over
+                                   Transit Gateway/Direct Connect/VPN. Required in practice
+                                   whenever --private-api-endpoint is used. First-run-only.
+  --single-nat-gateway            Create ONE NAT gateway even under --provision-strategy ha/max
+                                   (which otherwise create one per AZ, i.e. 3 Elastic IPs). Use
+                                   when a downstream firewall or vendor allowlist needs a single
+                                   stable egress IP to pin. Trade-off: that NAT becomes an
+                                   AZ-level single point of failure for outbound traffic, and
+                                   egress from the other AZs crosses AZ boundaries (inter-AZ data
+                                   transfer charges). No effect with --vpc-id (this installer
+                                   creates no NAT gateway in bring-your-own-VPC mode).
+                                   First-run-only: changing NAT topology later replaces the
+                                   gateway and its Elastic IP, breaking any pinned allowlist.
   --vpc-id <vpc-id>               Attach EKS to an existing VPC instead of creating one (e.g.
                                    when an AWS Organizations SCP denies ec2:CreateVpc). Requires
                                    --private-subnet-ids and --public-subnet-ids together. Needs
@@ -1111,6 +1170,9 @@ show_cost_estimate() {
       if [[ -z "${VPC_ID}" ]]; then
         local nat_count=1
         [[ "${PROVISION_STRATEGY}" != "min" ]] && nat_count="${az_or_zone_count}"
+        # --single-nat-gateway overrides provision_strategy's NAT count (see
+        # terraform/aws/eks's single_nat_gateway variable).
+        [[ "${SINGLE_NAT_GATEWAY}" == "true" ]] && nat_count=1
         line_cost="$(awk -v n="${nat_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.045 * h }')"
         echo " NAT gateway (${nat_count}x, base charge only, excludes data processing): \$${line_cost}/mo"
         total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
@@ -1266,6 +1328,26 @@ parse_args() {
         fi
         PROVISION_STRATEGY_EXPLICIT=true
         shift 2
+        ;;
+      --private-api-endpoint)
+        CLUSTER_PUBLIC_ACCESS=false
+        CLUSTER_ENDPOINT_EXPLICIT=true
+        shift
+        ;;
+      --api-public-cidrs)
+        CLUSTER_PUBLIC_ACCESS_CIDRS=${2:-}
+        CLUSTER_ENDPOINT_EXPLICIT=true
+        shift 2
+        ;;
+      --api-allowed-cidrs)
+        CLUSTER_API_ALLOWED_CIDRS=${2:-}
+        CLUSTER_ENDPOINT_EXPLICIT=true
+        shift 2
+        ;;
+      --single-nat-gateway)
+        SINGLE_NAT_GATEWAY=true
+        SINGLE_NAT_GATEWAY_EXPLICIT=true
+        shift
         ;;
       --vpc-id)
         VPC_ID=${2:-}
@@ -1565,6 +1647,52 @@ normalize_subnet_ids() {
   echo "${out[*]}"
 }
 
+# Renders a comma-separated CIDR list as a tofu-var JSON array, e.g.
+# ["10.0.0.0/8", "192.168.1.0/24"]. Empty input echoes nothing, so callers can
+# test for "" and omit the tfvars line entirely rather than writing an empty
+# list -- for cluster_endpoint_public_access_cidrs the two are very different
+# (omitted = terraform's 0.0.0.0/0 default; [] = nothing can reach the
+# endpoint). Validates shape only (x.x.x.x/len); AWS rejects the rest.
+csv_to_tf_list() {
+  local csv="$1" flag_name="$2" raw entry
+  local -a out=()
+  [[ -z "${csv}" ]] && return 0
+  IFS=',' read -r -a raw <<< "${csv}"
+  for entry in "${raw[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
+    [[ -z "${entry}" ]] && continue
+    if [[ ! "${entry}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
+      echo "ERROR: ${flag_name} entry '${entry}' is not a CIDR block (expected e.g. 10.0.0.0/8)." >&2
+      exit 1
+    fi
+    out+=("\"${entry}\"")
+  done
+  [[ ${#out[@]} -eq 0 ]] && return 0
+  local IFS=,
+  echo "[${out[*]}]"
+}
+
+# The API-endpoint/NAT tfvars lines shared by write_eks_tfvars' two branches
+# (bring-your-own-VPC and create-VPC). Each line is omitted rather than
+# written empty when the operator said nothing, so terraform's own defaults
+# stay authoritative and this installer doesn't silently re-assert them.
+emit_eks_endpoint_tfvars() {
+  echo "cluster_endpoint_public_access = ${CLUSTER_PUBLIC_ACCESS}"
+
+  local public_cidrs allowed_cidrs
+  public_cidrs="$(csv_to_tf_list "${CLUSTER_PUBLIC_ACCESS_CIDRS}" "--api-public-cidrs")"
+  allowed_cidrs="$(csv_to_tf_list "${CLUSTER_API_ALLOWED_CIDRS}" "--api-allowed-cidrs")"
+  [[ -n "${public_cidrs}" ]] && echo "cluster_endpoint_public_access_cidrs = ${public_cidrs}"
+  [[ -n "${allowed_cidrs}" ]] && echo "cluster_endpoint_private_access_cidrs = ${allowed_cidrs}"
+
+  # Only emitted when explicitly asked for -- leaving it unset keeps
+  # terraform's null default, i.e. NAT count stays coupled to
+  # provision_strategy exactly as before.
+  [[ -n "${SINGLE_NAT_GATEWAY}" ]] && echo "single_nat_gateway = ${SINGLE_NAT_GATEWAY}"
+  return 0
+}
+
 write_eks_tfvars() {
   # Bring-your-own-VPC: AZs are derived from the supplied subnets by
   # terraform/aws/eks itself (see its locals.tf), so the live
@@ -1584,6 +1712,7 @@ private_subnet_ids = ${priv_json}
 public_subnet_ids  = ${pub_json}
 byo_vpc_confirm    = true
 EOF
+    emit_eks_endpoint_tfvars >> "${EKS_DIR}/terraform.auto.tfvars"
     return
   fi
 
@@ -1619,6 +1748,7 @@ availability_zones = ${az_json}
 cluster_name       = "${CLUSTER_NAME}"
 provision_strategy = "${PROVISION_STRATEGY}"
 EOF
+  emit_eks_endpoint_tfvars >> "${EKS_DIR}/terraform.auto.tfvars"
   # aws cli's --output text is tab-separated, not space-separated -- tr -s
   # over both collapses either into one comma, then strip stray leading/
   # trailing ones.
@@ -1783,6 +1913,53 @@ phase_eks_tfbe_gke() {
   set_metadata "bootstrap_bucket" "${bucket_name}"
 }
 
+# Checks that one bring-your-own private subnet actually has outbound routing,
+# which is the precondition terraform/aws/eks's own vpc_id variable documents
+# but nothing has ever verified. Echoes the default route's target on success;
+# on failure echoes a human-readable reason and returns 1.
+#
+# Worth checking statically rather than by probing: a deleted NAT gateway
+# leaves its 0.0.0.0/0 route behind in state "blackhole" rather than removing
+# it, so "a default route exists" is not sufficient on its own.
+byo_private_subnet_egress() {
+  local subnet_id=$1
+  local rt_id routes state target
+
+  # Explicit subnet association first; a subnet with none inherits the VPC's
+  # main route table.
+  rt_id="$(aws ec2 describe-route-tables --region "${AWS_REGION}" \
+    --filters "Name=association.subnet-id,Values=${subnet_id}" \
+    --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || true)"
+  if [[ -z "${rt_id}" || "${rt_id}" == "None" ]]; then
+    rt_id="$(aws ec2 describe-route-tables --region "${AWS_REGION}" \
+      --filters "Name=vpc-id,Values=${VPC_ID}" "Name=association.main,Values=true" \
+      --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || true)"
+  fi
+  if [[ -z "${rt_id}" || "${rt_id}" == "None" ]]; then
+    echo "could not resolve a route table for subnet ${subnet_id} (needs ec2:DescribeRouteTables)"
+    return 1
+  fi
+
+  routes="$(aws ec2 describe-route-tables --region "${AWS_REGION}" \
+    --route-table-ids "${rt_id}" \
+    --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].[State,NatGatewayId,TransitGatewayId,GatewayId,NetworkInterfaceId]' \
+    --output text 2>/dev/null || true)"
+  if [[ -z "${routes}" || "${routes}" == "None" ]]; then
+    echo "subnet ${subnet_id} (route table ${rt_id}) has no 0.0.0.0/0 route"
+    return 1
+  fi
+
+  state="$(awk 'NR==1{print $1}' <<< "${routes}")"
+  target="$(awk 'NR==1{for (i=2; i<=NF; i++) if ($i != "None") { print $i; exit }}' <<< "${routes}")"
+  if [[ "${state}" == "blackhole" ]]; then
+    echo "subnet ${subnet_id} (route table ${rt_id}) has a 0.0.0.0/0 route in state 'blackhole' — its target ${target:-(unknown)} no longer exists"
+    return 1
+  fi
+
+  echo "${target:-unknown}"
+  return 0
+}
+
 phase_eks_cluster() {
   if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
     phase_eks_cluster_gke
@@ -1826,6 +2003,26 @@ phase_eks_cluster() {
       return
     fi
     aws ec2 delete-tags --resources "${byo_priv_ids[0]}" --tags Key=straiker-byo-vpc-preflight --region "${AWS_REGION}" >/dev/null 2>&1 || true
+
+    # Outbound routing. This module creates no NAT gateway in BYO mode, so the
+    # supplied subnets having their own egress is a precondition -- documented
+    # on terraform/aws/eks's vpc_id variable, but until now never checked.
+    # Unverified it fails silently and late: the cluster comes up, then nodes
+    # degrade roughly an hour later when the VPC CNI can no longer reach STS to
+    # refresh its IRSA credentials, pods get evicted as the nodes go NotReady,
+    # and nothing in the install output ever points at the actual cause.
+    local byo_subnet byo_egress
+    for byo_subnet in "${byo_priv_ids[@]}"; do
+      if ! byo_egress="$(byo_private_subnet_egress "${byo_subnet}")"; then
+        mark_phase_blocked "Bring-your-own-VPC preflight: ${byo_egress}.
+
+This installer creates no NAT gateway when --vpc-id is set — your private subnets must provide their own outbound routing. Straiker cannot install or upgrade without it: the artifact mirror reads Straiker's source registry and bucket in us-east-1, which no VPC endpoint in ${AWS_REGION} can reach (interface and gateway endpoints are regional).
+
+Fix the route in your VPC, then re-run. For the full set of destinations to allow if egress is filtered, see doc/egress-allowlist.md."
+        return
+      fi
+      log "  ${byo_subnet}: outbound 0.0.0.0/0 via ${byo_egress}"
+    done
   fi
 
   local bucket_name
@@ -1843,6 +2040,35 @@ phase_eks_cluster() {
   write_eks_tfvars
   if [[ "${INSTALL_BLOCKED}" == true ]]; then
     return
+  fi
+
+  # Endpoint-exposure drift guard. `tofu apply` below runs -auto-approve, so
+  # nobody ever sees the plan -- without this, a customer who took their API
+  # server off the internet by hand (console/CLI, outside this installer) gets
+  # it silently put back the next time this phase runs, which is a security
+  # regression they would have no reason to look for. Refuse instead, and say
+  # exactly how to make the change stick. Only fires in the reduce-exposure
+  # direction; a live cluster that is MORE open than requested is what this
+  # phase is legitimately here to fix.
+  if [[ "${CLUSTER_PUBLIC_ACCESS}" == "true" ]]; then
+    local live_public_access
+    live_public_access="$(aws eks describe-cluster \
+      --name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+      --query 'cluster.resourcesVpcConfig.endpointPublicAccess' \
+      --output text 2>/dev/null || true)"
+    if [[ "${live_public_access}" == "False" || "${live_public_access}" == "false" ]]; then
+      mark_phase_blocked "Cluster '${CLUSTER_NAME}' currently has PUBLIC API access disabled, but this install is configured for a public endpoint — applying would silently re-expose the Kubernetes API to the internet.
+
+If the private-only endpoint is intended (it usually is, once set by hand), re-run with:
+  --private-api-endpoint --api-allowed-cidrs <your-corporate-CIDRs>
+That records the choice in ~/.straiker/install.json so every later run preserves it.
+
+If public access really should come back, clear the guard explicitly:
+  aws eks update-cluster-config --name ${CLUSTER_NAME} --region ${AWS_REGION} \\
+    --resources-vpc-config endpointPublicAccess=true
+then re-run this phase."
+      return
+    fi
   fi
 
   tofu -chdir="${EKS_DIR}" init -upgrade -input=false -migrate-state -force-copy
@@ -4444,6 +4670,41 @@ EOF
       fi
       set_metadata "provision_strategy" "${PROVISION_STRATEGY}"
       set_metadata "provision_strategy_set" "true"
+    fi
+  fi
+
+  # API server exposure + NAT topology. First-run-only for the reasons given
+  # at CLUSTER_PUBLIC_ACCESS's declaration: silently re-exposing a control
+  # plane, or silently changing the egress IP a customer's firewall pins, are
+  # both changes nobody would think to look for in an -auto-approve apply.
+  # Not prompted interactively -- both are deliberate, network-dependent
+  # choices that need the operator to already know their routing story, and
+  # the defaults (public endpoint, NAT per provision_strategy) are correct for
+  # the common case.
+  if [[ "${INSTALL_EKS}" == true && "${CLOUD_PROVIDER}" != "gke" ]]; then
+    if [[ "$(get_metadata "cluster_endpoint_set")" == "true" ]]; then
+      CLUSTER_PUBLIC_ACCESS="$(get_metadata "cluster_public_access")"
+      CLUSTER_PUBLIC_ACCESS_CIDRS="$(get_metadata "cluster_public_access_cidrs")"
+      CLUSTER_API_ALLOWED_CIDRS="$(get_metadata "cluster_api_allowed_cidrs")"
+    elif [[ "${CLUSTER_ENDPOINT_EXPLICIT}" == true ]]; then
+      # A private-only endpoint with no allowed CIDRs is unreachable from
+      # anywhere except the nodes themselves -- catch it here rather than
+      # after a 15-minute apply that ends in a cluster nobody can kubectl to.
+      if [[ "${CLUSTER_PUBLIC_ACCESS}" == false && -z "${CLUSTER_API_ALLOWED_CIDRS}" ]]; then
+        echo "ERROR: --private-api-endpoint needs --api-allowed-cidrs <cidrs> — the CIDRs your operators reach the VPC from (Transit Gateway/Direct Connect/VPN). Without it the Kubernetes API is reachable from nothing but the cluster's own nodes." >&2
+        exit 1
+      fi
+      set_metadata "cluster_public_access" "${CLUSTER_PUBLIC_ACCESS}"
+      set_metadata "cluster_public_access_cidrs" "${CLUSTER_PUBLIC_ACCESS_CIDRS}"
+      set_metadata "cluster_api_allowed_cidrs" "${CLUSTER_API_ALLOWED_CIDRS}"
+      set_metadata "cluster_endpoint_set" "true"
+    fi
+
+    if [[ "$(get_metadata "single_nat_gateway_set")" == "true" ]]; then
+      SINGLE_NAT_GATEWAY="$(get_metadata "single_nat_gateway")"
+    elif [[ "${SINGLE_NAT_GATEWAY_EXPLICIT}" == true ]]; then
+      set_metadata "single_nat_gateway" "${SINGLE_NAT_GATEWAY}"
+      set_metadata "single_nat_gateway_set" "true"
     fi
   fi
 
