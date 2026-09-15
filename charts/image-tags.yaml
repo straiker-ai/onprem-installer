@@ -23,6 +23,6 @@ images:
   straiker/argus:
     tag: onprem-v2026.8.24
   straiker/iris:
-    tag: onprem-v2026.9.12
+    tag: onprem-v2026.9.12.2
   straiker/vllm:
     tag: v0.27.0

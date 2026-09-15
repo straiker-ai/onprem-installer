@@ -87,7 +87,7 @@ imageMirror:
       tag: onprem-v2026.8.24
       destRepository: straiker/argus
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
-      tag: onprem-v2026.9.12
+      tag: onprem-v2026.9.12.2
       destRepository: straiker/iris
   image:
     repository: gcr.io/go-containerregistry/crane
