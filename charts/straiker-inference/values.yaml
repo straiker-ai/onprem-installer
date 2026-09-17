@@ -43,7 +43,7 @@ image:
   repository: straiker/vllm
   # Must match the tag charts/straiker-artifact's imageMirror.images mirrors
   # into ECR for straiker/vllm, or the pod can never pull it.
-  tag: v0.27.0
+  tag: v0.27.0-5
   pullPolicy: IfNotPresent
 
 # Extra nodeSelector labels merged on top of the GPU profile's built-in

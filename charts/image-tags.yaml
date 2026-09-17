@@ -25,4 +25,4 @@ images:
   straiker/iris:
     tag: onprem-v2026.9.12.3
   straiker/vllm:
-    tag: v0.27.0
+    tag: v0.27.0-5

@@ -75,7 +75,7 @@ imageMirror:
     # Straiker's own apps — under onprem-base/straiker/* (an extra
     # segment vs the third-party images above) since it's not upstream.
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
-      tag: v0.27.0
+      tag: v0.27.0-5
       destRepository: straiker/vllm
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
       tag: onprem-v2026.8.3
