@@ -680,13 +680,14 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
       <h3 id="sec3-3">3.3 Per-model GPU requirements (straiker-inference)</h3>
       <p>Each product model gets its own Helm release and its own GPU node. Default tier by model:</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>GPU tier</th><th>GPU / VRAM</th><th>Host resources (req → limit)</th><th>Models on this tier by default</th></tr></thead>
+        <thead><tr><th>GPU tier</th><th>GPU / VRAM</th><th>Host resources (req → limit)</th><th>Instance Karpenter launches</th><th>Models on this tier by default</th></tr></thead>
         <tbody>
-          <tr><td>g4dn</td><td>T4, 16GB</td><td>2 vCPU / 8Gi → 4 vCPU / 12Gi</td><td>antman, hulk, quicksilver, thor (Defend/Argus backends)</td></tr>
-          <tr><td>g5</td><td>A10G, 24GB</td><td>4 vCPU / 16Gi → 8 vCPU / 24Gi</td><td>thanos (Ascend/Iris's UnalignedLLM), quantized by default</td></tr>
-          <tr><td>g6e</td><td>L40S, 48GB</td><td>8 vCPU / 32Gi → 16 vCPU / 48Gi</td><td>available for thanos unquantized</td></tr>
+          <tr><td>g4dn</td><td>T4, 16GB</td><td>2 vCPU / 8Gi → 4 vCPU / 12Gi</td><td>g4dn.xlarge</td><td>antman, hulk, quicksilver, thor (Defend/Argus backends)</td></tr>
+          <tr><td>g5</td><td>A10G, 24GB</td><td>4 vCPU / 16Gi → 8 vCPU / 24Gi</td><td>g5.2xlarge</td><td>thanos (Ascend/Iris's UnalignedLLM), quantized by default</td></tr>
+          <tr><td>g6e</td><td>L40S, 48GB</td><td>8 vCPU / 32Gi → 16 vCPU / 48Gi</td><td>g6e.4xlarge</td><td>available for thanos unquantized</td></tr>
         </tbody>
       </table></div>
+      <p>Karpenter sizes the node by the pod's requests, not by the GPU alone. The g5 and g6e requests don't fit the next size down once kubelet and daemonset overhead are reserved (a g5.xlarge has exactly 4 vCPU / 16GiB; a g6e.2xlarge has exactly 8 vCPU), so those tiers land one size up. A g6e.8xlarge or larger means the 4xlarge was unavailable in that zone or the release's <code>resources</code> were overridden — it is never what the chart asks for.</p>
       <div class="callout note"><b>Note:</b> vision and wanda are temporarily disabled as of this writing; confirm the current model set against <code>charts/image-tags.yaml</code> at demo time — this list moves.</div>
 
       <h3 id="sec3-4">3.4 Core service resource requests</h3>
@@ -715,8 +716,8 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
           <tr><td>m5.large (system node)</td><td>$0.096/hr</td><td>~$70</td><td>System node group, 1–3 nodes by strategy</td></tr>
           <tr><td>NAT gateway</td><td>$0.045/hr + $0.045/GB processed</td><td>~$33 + data</td><td>1 (min) to 3 (max) by strategy</td></tr>
           <tr><td>g4dn.xlarge (T4 GPU)</td><td>$0.526/hr</td><td>~$384</td><td>Per Defend/Argus model instance</td></tr>
-          <tr><td>g5.xlarge (A10G GPU)</td><td>$1.006/hr</td><td>~$734</td><td>Per Ascend/Iris (thanos) model instance</td></tr>
-          <tr><td>g6e.xlarge (L40S GPU)</td><td>$1.86/hr</td><td>~$1,357</td><td>Only if thanos runs unquantized</td></tr>
+          <tr><td>g5.2xlarge (A10G GPU)</td><td>$1.212/hr</td><td>~$885</td><td>Ascend/Iris's thanos model (default, quantized)</td></tr>
+          <tr><td>g6e.4xlarge (L40S GPU)</td><td>$3.004/hr</td><td>~$2,193</td><td>Only if thanos is overridden to run unquantized</td></tr>
           <tr><td>gp3 EBS + S3 (models/state)</td><td>~$0.08/GB-mo (EBS), ~$0.023/GB-mo (S3)</td><td>$20–$100 typical POV</td><td>Node root volumes, model weight storage</td></tr>
         </tbody>
       </table></div>
@@ -725,8 +726,8 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
       <div class="table-wrap"><table>
         <thead><tr><th>Scenario</th><th>What's running</th><th>Rough monthly compute</th></tr></thead>
         <tbody>
-          <tr><td>Defend-only POV, min strategy</td><td>EKS + 1 system node + 1 NAT + 1 GPU model (g4dn)</td><td>~$560–$650</td></tr>
-          <tr><td>Defend + Ascend POV, min strategy</td><td>Above + Ascend's thanos on g5</td><td>~$1,300–$1,450</td></tr>
+          <tr><td>Defend-only POV, min strategy</td><td>EKS + 1 system node + 1 NAT + 4 GPU models (antman, hulk, quicksilver, thor — one g4dn.xlarge each)</td><td>~$1,710–$1,800</td></tr>
+          <tr><td>Defend + Ascend POV, min strategy</td><td>Above + Ascend's thanos on g5.2xlarge</td><td>~$2,600–$2,700</td></tr>
           <tr><td>HA pilot (ha strategy)</td><td>Multi-AZ system nodes + multi-NAT + same model set</td><td>add ~$150–$250 to the above</td></tr>
         </tbody>
       </table></div>

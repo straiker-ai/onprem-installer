@@ -1184,12 +1184,38 @@ show_cost_estimate() {
   if [[ "${gpu_node_count}" -gt 0 ]]; then
     # One dedicated GPU node per model regardless of cloud (each inference
     # model is its own Karpenter-provisioned node in this installer's
-    # design) -- g4dn.xlarge (AWS) / a T4-class equivalent (GKE), both
-    # 16GB-tier, matching every current model's defaultGpuProfile: g4dn in
-    # charts/straiker-inference.
-    line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.526 * h }')"
-    echo " GPU inference nodes (${gpu_node_count}x g4dn.xlarge-class, one per model: ${models[*]}): \$${line_cost}/mo"
-    total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+    # design). Every model except thanos defaults to the 16GB tier --
+    # g4dn.xlarge (AWS) / a T4-class equivalent (GKE).
+    local small_models=() model
+    local has_thanos=false
+    for model in "${models[@]}"; do
+      if [[ "${model}" == "thanos" ]]; then
+        has_thanos=true
+      else
+        small_models+=("${model}")
+      fi
+    done
+
+    if [[ ${#small_models[@]} -gt 0 ]]; then
+      line_cost="$(awk -v n="${#small_models[@]}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.526 * h }')"
+      echo " GPU inference nodes (${#small_models[@]}x g4dn.xlarge-class, one per model: ${small_models[*]}): \$${line_cost}/mo"
+      total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+    fi
+
+    # thanos needs the 24GB tier (g5 / l4, bitsandbytes-quantized). Its
+    # 4 vCPU / 16Gi request doesn't fit the 1x sizes (4 vCPU / 16GiB, minus
+    # kubelet and daemonset overhead), so Karpenter launches the 2x size --
+    # g5.2xlarge (AWS) / g2-standard-8 (GKE).
+    if [[ "${has_thanos}" == true ]]; then
+      local thanos_rate=1.212 thanos_instance="g5.2xlarge"
+      if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
+        thanos_rate=0.854
+        thanos_instance="g2-standard-8 (L4)"
+      fi
+      line_cost="$(awk -v r="${thanos_rate}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", r * h }')"
+      echo " GPU inference node (1x ${thanos_instance}, thanos): \$${line_cost}/mo"
+      total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
+    fi
     echo ""
   else
     echo " No GPU inference models needed for products '${PRODUCTS_OPT}'."

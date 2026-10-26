@@ -18,7 +18,8 @@ modelProfile: antman
 # GPU tier. Leave empty to auto-select: on EKS this reads the instance-family
 # requirement off the "straiker-gpu" NodePool charts/straiker-system creates
 # (karpenter.gpu.nodePool.name); on GKE it inspects node accelerator labels.
-# EKS: g4dn (T4 16 GB), g5 (A10G 24 GB), p4d (A100 40 GB), p3 (V100 16 GB)
+# EKS: g4dn (T4 16 GB), g5 (A10G 24 GB), g6e (L40S 48 GB), p4d (A100 40 GB),
+#      p3 (V100 16 GB)
 # GKE: t4, l4, a100
 gpuProfile: ""
 
@@ -35,10 +36,10 @@ imagePullSecrets: []
 # same /straiker/ prefix convention as frontend/frontend-migrate.
 #
 # NOTE: bitsandbytes quantization moved out-of-tree on newer vLLM (needs the
-# separate vllm-bnb-plugin package baked into the image). Only relevant if you
-# override thanos's gpuProfile to g5/l4 for cheaper GPU cost (see
-# straiker-inference.modelProfiles' thanos entry in _helpers.tpl) — the
-# default gpuProfile (g6e) needs no quantization and is unaffected by this.
+# separate vllm-bnb-plugin package baked into the image). This IS the default
+# path for thanos — its default gpuProfile is g5 (l4 on GKE), quantized with
+# bitsandbytes (see straiker-inference.modelProfiles' thanos entry in
+# _helpers.tpl). Only the unquantized g6e/p4d/a100 overrides skip it.
 image:
   repository: straiker/vllm
   # Must match the tag charts/straiker-artifact's imageMirror.images mirrors
