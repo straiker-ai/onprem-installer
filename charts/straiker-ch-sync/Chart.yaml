@@ -1,0 +1,13 @@
+apiVersion: v2
+name: straiker-ch-sync
+description: >
+  Replaces the ClickPipes Postgres CDC pipe for on-prem: creates the grid.* CDC replica
+  tables in ClickHouse (DDL vendored from grid's harness fixture) and keeps them in step
+  with the registry Postgres DB by polling it with ClickHouse's postgresql() table function
+  (full copy per cycle + tombstones for vanished rows). See doc/clickhouse-ingestion-design.md.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai

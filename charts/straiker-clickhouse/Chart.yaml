@@ -1,0 +1,13 @@
+apiVersion: v2
+name: straiker-clickhouse
+description: >
+  Single-node ClickHouse as a pod for the on-prem data layer (replaces ClickHouse Cloud):
+  StatefulSet + PVC, config, per-role users with generated passwords
+  (Secret clickhouse-credentials) and the grid database. Ingestion into it (the
+  ClickPipes replacement: Postgres CDC + MSK topics) is NOT part of this chart.
+type: application
+version: 0.1.0
+appVersion: "25.8"
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai

@@ -124,6 +124,36 @@ karpenter:
         cpu: "50"
         memory: 200Gi
 
+  # ClickHouse servers (chart straiker-clickhouse): memory-optimized Graviton, tainted so nothing else lands
+  # here. 2xlarge = 8 vCPU / 64 GiB, which fits one server pod (7 vCPU / 56 GiB requests); the chart spreads
+  # replicas over separate nodes. (Keeper is small and runs on the shared pool.)
+  clickhouse:
+    nodePool:
+      name: straiker-clickhouse
+      labels:
+        purpose: straiker-clickhouse
+      taints:
+        - key: purpose
+          value: straiker-clickhouse
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      disruption:
+        consolidationPolicy: WhenEmpty
+        consolidateAfter: 30m
+      expireAfter: 720h
+      limits:
+        cpu: "32"
+        memory: 256Gi
+
 # Must match the plain "purpose" label key every NodePool in this chart sets
 # (gpu/argus/iris/shared above) — not the "node.kubernetes.io/" prefixed form,
 # which none of them actually carry, so opensearch could never match any of
@@ -192,6 +222,24 @@ eks:
             deleteOnTermination: true
       tags:
         purpose: straiker-iris
+
+  clickhouse:
+    instanceFamilies: ["r6g", "r7g"]
+    instanceSizes: ["2xlarge"]
+    nodeClass:
+      name: straiker-clickhouse
+      amiSelectorTerms:
+        - alias: al2023@latest
+      subnetSelectorTags: {}
+      securityGroupSelectorTags: {}
+      blockDeviceMappings:
+        - deviceName: /dev/xvda
+          ebs:
+            volumeSize: 50Gi
+            volumeType: gp3
+            deleteOnTermination: true
+      tags:
+        purpose: straiker-clickhouse
 
   shared:
     instanceFamilies: ["m6g", "c6g", "m7g", "c7g"]
@@ -296,6 +344,13 @@ efs:
 # Shared stateful infra
 tags:
   opensearch: true
+
+# Managed OpenSearch (Amazon OpenSearch Service) instead of the bundled pod: set tags.opensearch=false and
+# url (https://<vpc endpoint>); credentialsSecret = a Secret with keys username/password (synced from Secrets
+# Manager by the installer). Benthos then writes over TLS with basic auth. Empty = bundled OpenSearch.
+opensearchExternal:
+  url: ""
+  credentialsSecret: ""
 
 # OpenSearch
 opensearch:

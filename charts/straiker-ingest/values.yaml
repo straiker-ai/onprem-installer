@@ -1,0 +1,30 @@
+image:
+  # Set by the installer to <ecr>/redpandadata/connect (mirrored by straiker-artifact).
+  repository: redpandadata/connect
+  tag: "4.101.0"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: grid-ingest   # bound to a Pod Identity role in terraform/aws/data (pod_identities.grid-ingest)
+
+bus:
+  brokers: ""            # comma-separated bootstrap brokers, set by the installer
+  tls: true
+  sasl:
+    mechanism: aws_msk_iam   # "" for a plaintext test broker
+    region: ""
+
+clickhouse:
+  credentialsSecret: clickhouse-credentials   # from chart straiker-clickhouse
+  user: grid_ingest                           # key <user>_username / <user>_password in that Secret
+  database: grid
+
+batch:
+  count: 5000
+  period: 1s
+
+consumerGroupPrefix: grid-ingest
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { memory: 1Gi }

@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ingest
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: straiker-ingest }
+  template:
+    metadata:
+      labels: { app: straiker-ingest }
+      annotations:
+        checksum/streams: {{ include (print $.Template.BasePath "/streams.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: connect
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-c", "/etc/connect/benthos.yaml", "streams", "/etc/connect/events.yaml", "/etc/connect/findings.yaml", "/etc/connect/audit.yaml"]
+          env:
+            - { name: BROKERS, value: {{ required "bus.brokers is required" .Values.bus.brokers | quote }} }
+            - { name: AWS_REGION, value: {{ .Values.bus.sasl.region | quote }} }
+            - { name: CH_HOST, valueFrom: { secretKeyRef: { name: {{ .Values.clickhouse.credentialsSecret }}, key: host } } }
+            - { name: CH_HTTP_PORT, valueFrom: { secretKeyRef: { name: {{ .Values.clickhouse.credentialsSecret }}, key: httpPort } } }
+            - { name: CH_USER, valueFrom: { secretKeyRef: { name: {{ .Values.clickhouse.credentialsSecret }}, key: {{ .Values.clickhouse.user }}_username } } }
+            - { name: CH_PASSWORD, valueFrom: { secretKeyRef: { name: {{ .Values.clickhouse.credentialsSecret }}, key: {{ .Values.clickhouse.user }}_password } } }
+          ports: [ { name: api, containerPort: 4195 } ]
+          readinessProbe: { httpGet: { path: /ready, port: api }, periodSeconds: 15 }
+          livenessProbe: { httpGet: { path: /ping, port: api }, initialDelaySeconds: 10, periodSeconds: 30 }
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: streams, mountPath: /etc/connect, readOnly: true }
+      volumes:
+        - name: streams
+          configMap: { name: straiker-ingest }

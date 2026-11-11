@@ -1,0 +1,28 @@
+{{- if include "ch.replicated" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ch.keeperName" . }}-config
+data:
+  keeper.xml: |
+    <clickhouse>
+      <logger><level>warning</level><console>1</console></logger>
+      <listen_host>0.0.0.0</listen_host>
+      <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id from_env="KEEPER_SERVER_ID"/>
+        <log_storage_path>/var/lib/clickhouse-keeper/logs</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/snapshots</snapshot_storage_path>
+        <coordination_settings>
+          <operation_timeout_ms>10000</operation_timeout_ms>
+          <session_timeout_ms>30000</session_timeout_ms>
+          <raft_logs_level>warning</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+          {{- range $i := until (int .Values.keeper.replicas) }}
+          <server><id>{{ add $i 1 }}</id><hostname>{{ include "ch.keeperHost" (dict "root" $ "i" $i) }}</hostname><port>9234</port></server>
+          {{- end }}
+        </raft_configuration>
+      </keeper_server>
+    </clickhouse>
+{{- end }}

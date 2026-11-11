@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ch.fullname" . }}-databases
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: init
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          env:
+            - name: CH_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.credentialsSecret }}, key: admin_password } }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Run one statement against a replica, retrying while it (or Keeper) is still starting.
+              run() {
+                host="$1"; query="$2"; n=0
+                until clickhouse-client --host "$host" --user admin --password "$CH_PASSWORD" --query "$query"; do
+                  n=$((n+1)); [ "$n" -ge 60 ] && { echo "giving up on $host: $query" >&2; exit 1; }
+                  sleep 5
+                done
+              }
+              {{- range $i := until (int .Values.replicas) }}
+              {{- $host := include "ch.replicaHost" (dict "root" $ "i" $i) }}
+              {{- range $.Values.databases }}
+              {{- if include "ch.replicated" $ }}
+              # Replicated database: every replica creates it with its own {replica} macro, and the
+              # plain MergeTree-family tables made later are converted to Replicated* automatically.
+              run {{ $host }} "CREATE DATABASE IF NOT EXISTS {{ . }} ENGINE = Replicated('/clickhouse/databases/{{ . }}', '{shard}', '{replica}')"
+              {{- else }}
+              run {{ $host }} 'CREATE DATABASE IF NOT EXISTS {{ . }}'
+              {{- end }}
+              {{- end }}
+              {{- end }}

@@ -1,0 +1,107 @@
+# Installed by the 'data-bootstrap' phase of scripts/install-straiker.sh, which
+# sets aurora.*, msk.bootstrapBrokers and serviceAccount.* from the aws-data phase.
+
+serviceAccount:
+  # Bound to the Terraform-created Pod Identity role (terraform/aws/data, pod_identities.data-bootstrap).
+  name: straiker-data
+
+images:
+  psql: postgres:16-alpine
+  kafka: confluentinc/cp-kafka:7.7.1
+  curl: curlimages/curl:8.11.0
+  # Needs outbound access to github.com at install time.
+  mskIamAuthJarUrl: https://github.com/aws/aws-msk-iam-auth/releases/download/v2.3.7/aws-msk-iam-auth-2.3.7-all.jar
+
+aws:
+  region: ""   # set by the installer
+
+aurora:
+  enabled: true
+  # One entry per Aurora cluster (terraform/aws/data aurora_clusters), host/port set by the installer.
+  # Default: ONE shared cluster, like the SaaS regions. To split databases onto another cluster, add an
+  # entry here (the installer fills it from aws-data) and set `cluster:` on those databases below.
+  # adminSecret: K8s Secret with keys username/password (the RDS-managed master login), created by the installer.
+  # A database whose cluster has no host falls back to "platform".
+  clusters:
+    platform:
+      host: ""
+      port: 5432
+      adminSecret: straiker-aurora-admin
+
+# Logical databases, keyed by database (and role) name. Each gets a role of the
+# same name with a generated password. The DSNs land in Secret dsnSecret under
+# <envKey>, ready for envFrom/secretKeyRef in the platform charts.
+dsnSecret: straiker-db-dsn
+# eso.enabled: straiker-db-dsn and platform-secret are ExternalSecrets (templates/eso-secrets.yaml) reading Secrets
+# Manager "<smPrefix>/..." (installer sets it for --data-layer installs); off = built by templates/dsn-secret.yaml.
+# *CreationPolicy: Owner for a Secret ESO creates; Merge to take over a pre-existing Secret without deleting it.
+eso:
+  enabled: false
+  smPrefix: ""
+  store: aws-sm
+  refreshInterval: 1h
+  previewSuffix: ""        # installer dry run: render the ExternalSecrets against <name><suffix> targets
+  dsnCreationPolicy: Owner
+  platformCreationPolicy: Owner
+# Role passwords: Secret with keys PASSWORD_<database|reader>, synced from Secrets Manager
+# (<cluster>/db/passwords) by the installer's ExternalSecret. Empty = generate in-cluster (legacy).
+passwordsSecret: straiker-db-passwords
+# cluster: which aurora.clusters entry holds the database (default platform: one shared cluster).
+# bifrost: created for Bifrost's config store; the straiker-bifrost chart does not use it yet.
+databases:
+  foundation: { envKey: FOUNDATION_DATABASE_CONNECTION_STRING }
+  registry:   { envKey: REGISTRY_DATABASE_CONNECTION_STRING }
+  databridge: { envKey: DATABRIDGE_DATABASE_CONNECTION_STRING }
+  connect:    { envKey: CONNECT_DATABASE_CONNECTION_STRING }
+  notify:     { envKey: NOTIFY_DATABASE_CONNECTION_STRING }
+  frontend:   { envKey: FRONTEND_DATABASE_CONNECTION_STRING }
+  iris:       { envKey: IRIS_DATABASE_CONNECTION_STRING }
+  bifrost:    { envKey: BIFROST_DATABASE_CONNECTION_STRING }
+
+# Read-only roles on another service's database (e.g. the ClickHouse sync reads registry's tables).
+# Password lands in dsnSecret as PASSWORD_<role>; SELECT is granted on existing and future tables.
+readers:
+  grid_cdc: { database: registry, owner: registry }
+
+# What the platform-repo service charts (foundation, registry, databridge, grid,
+# portico, connect) consume via envFrom (SaaS: ESO-synced from Secrets Manager;
+# on-prem: built here from the DSNs, brokers and generated keys).
+platform:
+  secretName: platform-secret
+  serviceAccountName: platform-sa   # bound to a Pod Identity role in terraform/aws/data (pod_identities.platform)
+  # Existing shared Secret (created by phase 'shared-secrets'); its INTERNAL_API_KEY is the
+  # frontend key portico presents (PORTICO_INTERNAL_API_KEY).
+  sharedSecretName: straiker-secrets
+  # Shared with api-gateway (Terraform-generated, Secrets Manager <cluster>/platform/api-gateway); the installer passes them.
+  # Empty = generate here (gateway then not in sync - only for installs without the gateway).
+  validateKey: ""        # FOUNDATION_PLATFORM_VALIDATE_KEY == gateway PLATFORM_VALIDATE_KEY
+  gatewayS2SKey: ""      # REGISTRY_GATEWAY_S2S_KEY == gateway SYS__ARGUS_INTERNAL_S2S_KEY
+  # PLATFORM_INTERNAL_S2S_API_KEY: Secret synced from Secrets Manager (<cluster>/platform/keys) by the installer's
+  # ExternalSecret. Empty = generate in-cluster (legacy).
+  keysSecret: platform-keys
+  # Non-secret ClickHouse connection values for the ExternalSecret-built platform-secret (eso.enabled); the
+  # installer fills them from Secret clickhouse-credentials. Empty host = no ClickHouse keys.
+  clickhouse: { host: "", ddlHost: "", nativePort: "" }
+  clickhouseSecret: clickhouse-credentials   # from chart straiker-clickhouse; its keys are projected when present
+
+msk:
+  enabled: true
+  bootstrapBrokers: ""   # host:9098 (SASL/IAM)
+  replicationFactor: 3
+  # Mirrors infra platform/deployment/tf/msk_topics.tf.
+  topics:
+    - { name: s6r.turns,                    partitions: 6,  retentionMs: 604800000 }
+    - { name: s6r.findings,                 partitions: 6,  retentionMs: 604800000 }
+    - { name: s6r.turns.dlq,                partitions: 6,  retentionMs: 1209600000 }
+    - { name: s6r.findings.dlq,             partitions: 6,  retentionMs: 1209600000 }
+    - { name: platform.agent_config,        partitions: 6,  retentionMs: -1, cleanupPolicy: compact }
+    - { name: platform.tenant_config,       partitions: 6,  retentionMs: -1, cleanupPolicy: compact }
+    - { name: platform.audit,               partitions: 6,  retentionMs: 604800000 }
+    - { name: platform.audit.tenant,        partitions: 6,  retentionMs: 604800000 }
+    - { name: s6r.events,                   partitions: 6,  retentionMs: 604800000 }
+    - { name: platform.audit.dlq,           partitions: 6,  retentionMs: 1209600000 }
+    - { name: s6r.events.dlq,               partitions: 6,  retentionMs: 1209600000 }
+    - { name: s6r.defend_turns,             partitions: 6,  retentionMs: 604800000 }
+    - { name: s6r.defend_turns.dlq,         partitions: 6,  retentionMs: 1209600000 }
+    - { name: argus.transcript_events,      partitions: 32, retentionMs: 604800000, maxMessageBytes: 2097152 }
+    - { name: argus.metrics,                partitions: 6,  retentionMs: 604800000 }

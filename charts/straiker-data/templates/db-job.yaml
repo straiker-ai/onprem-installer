@@ -1,0 +1,97 @@
+{{- if .Values.aurora.enabled }}
+{{- $dbCluster := include "straiker-data.dbClusters" . | fromJson }}
+{{- /* One bootstrap Job per Aurora cluster that is configured (host set) and holds databases. */ -}}
+{{- range $cname, $cl := .Values.aurora.clusters }}
+{{- $hasDb := false }}
+{{- range $db, $c := $.Values.databases }}{{ if eq (get $dbCluster $db) $cname }}{{ $hasDb = true }}{{ end }}{{ end }}
+{{- if and $cl.host $hasDb }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-data-db-bootstrap{{ if ne $cname "platform" }}-{{ $cname }}{{ end }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: psql
+          image: {{ $.Values.images.psql }}
+          env:
+            - { name: PGHOST, value: {{ $cl.host | quote }} }
+            - { name: PGPORT, value: {{ $cl.port | quote }} }
+            - { name: PGSSLMODE, value: require }
+            - { name: PGDATABASE, value: postgres }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: {{ $cl.adminSecret }}, key: username } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $cl.adminSecret }}, key: password } }
+            {{- range $db, $_ := $.Values.databases }}
+            {{- if eq (get $dbCluster $db) $cname }}
+            - name: PW_{{ $db }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.dsnSecret }}, key: PASSWORD_{{ $db }} } }
+            {{- end }}
+            {{- end }}
+            {{- range $r, $rcfg := $.Values.readers }}
+            {{- if eq (get $dbCluster $rcfg.database) $cname }}
+            - name: PW_{{ $r }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.dsnSecret }}, key: PASSWORD_{{ $r }} } }
+            {{- end }}
+            {{- end }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Passwords are alphanumeric, safe to inline in SQL.
+              bootstrap() {
+                db="$1"; pw="$2"
+                psql -v ON_ERROR_STOP=1 <<SQL
+              DO \$\$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$db') THEN
+                  CREATE ROLE "$db" LOGIN PASSWORD '$pw';
+                ELSE
+                  ALTER ROLE "$db" PASSWORD '$pw';
+                END IF;
+              END \$\$;
+              GRANT "$db" TO CURRENT_USER;
+              SELECT 'CREATE DATABASE "$db" OWNER "$db"' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$db')\gexec
+              SQL
+                echo "database $db ready"
+              }
+              {{- range $db, $_ := $.Values.databases }}
+              {{- if eq (get $dbCluster $db) $cname }}
+              bootstrap {{ $db }} "$PW_{{ $db }}"
+              {{- end }}
+              {{- end }}
+              # Read-only roles: login + SELECT on the owner's tables (existing and future).
+              reader() {
+                role="$1"; pw="$2"; db="$3"; owner="$4"
+                psql -v ON_ERROR_STOP=1 <<SQL
+              DO \$\$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$role') THEN
+                  CREATE ROLE "$role" LOGIN PASSWORD '$pw';
+                ELSE
+                  ALTER ROLE "$role" PASSWORD '$pw';
+                END IF;
+              END \$\$;
+              GRANT CONNECT ON DATABASE "$db" TO "$role";
+              SQL
+                psql -v ON_ERROR_STOP=1 -d "$db" <<SQL
+              GRANT USAGE ON SCHEMA public TO "$role";
+              GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$role";
+              ALTER DEFAULT PRIVILEGES FOR ROLE "$owner" IN SCHEMA public GRANT SELECT ON TABLES TO "$role";
+              SQL
+                echo "reader $role ready on $db"
+              }
+              {{- range $r, $rcfg := $.Values.readers }}
+              {{- if eq (get $dbCluster $rcfg.database) $cname }}
+              reader {{ $r }} "$PW_{{ $r }}" {{ $rcfg.database }} {{ $rcfg.owner }}
+              {{- end }}
+              {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -50,7 +50,11 @@ Usage: {{ include "infra.image" (dict "image" $someImage "global" .Values.global
 {{- end }}
 
 {{- define "infra.opensearchUrl" -}}
+{{- if .Values.opensearchExternal.url -}}
+{{- .Values.opensearchExternal.url -}}
+{{- else -}}
 {{- printf "http://opensearch-cluster-master.%s.svc.cluster.local:9200" (include "infra.namespace" .) -}}
+{{- end -}}
 {{- end }}
 
 {{- define "infra.karpenterNodePool" -}}

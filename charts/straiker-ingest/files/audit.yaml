@@ -1,0 +1,39 @@
+# platform.audit -> grid.audit_event. CloudEvents envelope: the audit record is under `data`
+# (a bare record is accepted too). Nested actor/target/context/outcome are flattened; refs/change
+# land as JSON strings. Does NOT map ingested_at.
+input:
+  kafka_franz:
+{{ include "ingest.kafka" . | indent 4 }}
+    topics: [ platform.audit ]
+    consumer_group: {{ .Values.consumerGroupPrefix }}-platform-audit
+    start_from_oldest: true
+pipeline:
+  processors:
+    - mapping: |
+        let d = this.data.or(this)
+        root.id = $d.id
+        root.time = $d.time
+        root.straiker_id = $d.straiker_id
+        root.visibility = $d.visibility
+        root.action = $d.action
+        root.category = $d.category.or("")
+        root.severity = $d.severity.or("")
+        root.actor_kind = $d.actor.kind.or("")
+        root.actor_principal = $d.actor.principal.or("")
+        root.actor_subject = $d.actor.subject.or("")
+        root.actor_display = $d.actor.display.or("")
+        root.target_type = $d.target.type.or("")
+        root.target_id = $d.target.id.or("")
+        root.target_label = $d.target.label.or("")
+        root.refs = if $d.refs.type() == "array" { $d.refs.format_json(indent: "").string() } else { "" }
+        root.request_id = $d.context.request_id.or("")
+        root.trace_id = $d.context.trace_id.or("")
+        root.service = $d.context.service.or("")
+        root.source_ip = $d.context.source_ip.or("")
+        root.user_agent = $d.context.user_agent.or("")
+        root.scope_used = $d.context.scope_used.or("")
+        root.outcome_status = $d.outcome.status.or("")
+        root.outcome_reason = $d.outcome.reason.or("")
+        root.change = if $d.change.type() == "object" { $d.change.format_json(indent: "").string() } else { "" }
+output:
+{{ include "ingest.output" (dict "ctx" . "table" "audit_event" "topic" "platform.audit") | indent 2 }}
