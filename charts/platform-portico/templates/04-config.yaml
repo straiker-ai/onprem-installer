@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  PORTICO_PORT: {{ .Values.straiker.portico.port | quote }}
+  PORTICO_LOG_LEVEL: {{ .Values.straiker.portico.logLevel | quote }}
+  PORTICO_ENVIRONMENT: {{ .Values.straiker.portico.environment | quote }}
+  PORTICO_SERVER_READ_TIMEOUT: {{ .Values.straiker.portico.server.readTimeout | quote }}
+  PORTICO_SERVER_WRITE_TIMEOUT: {{ .Values.straiker.portico.server.writeTimeout | quote }}
+  PORTICO_SERVER_IDLE_TIMEOUT: {{ .Values.straiker.portico.server.idleTimeout | quote }}
+  # Frontend /internal_api the native Defend/Ascend facades call. When empty the
+  # facades are disabled (only /healthz served). The key is sensitive and comes
+  # from the portico secret (PORTICO_INTERNAL_API_KEY), not this ConfigMap.
+  PORTICO_INTERNAL_API_URL: {{ .Values.straiker.portico.internalApi.url | quote }}
+  # Turns service (Athena -> S3 CSV) behind the Ascend turn export. When empty the
+  # export route answers 503. The key is sensitive and comes from the portico
+  # secret (PORTICO_TURNS_KEY), not this ConfigMap.
+  PORTICO_TURNS_URL: {{ .Values.straiker.portico.turns.url | quote }}

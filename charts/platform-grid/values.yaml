@@ -1,0 +1,205 @@
+straiker:
+  grid:
+    port: 8080
+    logLevel: info
+    # Also the Sentry environment, and the ONLY thing distinguishing the two
+    # production regions there — see values-prod-apne2.yaml.
+    environment: production
+
+    server:
+      readTimeout: 15
+      writeTimeout: 30
+      idleTimeout: 60
+
+    # Shared platform identity: one per-env `platform-sa` (EKS Pod Identity, created
+    # via eksctl in the infra repo) is used by ALL platform services, so Helm
+    # references it by name and does not create it. The query plane needs no AWS
+    # perms beyond reading the ESO-synced platform-secret (a plain k8s Secret).
+    serviceAccount:
+      create: false
+      name: platform-sa
+      annotations: {}
+
+    service:
+      annotations: {}
+
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: grid
+      version: latest
+
+    # ClickHouse serving layer (facts + rollups; dims resolved in-engine via dict_*).
+    # Non-secret connection settings live here; the endpoint + credentials come from
+    # the shared platform-secret (see secretName / required keys below).
+    clickhouse:
+      database: grid
+      secure: true
+      dialTimeout: 10
+
+    # Transcript artifacts (event bodies) in object storage. Credentials come from
+    # the pod identity role, not from config — no keys here.
+    #
+    # roleArn is the CMEK transcripts role (`<cluster>-cmek-transcripts-role`) the
+    # pod identity assumes for every read; customer-managed keys name that role, so
+    # without it a tenant's own-key transcripts read as key-unavailable. Set it only
+    # where the role is verified assumable by platform-sa: a role that cannot be
+    # assumed makes every body unreadable. Empty reads as the pod identity itself.
+    #
+    # Leaving bucket empty DEGRADES rather than disables: the transcript endpoint
+    # still serves the event skeleton from ClickHouse and reports every body as
+    # `absent`. That is deliberate, so a missing bucket in a new environment is a
+    # reduced view rather than a broken endpoint. Set per env below.
+    artifacts:
+      bucket: ""
+      region: us-east-1
+      roleArn: ""
+      # endpoint overrides S3 for local MinIO only; empty everywhere deployed.
+      endpoint: ""
+      # Bounds parallel object reads within one request, so a large page cannot
+      # open an unbounded number of connections.
+      maxConcurrentFetches: 8
+      cacheEntries: 1024
+
+    # Fresh-read overlay for governance posture + tags.
+    #
+    # Grid's browse rows come from ClickHouse, which receives the registry's tables
+    # over ClickPipes CDC on a MEASURED ~60s cadence. That is fine for labels, usage
+    # and topology, but not for the fields a user just clicked: kill an agent and the
+    # inventory list keeps showing it alive for a minute. With a registryBaseURL set,
+    # grid reads that small PG-mastered slice straight from the registry and overlays
+    # it onto the CH rows.
+    #
+    # ON by default in every environment. The reasoning: the overlay's failure mode
+    # IS the status quo. If registry is unreachable or slow, grid falls back to the
+    # CDC-replicated values and logs at WARN - which is exactly what it serves today
+    # - so the downside is bounded to "no improvement" rather than an outage.
+    #
+    # No new credential or network path: the call rides the shared platform S2S
+    # bearer grid already holds, over the same in-cluster tier grid already serves
+    # its own /internal fleet endpoints on.
+    #
+    # Set to false per environment to fall back to the replica deliberately (e.g.
+    # while diagnosing whether a wrong value came from the overlay or from CDC).
+    overlay:
+      enabled: true
+      # The registry address is IDENTICAL IN EVERY CLUSTER, so it lives here once
+      # rather than being repeated per env: the Service name has no per-env override,
+      # the namespace is always `platform`, and the Service port is hardcoded in
+      # registry's own template. Environments override `enabled`, not this.
+      #
+      # NOTE THE PORT: the registry Service exposes 80 and forwards to the pod's
+      # 8080 containerPort. Addressing :8080 targets a port the Service does not
+      # expose, so every overlay call would fail and silently fall back to the
+      # CDC-lagged values - which looks exactly like the overlay doing nothing.
+      # Verified in-cluster: :80 answers (401 without a bearer), :8080 refuses.
+      registryBaseURL: "http://registry.platform.svc.cluster.local:80"
+      # Call timeout in milliseconds. Kept tight because it sits in front of a
+      # browse read; 0 uses the client default (750ms).
+      timeoutMS: 0
+
+    # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
+    # {env}/platform Secrets Manager blob) consumed via envFrom; keys are namespaced
+    # by the GRID_ prefix. REQUIRED keys for Grid in the {env}/platform blob:
+    #   GRID_CLICKHOUSE_ADDR              e.g. <svc-id>.<region>.aws.clickhouse.cloud:9440
+    #   GRID_CLICKHOUSE_USERNAME          e.g. grid_query_ro
+    #   GRID_CLICKHOUSE_PASSWORD
+    # Grid is CH-only (R1): it holds no Postgres pool and needs no DB DSN. The estate
+    # dims are mastered by the registry (its own PG SoT) and reach grid as the CDC
+    # replicas in ClickHouse.
+    secretName: platform-secret
+
+    observability:
+      # Empty is off. Environment values opt in by setting the project DSN.
+      sentry:
+        dsn: ""
+      otel:
+        enabled: true
+        # Shared OTel env bundle injected into app pods via envFrom.secretRef.
+        secretName: otel-secret
+        # Service identity used by OTEL_SERVICE_NAME.
+        serviceName: grid
+        # If true, otel-secret becomes required (optional=false) in envFrom.
+        requireSecret: true
+
+    # NOTE: grid owns no Postgres schema (R1). The estate PG system of record — and
+    # its Liquibase migrations — moved to the registry service; grid reads the
+    # CDC-replicated dims from ClickHouse.
+
+    # ClickHouse schema migrations (deploy/ch-goose, applied by ch-migrate/goose) run
+    # as a Helm pre-install/pre-upgrade hook Job (templates/05-migrate-job.yaml) on the
+    # grid-migrations image built from the same commit/tag.
+    #
+    # DISABLED by default. Enable per environment only once BOTH hold:
+    #   1. the cluster is adopted: it has grid.goose_db_version
+    #      (deploy/ch-goose/README.md, "Adopting an existing cluster");
+    #   2. DDL credentials reach the Job (the service's read-only
+    #      GRID_CLICKHOUSE_USERNAME is never reused), in ONE of three ways:
+    #      a. secretsManager.secretId (recommended): ch-migrate reads
+    #         <env>/platform/clickhouse/default-admin ({"username", "password"})
+    #         from AWS Secrets Manager at start-up, as the pod identity (platform-sa).
+    #         Needs secretsmanager:GetSecretValue on that secret for platform-sa's role
+    #         (+ kms:Decrypt if the secret uses a customer-managed key). Only this Job
+    #         reads it; app pods never see the admin password.
+    #      b. credentialsSecret.name: a k8s Secret with the same keys (e.g. synced by ESO).
+    #      c. neither: GRID_CH_MIGRATE_USERNAME / GRID_CH_MIGRATE_PASSWORD in the
+    #         platform-secret.
+    # The endpoint is GRID_CLICKHOUSE_ADDR from the platform-secret in every case.
+    # A failing Job fails the release and Helm rolls it back.
+    migrations:
+      enabled: false
+      # On-prem: ClickHouse as replicas + Keeper. An init container rewrites the migrations' plain
+      # MergeTree-family engines to Replicated* (see scripts/patch-platform-grid-replicated.py).
+      replicatedEngines: false
+      secretsManager:
+        secretId: ""
+        region: ""
+      credentialsSecret:
+        name: ""
+        usernameKey: username
+        passwordKey: password
+      image:
+        pullPolicy: IfNotPresent
+        registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+        name: grid-migrations
+        version: latest
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+
+    # NOTE: grid is a single read-only query service. The former GRID_ROLE=control
+    # background worker (SoT sync / discovery resolution) was removed — the registry
+    # owns the estate PG system of record and its reconciliation write path.
+
+    replicas: 1
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the Deployment's pods. Off by default. minDomains: with eligible
+    # nodes in one zone only, a pod that would break the spread waits for a node in
+    # another zone instead of joining the first. matchLabelKeys: a rollout spreads the
+    # new ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

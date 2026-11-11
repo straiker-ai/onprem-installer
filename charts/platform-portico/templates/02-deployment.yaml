@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+{{- $otel := .Values.straiker.portico.observability.otel }}
+{{- $otelEnabled := $otel.enabled | default true }}
+metadata:
+  labels:
+    app.straiker.io/app: portico
+    {{- include "straiker.labels" . | nindent 4 }}
+  {{- with .Values.straiker.portico.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  name: {{ include "straiker.name" . }}-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.straiker.portico.hpa.enabled }}
+  # Omitted when the HPA owns this Deployment: a literal replicas here is
+  # reapplied on every upgrade, so a release during a scale-out would snap the
+  # count back to the values-file floor before the HPA could scale it up again.
+  replicas: {{ .Values.straiker.portico.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: portico
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: portico
+        {{- include "straiker.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.straiker.portico.serviceAccount.name }}
+      {{- if .Values.straiker.portico.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.portico.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: portico
+          ports:
+            - name: http
+              containerPort: {{ .Values.straiker.portico.port }}
+              protocol: TCP
+          image: "{{ .Values.straiker.portico.image.registry }}/{{ .Values.straiker.portico.image.name }}:{{ .Values.straiker.portico.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.portico.image.pullPolicy }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          envFrom:
+            - configMapRef:
+                name: {{ include "straiker.name" . }}-config
+            # Shared platform-secret (required): missing secret fails the rollout
+            # loudly instead of silently disabling the facades.
+            - secretRef:
+                name: {{ .Values.straiker.portico.secretName }}
+            {{- if $otelEnabled }}
+            - secretRef:
+                name: {{ $otel.secretName | default "otel-secret" }}
+                {{- if not ($otel.requireSecret | default false) }}
+                optional: true
+                {{- end }}
+            {{- end }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: {{ $otel.serviceName | default "portico" | quote }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.version={{ .Values.straiker.portico.image.version }},deployment.environment={{ .Values.straiker.portico.environment }}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.straiker.portico.resources | nindent 12 }}
+      {{- with .Values.straiker.portico.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.portico.affinity }}
+      affinity:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.portico.topologySpread }}
+      {{- if .enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .maxSkew }}
+          {{- with .minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.straiker.io/app: portico
+              {{- include "straiker.selectorLabels" $ | nindent 14 }}
+          {{- with .matchLabelKeys }}
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- with .Values.straiker.portico.tolerations }}
+      tolerations:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0

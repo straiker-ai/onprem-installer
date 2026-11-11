@@ -1,0 +1,34 @@
+# On-prem overlay for platform-api-gateway (hand-maintained; scripts/sync-api-gateway-chart.sh never
+# touches it). OAuth and PAT validation are in-memory (no Cognito). The installer (phase 'platform-services',
+# install_api_gateway) picks the mode and supplies the per-install values (nothing secret is stored here):
+#   FULL      (default with --data-layer): DynamoDB environment table + Secrets Manager key bundle
+#             <cluster>/platform/api-gateway + integration-key edge, all via Pod Identity;
+#   READ-ONLY (fallback): static environment ConfigMap, no AWS services; the Secrets Manager provider is
+#             off, so s2s keys (foundation, argus) are unavailable.
+straiker:
+  readonly:
+    enabled: false
+  apiGateway:
+    # Public base URL (https://api.<appDomain>) is set by the installer when the edge is configured.
+    gateway:
+      baseUrl: ""
+    oauth:
+      mode: inmemory
+      inmemory:
+        tokenTtlSeconds: 3600
+    pat:
+      mode: inmemory
+    # Unused (in-memory auth) but the template requires strings, not nulls.
+    cognito: { issuerUrl: "", domain: "", u2sClientId: "", region: "" }
+    dynamodb: { environmentTable: "" }
+    singleNamespace: true
+    argusV3Namespace: argus
+    serviceAccount:
+      create: true
+      name: straiker-api-gateway-sa
+    replicas: 1
+    hpa:
+      enabled: false
+    # No dedicated node pool on-prem (Karpenter provisions per workload).
+    affinity: {}
+    tolerations: []

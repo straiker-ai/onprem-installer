@@ -1,0 +1,20 @@
+apiVersion: v2
+name: platform-portico
+version: "2026.11.300"
+appVersion: "v2026.11.3"
+description: Straiker Platform portico - the grouped product facade plane (Defend, Ascend, ...) over the product engines
+home: https://straiker.ai
+keywords:
+  - straiker
+  - platform
+  - portico
+  - facade
+  - api
+maintainers:
+  - email: info@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/platform/tree/main/services/portico/deploy/helm/portico
+type: application
+kubeVersion: '>= 1.29.0-0'

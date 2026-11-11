@@ -1,0 +1,57 @@
+{{- $db := .Values.straiker.databridge }}
+{{- $ingest := $db.roles.ingest }}
+{{- if and $ingest.enabled $ingest.listenerPort }}
+# Internal ingest endpoint for the push/listener source. ClusterIP only (no
+# ingress): producers are trusted in-cluster callers (other services, CDC
+# emitters, on-prem agents), authenticated by the listener's token/HMAC. This is
+# NOT the customer api-gateway path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" . }}-ingest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge
+    app.straiker.io/role: ingest
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.straiker.io/app: databridge
+    app.straiker.io/role: ingest
+    {{- include "straiker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: listener
+      protocol: TCP
+      port: {{ $ingest.listenerPort }}
+      targetPort: listener
+  type: ClusterIP
+{{- if $ingest.networkPolicy.enabled }}
+---
+# Lock the listener to same-namespace callers. The health port stays open so
+# kubelet probes and intra-cluster health checks are unaffected. Cross-namespace
+# producers need an explicit namespaceSelector added here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "straiker.name" . }}-ingest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.straiker.io/app: databridge
+      app.straiker.io/role: ingest
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: listener
+          protocol: TCP
+    - ports:
+        - port: http
+          protocol: TCP
+{{- end }}
+{{- end }}

@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  REGISTRY_PORT: {{ .Values.straiker.registry.port | quote }}
+  REGISTRY_LOG_LEVEL: {{ .Values.straiker.registry.logLevel | quote }}
+  REGISTRY_ENVIRONMENT: {{ .Values.straiker.registry.environment | quote }}
+  # Public ingest DSN; it grants event submission only and is intentionally blank locally.
+  REGISTRY_SENTRY_DSN: {{ .Values.straiker.registry.observability.sentry.dsn | default "" | quote }}
+  REGISTRY_SERVER_READ_TIMEOUT: {{ .Values.straiker.registry.server.readTimeout | quote }}
+  REGISTRY_SERVER_WRITE_TIMEOUT: {{ .Values.straiker.registry.server.writeTimeout | quote }}
+  REGISTRY_SERVER_IDLE_TIMEOUT: {{ .Values.straiker.registry.server.idleTimeout | quote }}
+  # Postgres pool sizing (non-secret). The DSN itself is a secret
+  # (REGISTRY_DATABASE_CONNECTION_STRING) delivered via the platform-secret.
+  REGISTRY_DATABASE_MAX_CONNS: {{ .Values.straiker.registry.database.maxConns | quote }}
+  REGISTRY_DATABASE_MIN_CONNS: {{ .Values.straiker.registry.database.minConns | quote }}
+  # Integration credential store: the Secrets Manager prefix under which the
+  # registry MINTS agent credentials (writes {prefix}tenants/{straiker_id}); it
+  # persists only the secret_ref. Empty disables issuance (ANY onboarding -> 502; every mode mints a key).
+  # The pod's platform-sa must hold SM write on this prefix (see docs/INFRA.md).
+  REGISTRY_SECRETS_PREFIX: {{ .Values.straiker.registry.secrets.prefix | quote }}
+  # Reconciler (R2.2, discovered write path): scans grid's landing layer in
+  # ClickHouse (read-only) and mints canonical resources/aliases for observed
+  # refs not already mapped. Non-secret knobs here; the CH endpoint + credentials
+  # (REGISTRY_CLICKHOUSE_ADDR/USERNAME/PASSWORD/SECURE, reusing grid's read-only
+  # user) come from the platform-secret. Empty ADDR or disabled => path off.
+  REGISTRY_CLICKHOUSE_DATABASE: {{ .Values.straiker.registry.clickhouse.database | quote }}
+  REGISTRY_CLICKHOUSE_SECURE: {{ .Values.straiker.registry.clickhouse.secure | quote }}
+  REGISTRY_CLICKHOUSE_DIAL_TIMEOUT: {{ .Values.straiker.registry.clickhouse.dialTimeout | quote }}
+  # Out-of-the-box control policies, seeded once into each new tenant on its first
+  # agent (docs/DEFAULT_POLICIES.md). Existing tenants opt in through the operator API.
+  REGISTRY_DEFAULT_POLICIES_SEED: {{ .Values.straiker.registry.defaultPolicies.seed | quote }}
+  REGISTRY_DEFAULT_POLICIES_INTERVAL_SECONDS: {{ .Values.straiker.registry.defaultPolicies.intervalSeconds | quote }}
+  REGISTRY_USER_CONTROLS_TENANTS: {{ .Values.straiker.registry.userControls.tenants | default "" | quote }}
+  REGISTRY_RECONCILE_ENABLED: {{ .Values.straiker.registry.reconcile.enabled | quote }}
+  REGISTRY_RECONCILE_INTERVAL_SECONDS: {{ .Values.straiker.registry.reconcile.intervalSeconds | quote }}
+  REGISTRY_RECONCILE_LAG_SECONDS: {{ .Values.straiker.registry.reconcile.lagSeconds | quote }}
+  REGISTRY_RECONCILE_MAX_WINDOW_HOURS: {{ .Values.straiker.registry.reconcile.maxWindowHours | quote }}
+  REGISTRY_RECONCILE_INITIAL_BACKFILL_HOURS: {{ .Values.straiker.registry.reconcile.initialBackfillHours | quote }}
+  # Agent purge worker: deletes a deleted agent's ClickHouse facts. Same CH service as
+  # above with its own delete-scoped user (REGISTRY_CLICKHOUSE_PURGE_USERNAME/PASSWORD
+  # in the platform-secret, docs/INFRA.md §8a). Absent those => worker off, jobs queue.
+  REGISTRY_AGENT_PURGE_INTERVAL_SECONDS: {{ .Values.straiker.registry.agentPurge.intervalSeconds | quote }}
+  REGISTRY_AGENT_PURGE_BATCH_SIZE: {{ .Values.straiker.registry.agentPurge.batchSize | quote }}
+  REGISTRY_AGENT_PURGE_MUTATION_WAIT_SECONDS: {{ .Values.straiker.registry.agentPurge.mutationWaitSeconds | quote }}
+  REGISTRY_AGENT_PURGE_MAX_ATTEMPTS: {{ .Values.straiker.registry.agentPurge.maxAttempts | quote }}
+  # API-gateway base URL for the outbound S2S control-definitions fetch (non-secret).
+  # The bearer is REGISTRY_GATEWAY_S2S_KEY (platform-secret). Empty => surface disabled.
+  REGISTRY_GATEWAY_URL: {{ .Values.straiker.registry.gateway.url | quote }}
+  # NEITHER enforcement vendor takes configuration here. Each tenant's API client is
+  # collected at onboarding and stored in the secret store, then resolved per action, so
+  # REGISTRY_EDR_CROWDSTRIKE_CLOUD / _CLIENT_ID / _CLIENT_SECRET and
+  # REGISTRY_SASE_ZSCALER_CLOUD / _VANITY_DOMAIN / _CLIENT_ID / _CLIENT_SECRET are all
+  # gone. The platform-secret entries can be dropped once no deployment references them.
+  # Scan engines (MCP / model / skill). All non-secret: unlike every other outbound call,
+  # there is no shared key to hide, because the engine authenticates a TENANT from an
+  # X-Straiker-Auth-Context header registry mints per call. Empty URL => client nil =>
+  # orchestrator never starts => submissions record and stay `pending`.
+  # Agentforce inventory sweep cadence, in hours. 0 disables the sweep while leaving the
+  # connector onboardable and verifiable -- the same "off means genuinely off" split the
+  # scan block below makes, and the reason it is a cadence rather than a boolean is that
+  # there is no useful third state.
+  REGISTRY_AGENTFORCE_SWEEP_HOURS: {{ .Values.straiker.registry.agentforce.sweepHours | quote }}
+  # Workforce directory refresh cadence, in hours. 0 disables the ticker. The pull
+  # credential is per tenant and is not configured here.
+  REGISTRY_DIRECTORY_REFRESH_HOURS: {{ .Values.straiker.registry.directory.refreshHours | default 24 | quote }}
+  REGISTRY_SCAN_URL: {{ .Values.straiker.registry.scan.url | quote }}
+  REGISTRY_SCAN_TIMEOUT_MS: {{ .Values.straiker.registry.scan.timeoutMs | quote }}
+  REGISTRY_SCAN_ORCHESTRATOR_ENABLED: {{ .Values.straiker.registry.scan.orchestratorEnabled | quote }}
+  REGISTRY_SCAN_INTERVAL_SECONDS: {{ .Values.straiker.registry.scan.intervalSeconds | quote }}
+  # 0 DISABLES dispatch rather than meaning unlimited — a URL alone gets you a client and
+  # no scans. Deliberate: an unset cap on a queue that spends real money is not a safe
+  # default, so the number has to be said out loud.
+  REGISTRY_SCAN_MAX_IN_FLIGHT: {{ .Values.straiker.registry.scan.maxInFlight | quote }}
+  # Opposite zero-sense to MAX_IN_FLIGHT above: 0 here means NO per-tenant limit, with the
+  # fleet cap still the backstop on spend.
+  REGISTRY_SCAN_MAX_PER_TENANT_IN_FLIGHT: {{ .Values.straiker.registry.scan.maxPerTenantInFlight | quote }}
+  # Event bus (agent-config producer): non-secret transport/auth knobs. The
+  # broker list (REGISTRY_BUS_BROKERS) and any SCRAM creds come from platform-secret;
+  # empty brokers disables the producer. TLS + aws_msk_iam target MSK; the zero
+  # values target local PLAINTEXT Redpanda.
+  REGISTRY_BUS_TLS: {{ .Values.straiker.registry.bus.tls | default false | quote }}
+  REGISTRY_BUS_SASL_MECHANISM: {{ .Values.straiker.registry.bus.sasl.mechanism | default "" | quote }}
+  REGISTRY_BUS_SASL_REGION: {{ .Values.straiker.registry.bus.sasl.region | default "" | quote }}
+  REGISTRY_TOPICS_AGENT_CONFIG: {{ .Values.straiker.registry.topics.agentConfig | quote }}
+  REGISTRY_M365_REDIRECT_URI: {{ .Values.straiker.registry.m365.redirectUri | default "" | quote }}
+  REGISTRY_M365_DATAVERSE_REDIRECT_URI: {{ .Values.straiker.registry.m365.dataverseRedirectUri | default "" | quote }}
+  REGISTRY_M365_NOTIFICATION_URL: {{ .Values.straiker.registry.m365.notificationUrl | default "" | quote }}
+  REGISTRY_M365_LIFECYCLE_URL: {{ .Values.straiker.registry.m365.lifecycleUrl | default "" | quote }}
+  REGISTRY_M365_PUBLIC_API_BASE: {{ .Values.straiker.registry.m365.publicApiBase | default "" | quote }}
+  REGISTRY_M365_UI_ORIGINS: {{ .Values.straiker.registry.m365.uiOrigins | default "" | quote }}
+  REGISTRY_M365_MAINTENANCE_INTERVAL_SECONDS: {{ .Values.straiker.registry.m365.maintenanceIntervalSeconds | default 10800 | quote }}
+  REGISTRY_AWS_ONBOARD_ASSUMER_ROLE_ARN: {{ .Values.straiker.registry.awsOnboard.assumerRoleArn | default "" | quote }}
+  REGISTRY_AWS_ONBOARD_BEDROCK_IAM_ROLE_TEMPLATE_URL: {{ .Values.straiker.registry.awsOnboard.bedrockIamRoleTemplateUrl | default "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-bedrock-iam.yaml" | quote }}
+  REGISTRY_AWS_ONBOARD_BEDROCK_IAM_USER_TEMPLATE_URL: {{ .Values.straiker.registry.awsOnboard.bedrockIamUserTemplateUrl | default "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-bedrock-iam-user.yaml" | quote }}
+  REGISTRY_AWS_ONBOARD_LOG_INGEST_TEMPLATE_URL: {{ .Values.straiker.registry.awsOnboard.logIngestTemplateUrl | default "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-log-ingest-s3-reader.yaml" | quote }}
+  REGISTRY_ENCRYPTION_BUCKET: {{ .Values.straiker.registry.encryption.bucket | default "" | quote }}
+  REGISTRY_ENCRYPTION_REGION: {{ .Values.straiker.registry.encryption.region | default "" | quote }}
+  REGISTRY_ENCRYPTION_ROLE_ARN: {{ .Values.straiker.registry.encryption.roleArn | default "" | quote }}

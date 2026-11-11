@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  DATABRIDGE_PORT: {{ .Values.straiker.databridge.port | quote }}
+  DATABRIDGE_LOG_LEVEL: {{ .Values.straiker.databridge.logLevel | quote }}
+  DATABRIDGE_ENVIRONMENT: {{ .Values.straiker.databridge.environment | quote }}
+  # Sentry DSNs are write-only ingest keys, not credentials.
+  DATABRIDGE_SENTRY_DSN: {{ .Values.straiker.databridge.observability.sentry.dsn | quote }}
+  DATABRIDGE_SERVER_READ_TIMEOUT: {{ .Values.straiker.databridge.server.readTimeout | quote }}
+  DATABRIDGE_SERVER_WRITE_TIMEOUT: {{ .Values.straiker.databridge.server.writeTimeout | quote }}
+  DATABRIDGE_SERVER_IDLE_TIMEOUT: {{ .Values.straiker.databridge.server.idleTimeout | quote }}
+  DATABRIDGE_DELIVERY_MODE: {{ .Values.straiker.databridge.delivery.mode | quote }}
+  DATABRIDGE_DELIVERY_STREAMS_CONFIG_MAP: {{ .Values.straiker.databridge.delivery.streamsConfigMap | quote }}
+  # The ingest role's shared push listener binds this addr; matches the ingest
+  # container's listener port + the internal ingest Service.
+  DATABRIDGE_INGEST_LISTEN_ADDR: ":{{ .Values.straiker.databridge.roles.ingest.listenerPort }}"
+  # Governance: field-catalog directory (baked into the image) + the posture for
+  # data_types with no catalog (deny = export nothing; passthrough = raw).
+  DATABRIDGE_CATALOG_DIR: {{ .Values.straiker.databridge.catalog.dir | quote }}
+  DATABRIDGE_DELIVERY_UNCATALOGED: {{ .Values.straiker.databridge.delivery.uncataloged | quote }}
+  DATABRIDGE_DELIVERY_TOPIC_PARTITIONS: {{ .Values.straiker.databridge.delivery.topicPartitions | quote }}
+  {{- with .Values.straiker.databridge.bus }}
+  # Event-bus auth (non-secret). Broker list comes from env (chart Redpanda) or
+  # the platform-secret (external/MSK). SCRAM/PLAIN credentials, when used, come
+  # from the platform-secret (DATABRIDGE_BUS_SASL_USERNAME / _PASSWORD).
+  DATABRIDGE_BUS_TLS: {{ .tls | default false | quote }}
+  DATABRIDGE_BUS_SASL_MECHANISM: {{ .sasl.mechanism | default "" | quote }}
+  DATABRIDGE_BUS_SASL_REGION: {{ .sasl.region | default "" | quote }}
+  {{- end }}
+  {{- with .Values.straiker.databridge.secrets }}
+  {{- if .prefix }}
+  # Base secret-handle prefix for databridge-managed sink credentials under the
+  # env's platform namespace (e.g. dev/platform/databridge/). Customer creds live
+  # at <prefix>tenants/<tenant_id>; platform creds at <prefix>platform.
+  DATABRIDGE_SECRETS_PREFIX: {{ .prefix | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.straiker.databridge.sinkProbe }}
+  {{- if .baseRoleArn }}
+  # Role assume_role sink probes hop through (the databridge-delivery role), so
+  # customers trust one Straiker principal for both probe and delivery.
+  DATABRIDGE_SINK_PROBE_BASE_ROLE_ARN: {{ .baseRoleArn | quote }}
+  {{- end }}
+  {{- end }}

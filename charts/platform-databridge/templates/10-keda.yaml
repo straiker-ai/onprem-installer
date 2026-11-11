@@ -1,0 +1,27 @@
+{{- $db := .Values.straiker.databridge }}
+{{- $keda := $db.benthos.keda }}
+{{- if and $db.benthos.enabled $keda.enabled }}
+# Autoscale the Benthos data plane on aggregate Kafka consumer-group lag. Benthos
+# runs one consumer group per route, so we scale on a summed lag metric via the
+# Prometheus trigger (point prometheusAddress at a kafka-lag-exporter/Prometheus).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "straiker.name" . }}-benthos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "straiker.name" . }}-benthos
+  minReplicaCount: {{ $keda.minReplicas }}
+  maxReplicaCount: {{ $keda.maxReplicas }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $keda.prometheusAddress | quote }}
+        query: {{ $keda.query | quote }}
+        threshold: {{ $keda.threshold | quote }}
+{{- end }}

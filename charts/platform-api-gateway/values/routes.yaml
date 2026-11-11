@@ -1,0 +1,445 @@
+routes:
+  - id: pathfinder-ask-svc
+    uri: http://pathfinder.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:8080
+    predicates:
+      - Path=/api/ask,/api/ask/{request_id}
+    filters:
+      - RewritePath=/api/(?<segment>.*),/api/v1/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: pathfinder-svc
+    uri: http://pathfinder.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:8080
+    predicates:
+      - Path=/internal/detection/**
+    filters:
+      - RewritePath=/internal/detection/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Product-facing alias for scout's public surface: internal service names must
+  # not appear in customer-facing URLs. Same backend paths as /api/scout/**,
+  # which stays for UI consumers but is excluded from the public docs by the
+  # openapi.public-docs.path-prefixes allowlist.
+  - id: inventory-api-svc
+    uri: http://scout.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/inventory/**
+    filters:
+      - RewritePath=/api/inventory/(?<segment>.*),/api/v1/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: scout-api-svc
+    uri: http://scout.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/scout/**
+    filters:
+      - RewritePath=/api/scout/(?<segment>.*),/api/v1/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: falcon-svc
+    uri: http://falcon.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:9020
+    predicates:
+      - Path=/internal/falcon/**
+    filters:
+      - RewritePath=/internal/falcon/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: scout-api-svc-internal
+    uri: http://scout.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/internal/scout/**
+    filters:
+      - RewritePath=/internal/scout/(?<segment>.*),/internal/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # /mcp/v1 is served by the gateway's own MCP server (McpServerConfig), not a
+  # route: tools are derived from x-mcp-tool markers in service OpenAPI specs.
+  # Services expose MCP functionality by marking operations, not by routing.
+  - id: compass-api-svc
+    uri: http://compass.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/internal/compass/**
+    filters:
+      - RewritePath=/internal/compass/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: bridge-rest-api-webhook
+    uri: http://bridge-envoy-public.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/v1/detect/webhook
+  - id: bridge-rest-api
+    uri: http://bridge-envoy-public.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/v1/detect
+      - Query=agentic
+  - id: bridge-rest-api-v2
+    uri: http://bridge-envoy-public.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/v2/detect
+    filters:
+      - RewritePath=/api/v2/(?<segment>.*),/api/v1/$\{segment}
+  # Gateway routes (U2S): ai-gateway calls with the customer Straiker key (Bearer);
+  # the env key is validated by the U2S chain and the AuthContext is forwarded to
+  # the bridge. Covers gateway/config (fetch app config) and gateway/register
+  # (mark an app as gateway-routed; the bridge derives straikerId/environmentId
+  # from the forwarded context).
+  - id: bridge-gateway
+    uri: http://bridge-envoy-public.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:443
+    predicates:
+      - Path=/api/v1/gateway/*
+  - id: argus-rest-api
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "argus") }}:80
+    predicates:
+      - Path=/api/v1/detect
+    filters:
+      - RemoveRequestHeader=X-Straiker-Auth-Context
+  - id: argus-rest-api-integrations
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "argus") }}:80
+    predicates:
+      - Path=/api/v1/integrations/*/detect
+    filters:
+      - RemoveRequestHeader=X-Straiker-Auth-Context
+  # New detection-engine ingress. Authenticated by the integration-key edge
+  # (SecurityConfig.detectFilterChain, active only when
+  # straiker.integration-keys.secret-prefix is set for the environment):
+  # customers present a registry-minted sk_agt_ key which the gateway resolves
+  # against Secrets Manager and stamps as a TRUSTED X-Straiker-Auth-Context
+  # (integration_id/agent_id/app_id/key_id). Unlike the v1 argus routes above we
+  # do NOT strip X-Straiker-Auth-Context here: the global default-filters strip
+  # the client-supplied copy and then AuthContextForwarding re-stamps the trusted
+  # one, so the engine receives only gateway-attested attribution. Interim upstream
+  # is argus; the engine mounts the /api/v3/detect handler. The customer bearer is
+  # dropped before proxying (RemoveRequestHeader=Authorization).
+  #
+  # Upstream namespace is straiker.apiGateway.argusV3Namespace, which is `argus`
+  # (the v1 engine's interim handler) until an environment has v3 deployed. It is
+  # shared with platform-argus-internal-v3 below and the two must never diverge:
+  # see the note on that value for what happens when the engine serving detect is
+  # not the one publishing the control catalog.
+  - id: detect-v3
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" .Values.straiker.apiGateway.argusV3Namespace) }}:80
+    predicates:
+      - Path=/api/v3/detect/**
+    filters:
+      - RemoveRequestHeader=Authorization
+
+
+  # Agent Platform Onboarding routes -- Start
+  - id: third-party-scanner-microsoft-callbacks
+    uri: http://agent-scanner.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/public/agent-config/microsoft/*/callback
+    filters:
+      - RewritePath=/public/agent-config/microsoft/(?<flow>.*)/callback, /public/v1/agents/config/microsoft/$\{flow}/callback
+      - RemoveRequestHeader=Authorization
+  - id: third-party-scanner-webhook
+    uri: http://agent-scanner.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/webhook/*/agent-config/**
+    filters:
+      - RewritePath=/api/webhook/[^/]+/agent-config/(?<segment>.*), /webhook/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: agent-scanner-svc
+    uri: http://agent-scanner.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/agent-config/**
+    filters:
+      - RewritePath=/api/agent-config/(?<segment>.*),/api/v1/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Agent Platform Onboarding routes -- End
+
+  # Agent Platform S2S routes -- Start
+  - id: agent-scanner-s2s-api
+    uri: http://agent-scanner.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/internal/agent-config/**
+    filters:
+      - RewritePath=/internal/agent-config/(?<segment>.*),/internal/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Agent Platform S2S routes -- End
+
+  # Ingest API routes -- Start
+
+  # SDK webhook (cursor, claude-code, github-copilot, snowflake-cortex-code)
+  - id: third-party-ingest-api
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/v1/webhook/ingest
+    filters:
+      - RewritePath=/api/v1/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # M365 Copilot webhook — deprecated path (remove once subscriptions are re-provisioned)
+  - id: third-party-ingest-m365-webhook
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/copilot-webhook
+    filters:
+      - RemoveRequestHeader=Authorization
+  # M365 Copilot + Copilot Studio webhooks
+  - id: third-party-ingest-copilot-webhooks
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/webhook/*/ingest/copilot,/api/webhook/*/ingest/copilot-studio/**
+    filters:
+      - RewritePath=/api/webhook/[^/]+/ingest/(?<segment>.*),/webhook/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Copilot Studio threat detection, scored by Argus v3. Microsoft appends
+  # /validate and /analyze-tool-execution to the base the registry publishes
+  # (/api/v3/webhook/{key}/copilot-studio). The path is preserved: Argus serves
+  # both, and /validate is not a detect call. The Entra bearer is dropped; the
+  # sk_agt_ key in the path is resolved by detectFilterChain and stamped as
+  # X-Straiker-Auth-Context. Nothing else under copilot-studio/** is routed: the
+  # ingest-api catch-all only ever served these two paths.
+  # Upstream namespace is straiker.apiGateway.argusV3Namespace, the same value
+  # detect-v3 uses, so this and the control catalog stay on one engine.
+  - id: copilot-studio-v3
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" .Values.straiker.apiGateway.argusV3Namespace) }}:80
+    order: -20
+    predicates:
+      - Path=/api/v3/webhook/*/copilot-studio/validate,/api/v3/webhook/*/copilot-studio/analyze-tool-execution
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Platform M365 Copilot Graph notify (integration-key path), buffered and
+  # joined to the tool gate's calls by Argus v3. The path is preserved, as for
+  # copilot-studio-v3 above; same engine, same namespace.
+  - id: third-party-ingest-copilot-v3-notify
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" .Values.straiker.apiGateway.argusV3Namespace) }}:80
+    predicates:
+      - Path=/api/v3/webhook/*/copilot
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Platform Graph lifecycle (integration-key path) → registry
+  - id: platform-registry-m365-lifecycle-v3
+    uri: http://registry.{{ .Release.Namespace }}:80
+    predicates:
+      - Path=/api/v3/webhook/*/m365/lifecycle
+    filters:
+      - RewritePath=/api/v3/webhook/[^/]+/m365/lifecycle,/webhook/m365/lifecycle
+      - RemoveRequestHeader=Authorization
+  - id: platform-registry-cs-callbacks
+    uri: http://registry.{{ .Release.Namespace }}:80
+    predicates:
+      - Path=/public/v3/onboard/copilot-studio/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Claude Cowork OTel webhook and Swatchd webhook
+  - id: third-party-ingest-cowork-webhook
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/webhook/_original/ingest/cowork/**,/api/webhook/_original/ingest/swatchd/**
+    filters:
+      - RewritePath=/api/webhook/[^/]+/ingest/(?<segment>.*),/api/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Sentry (ai-agent-scanner) report egress, on the v3 webhook prefix. Same
+  # ingest-api endpoints as the swatchd route above; the only reason it exists
+  # separately is authentication. /api/webhook/** falls to the /api/** U2S chain,
+  # which resolves a bearer as a UUID environment key and therefore 401s a
+  # registry-minted sk_agt_ key. /api/v3/webhook/** is matched by
+  # SecurityConfig.detectFilterChain, which resolves the key against Secrets
+  # Manager and stamps the trusted attribution. The `_original` sentinel keeps
+  # the key in the Authorization header rather than the URL, and the rewrite
+  # lands on the same /api/swatchd/** upstream paths as the legacy route, so
+  # ingest-api needs no path change. The customer bearer is dropped before
+  # proxying: the global default-filters strip any client-supplied
+  # X-Straiker-Auth-Context and AuthContextForwarding re-stamps the gateway's own
+  # (straikerId + integration_id/agent_id/app_id/key_id).
+  - id: third-party-ingest-sentry-v3-webhook
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/v3/webhook/_original/ingest/swatchd/**
+    filters:
+      - RewritePath=/api/v3/webhook/[^/]+/ingest/(?<segment>.*),/api/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # The endpoint scanner's own name for the route above. Same upstream, same
+  # handlers -- ingest-api mounts them on both prefixes (registerSentryRoutes).
+  #
+  # The scanner rode the swatchd route because it already existed and needed no
+  # gateway change. swatchd is a different product and the scanner was never
+  # part of it, so every customer-facing URL named it after something unrelated.
+  # This is the name it should have had; the route above cannot be withdrawn
+  # because customers are installed against it.
+  #
+  # The rewrite differs from its sibling: that one passes the first path segment
+  # through, so `swatchd/...` reaches `/api/swatchd/...`. This one REPLACES the
+  # segment, mapping `endpoint-scanner/v1/presign` onto
+  # `/api/endpoint-scanner/v1/presign` -- and ingest-api drops the now-redundant
+  # `sentry/` the legacy paths carry, since the prefix already says which
+  # product this is.
+  - id: third-party-ingest-endpoint-scanner-v3-webhook
+    uri: http://ingest-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "third-party") }}:8080
+    predicates:
+      - Path=/api/v3/webhook/_original/ingest/endpoint-scanner/**
+    filters:
+      - RewritePath=/api/v3/webhook/[^/]+/ingest/endpoint-scanner/(?<segment>.*),/api/endpoint-scanner/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Ingest API routes -- End
+
+  - id: z3-detection
+    uri: http://z3.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "detection") }}:8080
+    predicates:
+      - Path=/internal/alpha/detection/**
+    filters:
+      - RewritePath=/internal/alpha/detection/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: policy-svc
+    uri: http://policy-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:8080
+    predicates:
+      - Path=/api/policy/**
+    filters:
+      - RewritePath=/api/policy/(?<segment>.*),/api/v1/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: policy-svc-internal
+    uri: http://policy-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:8080
+    predicates:
+      - Path=/internal/policy/**
+    filters:
+      - RewritePath=/internal/policy/(?<segment>.*),/internal/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: config-scanner-internal
+    uri: http://config-scanner.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "backend") }}:8080
+    predicates:
+      - Path=/internal/config-scanner/**
+    filters:
+      - RewritePath=/internal/config-scanner/(?<segment>.*),/internal/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: fluxdns-api-svc
+    uri: http://fluxdns-api.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "fluxdns") }}:80
+    predicates:
+      - Path=/internal/fluxdns/**
+    filters:
+      - RewritePath=/internal/fluxdns/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  - id: prism-api-svc
+    uri: http://prism.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "surveyor") }}:8080
+    predicates:
+      - Path=/api/prism/**
+    filters:
+      - RewritePath=/api/prism/(?<segment>.*),/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Platform Routes -- Start
+  - id: platform-portico-v3
+    uri: http://portico.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/defend/**,/api/v3/ascend/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Ascend adaptor authoring, manual red-team sessions and the Ascend Agent API are served by iris; portico keeps
+  # applications, assessments and controls. order must stay below platform-portico-v3's -10,
+  # which claims all of /api/v3/ascend/** and would otherwise shadow these paths.
+  # Stripping Authorization is what keeps iris from falling back to its
+  # s2s/bridge-token branches and letting a caller pick its own identity.
+  - id: iris-ascend-adapters-v3
+    uri: http://iris-control-plane-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" "iris") }}:80
+    order: -20
+    predicates:
+      - Path=/api/v3/ascend/adapters/**,/api/v3/ascend/applications/*/adapter,/api/v3/ascend/applications/*/adapter/**,/api/v3/ascend/manual/**,/api/v3/ascend/agent/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  - id: platform-databridge-v3
+    uri: http://databridge.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/databridge/**,/api/v3/operator/databridge/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  # foundation: identity/keys/account + docs + the operator control plane —
+  # tenant directory (operator:tenants), STAFF accounts and their role picker
+  # (operator:users, operator/users + operator/roles), and cross-tenant customer
+  # user administration + user lookup (operator:tenant-users, operator/directory).
+  # All cross-tenant. Scopes are enforced downstream.
+  - id: platform-core-v3
+    uri: http://foundation.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/api-keys/**,/api/v3/account/**,/api/v3/auth/**,/api/v3/openapi.yaml,/api/v3/docs,/api/v3/operator/openapi.yaml,/api/v3/operator/docs,/api/v3/operator/tenants/**,/api/v3/operator/users/**,/api/v3/operator/roles/**,/api/v3/operator/directory/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  - id: platform-connect-v3
+    uri: http://connect-connect.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/connect/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  - id: platform-notify-v3
+    uri: http://connect-notify.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/notify/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Straiker Broker: the customer's brokers, the targets behind them and which products may use them.
+  # Scopes broker:read / broker:write are enforced by the service. The in-cluster /internal/platform/v3/broker
+  # route API is for products and is not exposed here.
+  - id: platform-broker-v3
+    uri: http://broker.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/broker/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  - id: platform-grid-v3
+    uri: http://grid.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/inventory/**,/api/v3/activity/**,/api/v3/insights/**,/api/v3/compliance/**,/api/v3/audit/**,/api/v3/operator/fleet/**,/api/v3/operator/audit/**
+      - Method=GET
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Registry inventory WRITE: mutating methods only (GETs on the same prefix go to
+  # grid above — the method split disambiguates the shared /api/v3/inventory/**).
+  - id: platform-registry-inventory-write-v3
+    uri: http://registry.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/inventory/**
+      - Method=POST,PUT,PATCH,DELETE
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Registry, method-agnostic surfaces (any HTTP method → registry): customer
+  # integration primitives + the connector-recipe onboarding facade (both
+  # integration:write) + per-agent control CONFIGURATION (control:read on GET,
+  # control:write on mutations — both served by registry, so no method split) +
+  # tenant/agent SETTINGS + branding (account:read/write, /api/v3/settings) +
+  # SCAN submission and results (scan:read on GET, scan:write on mutations —
+  # registry serves both, so no method split; the scanner engines are reached by
+  # registry in-cluster, never through this gateway) + operator control-plane
+  # reads operator/catalog (operator:catalog) and operator/registry
+  # (operator:registry) + operator estate cleanup operator/estate
+  # (operator:estate: delete a tenant's agents and integrations, and the
+  # cross-tenant purge job list with retry).
+  # Scopes are enforced downstream; the gateway only routes.
+  - id: platform-registry-v3
+    uri: http://registry.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/api/v3/integrations/**,/api/v3/onboard/**,/api/v3/controls/**,/api/v3/settings/**,/api/v3/scans/**,/api/v3/operator/catalog/**,/api/v3/operator/registry/**,/api/v3/operator/estate/**
+    filters:
+      - RemoveRequestHeader=Authorization
+  # Registry controls for platform services (S2S). The /internal/** chain takes a
+  # Cognito client-credentials token plus X-Straiker-Id and forwards tokenType SERVICE;
+  # registry serves the same /api/v3/controls handlers and skips scope checks for
+  # service tokens.
+  - id: platform-registry-controls-s2s
+    uri: http://registry.{{ .Release.Namespace }}:80
+    order: -10
+    predicates:
+      - Path=/internal/platform/v3/registry/controls/**
+    filters:
+      - RewritePath=/internal/platform/v3/registry/controls/(?<segment>.*),/api/v3/controls/$\{segment}
+      - RemoveRequestHeader=Authorization
+  # Argus internal Control Definition contract (S2S). Distinct from the /api/v3/detect
+  # engine ingress: this is the platform (registry) fetching Argus's read-only control
+  # catalog + settings schemas. Registry authenticates to the dedicated /internal/argus
+  # security chain with an HTTP Basic shared key; the ArgusInternalAuth filter then swaps
+  # in Argus's own internal bearer (from the gateway secret store) so the engine validates
+  # it independently. Path is PRESERVED (Argus serves the full /internal/argus/v3/... path)
+  # — no RewritePath. Authorization is intentionally NOT removed (the filter overwrites it).
+  #
+  # Same upstream namespace as detect-v3 above, from the one value, because the
+  # engine that scores a turn and the engine that publishes the catalog its
+  # settings were written against have to be the same engine. v1 and v3 do not
+  # agree on 14 control ids, so pointing these two at different namespaces makes
+  # an agent's stored configuration silently unreadable by whichever engine is
+  # serving it.
+  - id: platform-argus-internal-v3
+    uri: http://argus-service.{{ include "straiker.resolveNamespace" (dict "root" . "ns" .Values.straiker.apiGateway.argusV3Namespace) }}:80
+    order: -10
+    predicates:
+      - Path=/internal/argus/v3/**
+    filters:
+      - name: ArgusInternalAuth
+  # Platform Routes -- End

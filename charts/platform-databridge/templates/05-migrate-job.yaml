@@ -1,0 +1,54 @@
+{{- if .Values.straiker.databridge.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge
+    {{- include "straiker.labels" . | nindent 4 }}
+  annotations:
+    # Run before the app is installed/upgraded so the schema is ready; re-run on
+    # every release. The Job is cleaned up before the next hook fires and after
+    # it succeeds (failed Jobs are kept for debugging).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.straiker.databridge.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.straiker.databridge.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: databridge
+        {{- include "straiker.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.straiker.databridge.serviceAccount.name }}
+      {{- if .Values.straiker.databridge.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.databridge.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.straiker.databridge.migrations.image.registry }}/{{ .Values.straiker.databridge.migrations.image.name }}:{{ .Values.straiker.databridge.migrations.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.databridge.migrations.image.pullPolicy }}
+          args: ["update"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.straiker.databridge.secretName }}
+      {{- with .Values.straiker.databridge.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.databridge.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.databridge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

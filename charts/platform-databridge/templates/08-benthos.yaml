@@ -1,0 +1,286 @@
+{{- $db := .Values.straiker.databridge }}
+{{- $benthos := $db.benthos }}
+{{- $wait := $benthos.waitForKafkaBroker }}
+{{- if $benthos.enabled }}
+{{- if eq $db.environment "production" }}
+{{- if and (lt (int $benthos.replicas) 2) (not $benthos.keda.enabled) }}
+{{- fail "prod guardrail: straiker.databridge.benthos.replicas must be >= 2 (or keda.enabled with minReplicas >= 2)" }}
+{{- end }}
+{{- if and $benthos.keda.enabled (lt (int $benthos.keda.minReplicas) 2) }}
+{{- fail "prod guardrail: straiker.databridge.benthos.keda.minReplicas must be >= 2" }}
+{{- end }}
+{{- if not $benthos.podDisruptionBudget.enabled }}
+{{- fail "prod guardrail: straiker.databridge.benthos.podDisruptionBudget.enabled must be true" }}
+{{- end }}
+{{- if not $benthos.topologySpread.enabled }}
+{{- fail "prod guardrail: straiker.databridge.benthos.topologySpread.enabled must be true" }}
+{{- end }}
+{{- end }}
+# Chart-owned Benthos (Redpanda Connect) data plane. Runs in streams mode with
+# the watcher (-w) so it hot-reloads the streams ConfigMap the reconciler writes.
+# Every replica mounts the same ConfigMap, so Kafka balances each route's
+# partitions across replicas - this is what makes the Deployment scalable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "straiker.name" . }}-benthos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge-benthos
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $benthos.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ $benthos.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ $benthos.rollingUpdate.maxSurge }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: databridge-benthos
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: databridge-benthos
+        {{- include "straiker.labels" . | nindent 8 }}
+      {{- if $db.observability.grafanaScrape }}
+      annotations:
+        # Grafana Alloy scrape discovery (Prometheus metrics -> Grafana Cloud).
+        k8s.grafana.com/scrape: "true"
+        k8s.grafana.com/metrics.portNumber: "4195"
+        k8s.grafana.com/metrics.path: "/metrics"
+      {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ $benthos.terminationGracePeriodSeconds }}
+      {{- if $benthos.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $benthos.topologySpread.maxSkew }}
+          topologyKey: {{ $benthos.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ $benthos.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-benthos
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      # Dedicated least-privilege data-plane identity (NOT the shared platform-sa):
+      # its pod-identity role grants only sts:AssumeRole (assume_role sinks) +
+      # per-bucket writes (ambient operator sinks), so a data-plane compromise
+      # can't reach the platform secret namespace.
+      serviceAccountName: {{ $benthos.serviceAccount.name }}
+      {{- if $db.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range $db.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- if $wait.enabled }}
+      initContainers:
+        - name: wait-for-kafka-broker
+          image: {{ $wait.image }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              host="{{ default (printf "%s-redpanda" (include "straiker.name" .)) $wait.host }}"
+              port="{{ $wait.port }}"
+              timeout="{{ $wait.timeoutSeconds }}"
+              interval="{{ $wait.pollIntervalSeconds }}"
+
+              end=$(( $(date +%s) + timeout ))
+              until nc -z "$host" "$port"; do
+                if [ "$(date +%s)" -ge "$end" ]; then
+                  echo "Timed out waiting for Kafka at $host:$port"
+                  exit 1
+                fi
+                echo "Waiting for Kafka at $host:$port..."
+                sleep "$interval"
+              done
+              echo "Kafka is reachable at $host:$port"
+      {{- end }}
+      containers:
+        - name: benthos
+          image: {{ $benthos.image }}
+          args:
+            # -c provides the base config (metrics/tracer/logger/http) in streams mode.
+            - "-c"
+            - "/etc/benthos/benthos.yaml"
+            - streams
+            - "-w"
+            - "{{ $benthos.streamsMountPath }}/*.yaml"
+          ports:
+            - name: api
+              containerPort: 4195
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          volumeMounts:
+            - name: streams
+              mountPath: {{ $benthos.streamsMountPath }}
+              readOnly: true
+            - name: benthos-config
+              mountPath: /etc/benthos
+              readOnly: true
+          {{- if or (eq $db.bus.sasl.mechanism "scram-sha-512") (eq $db.bus.sasl.mechanism "scram-sha-256") (eq $db.bus.sasl.mechanism "plain") }}
+          # SCRAM/PLAIN bus credentials interpolated into the rendered kafka_franz
+          # auth (${DATABRIDGE_BUS_SASL_USERNAME}/_PASSWORD). MSK IAM needs none -
+          # it uses the databridge-delivery SA's pod-identity role.
+          env:
+            - name: DATABRIDGE_BUS_SASL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $db.secretName }}
+                  key: DATABRIDGE_BUS_SASL_USERNAME
+            - name: DATABRIDGE_BUS_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $db.secretName }}
+                  key: DATABRIDGE_BUS_SASL_PASSWORD
+          {{- end }}
+          resources:
+            {{- toYaml $benthos.resources | nindent 12 }}
+      volumes:
+        - name: streams
+          configMap:
+            # Written + populated at runtime by the reconciler (configmap mode);
+            # optional so Benthos starts before the first reconcile.
+            name: {{ $db.delivery.streamsConfigMap }}
+            optional: true
+        - name: benthos-config
+          configMap:
+            name: {{ include "straiker.name" . }}-benthos-config
+      {{- with $db.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $db.affinity $benthos.podAntiAffinity.enabled }}
+      affinity:
+        {{- with $db.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $benthos.podAntiAffinity.enabled }}
+        podAntiAffinity:
+          {{- if eq $benthos.podAntiAffinity.type "soft" }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: {{ $benthos.podAntiAffinity.topologyKey }}
+                labelSelector:
+                  matchLabels:
+                    app.straiker.io/app: databridge-benthos
+                    {{- include "straiker.selectorLabels" . | nindent 20 }}
+          {{- else }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: {{ $benthos.podAntiAffinity.topologyKey }}
+              labelSelector:
+                matchLabels:
+                  app.straiker.io/app: databridge-benthos
+                  {{- include "straiker.selectorLabels" . | nindent 18 }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with $db.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" . }}-benthos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.straiker.io/app: databridge-benthos
+    {{- include "straiker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      protocol: TCP
+      port: 4195
+      targetPort: api
+  type: ClusterIP
+---
+# Base Benthos config for streams mode: observability only (the per-route
+# input/pipeline/output come from the reconciler-written streams ConfigMap).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-benthos-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  benthos.yaml: |
+    http:
+      address: 0.0.0.0:4195
+    logger:
+      level: INFO
+      format: json
+    metrics:
+      prometheus: {}
+    {{- if $benthos.otlpEndpoint }}
+    tracer:
+      open_telemetry_collector:
+        grpc:
+          - address: {{ $benthos.otlpEndpoint | quote }}
+        http: []
+    {{- end }}
+{{- if $benthos.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "straiker.name" . }}-benthos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ $benthos.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: databridge-benthos
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+# The API port (4195) only serves health checks and Prometheus metrics, not
+# customer traffic (Benthos's outbound connections to customer targets are
+# egress, unaffected by this): restrict who can reach it in-cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "straiker.name" . }}-benthos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.straiker.io/app: databridge-benthos
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 4195
+{{- end }}

@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  GRID_PORT: {{ .Values.straiker.grid.port | quote }}
+  GRID_LOG_LEVEL: {{ .Values.straiker.grid.logLevel | quote }}
+  GRID_ENVIRONMENT: {{ .Values.straiker.grid.environment | quote }}
+  # A DSN is a write-only ingest key, not a credential, so it belongs here rather
+  # than in the platform-secret.
+  GRID_SENTRY_DSN: {{ .Values.straiker.grid.observability.sentry.dsn | quote }}
+  GRID_SERVER_READ_TIMEOUT: {{ .Values.straiker.grid.server.readTimeout | quote }}
+  GRID_SERVER_WRITE_TIMEOUT: {{ .Values.straiker.grid.server.writeTimeout | quote }}
+  GRID_SERVER_IDLE_TIMEOUT: {{ .Values.straiker.grid.server.idleTimeout | quote }}
+  # ClickHouse non-secret settings; endpoint + credentials come from the
+  # platform-secret (GRID_CLICKHOUSE_ADDR / USERNAME / PASSWORD).
+  GRID_CLICKHOUSE_DATABASE: {{ .Values.straiker.grid.clickhouse.database | quote }}
+  GRID_CLICKHOUSE_SECURE: {{ .Values.straiker.grid.clickhouse.secure | quote }}
+  GRID_CLICKHOUSE_DIAL_TIMEOUT: {{ .Values.straiker.grid.clickhouse.dialTimeout | quote }}
+  # Transcript artifacts. No credentials: S3 access comes from the pod identity role,
+  # which assumes ROLE_ARN (the CMEK transcripts role) when set.
+  # An empty bucket degrades to skeleton-only rather than failing the endpoint.
+  GRID_ARTIFACTS_BUCKET: {{ .Values.straiker.grid.artifacts.bucket | quote }}
+  GRID_ARTIFACTS_REGION: {{ .Values.straiker.grid.artifacts.region | quote }}
+  GRID_ARTIFACTS_ROLE_ARN: {{ .Values.straiker.grid.artifacts.roleArn | quote }}
+  GRID_ARTIFACTS_ENDPOINT: {{ .Values.straiker.grid.artifacts.endpoint | quote }}
+  GRID_ARTIFACTS_MAX_CONCURRENT_FETCHES: {{ .Values.straiker.grid.artifacts.maxConcurrentFetches | quote }}
+  GRID_ARTIFACTS_CACHE_ENTRIES: {{ .Values.straiker.grid.artifacts.cacheEntries | quote }}
+  # Fresh-read overlay. No credential here: the call reuses the shared platform S2S
+  # bearer already delivered via the platform-secret.
+  #
+  # The service reads PRESENCE of the base URL as the switch, so a disabled overlay
+  # is expressed by emitting an empty URL. That keeps one switch (`enabled`) in the
+  # values while the address stays a single shared constant.
+  GRID_PLATFORM_REGISTRY_BASE_URL: {{ if .Values.straiker.grid.overlay.enabled }}{{ .Values.straiker.grid.overlay.registryBaseURL | quote }}{{ else }}""{{ end }}
+  GRID_PLATFORM_OVERLAY_TIMEOUT_MS: {{ .Values.straiker.grid.overlay.timeoutMS | quote }}

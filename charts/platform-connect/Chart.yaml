@@ -1,0 +1,21 @@
+apiVersion: v2
+name: platform-connect
+version: "2026.11.300"
+appVersion: "v2026.11.3"
+description: Straiker Platform connect - connections + authentication plane (customer connection registry, provider credentials, OAuth/token exchange) hosting the notify delivery subservice (send orchestration, message audit, async delivery worker)
+home: https://straiker.ai
+keywords:
+  - straiker
+  - platform
+  - connect
+  - connections
+  - notify
+  - notifications
+maintainers:
+  - email: info@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/platform/tree/main/services/connect/deploy/helm/connect
+type: application
+kubeVersion: '>= 1.29.0-0'

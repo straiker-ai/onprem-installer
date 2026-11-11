@@ -1,0 +1,54 @@
+{{- if .Values.straiker.registry.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: registry
+    {{- include "straiker.labels" . | nindent 4 }}
+  annotations:
+    # Run before the app is installed/upgraded so the schema is ready; re-run on
+    # every release. The Job is cleaned up before the next hook fires and after
+    # it succeeds (failed Jobs are kept for debugging).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.straiker.registry.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.straiker.registry.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: registry
+        {{- include "straiker.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.straiker.registry.serviceAccount.name }}
+      {{- if .Values.straiker.registry.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.registry.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.straiker.registry.migrations.image.registry }}/{{ .Values.straiker.registry.migrations.image.name }}:{{ .Values.straiker.registry.migrations.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.registry.migrations.image.pullPolicy }}
+          args: ["update"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.straiker.registry.secretName }}
+      {{- with .Values.straiker.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.registry.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

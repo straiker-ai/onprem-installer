@@ -1,0 +1,384 @@
+straiker:
+  databridge:
+    port: 8080
+    logLevel: info
+    environment: production
+
+    server:
+      readTimeout: 30
+      writeTimeout: 30
+      idleTimeout: 120
+
+    # Shared platform identity: one per-env `platform-sa` (EKS Pod Identity,
+    # managed by infra Terraform in live/*/tf/20_platform) is used by ALL
+    # platform services, so Helm
+    # references it by name and does not create it. databridge needs AWS access
+    # (Kinesis sources, S3 sinks, Secrets Manager), so the platform-sa pod-identity
+    # IAM role must grant those permissions — an infra-repo dependency.
+    serviceAccount:
+      create: false
+      name: platform-sa
+      annotations: {}
+
+    service:
+      annotations: {}
+
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: databridge
+      version: latest
+
+    # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
+    # {env}/platform namespace in Secrets Manager) consumed by ALL platform services via
+    # envFrom; keys are namespaced by prefix (DATABRIDGE_*). Required: a missing
+    # secret fails the rollout loudly rather than silently starting without its DB
+    # DSN. Infra Terraform now manages the source DSN secret at
+    # {env}/platform/databridge/postgres-dsn (live/*/tf/24_databridge); ESO maps
+    # that into platform-secret as DATABRIDGE_DATABASE_CONNECTION_STRING for both
+    # app and migration Job consumption.
+    secretName: platform-secret
+
+    # Schema migrations run as a Helm pre-upgrade/pre-install hook Job using a
+    # dedicated Liquibase image built alongside the app. Uses the same
+    # platform-secret DATABRIDGE_DATABASE_CONNECTION_STRING as the app.
+    migrations:
+      enabled: true
+      image:
+        pullPolicy: IfNotPresent
+        registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+        name: databridge-migrations
+        version: latest
+      backoffLimit: 1
+      # Time budget for the migration Job to complete (seconds).
+      activeDeadlineSeconds: 300
+
+    # Role-scoped deployments: one image, DATABRIDGE_ROLE set per Deployment, so
+    # each tier scales independently (the bus partition stays the real scale
+    # unit; this only changes pod layout). api is stateless and scales freely.
+    # ingest can scale horizontally: pods split the stream via Postgres shard
+    # leasing (requires the DB DSN from platform-secret). reconcile may run >1
+    # replica for HA but only the Postgres-advisory-lock leader acts. Raise
+    # ingest.replicas up to (but not beyond) the stream's shard count.
+    #
+    # Each role's podDisruptionBudget (off by default, required-on in prod - see
+    # templates/13-pdb.yaml's guardrail) follows the same enabled-flag pattern as
+    # redpanda/benthos: maxUnavailable rather than minAvailable since these are
+    # stateless-ish Deployments, not storage-bound like Redpanda.
+    roles:
+      api:
+        enabled: true
+        replicas: 2
+        podDisruptionBudget:
+          enabled: false
+          maxUnavailable: 1
+      ingest:
+        enabled: true
+        replicas: 1
+        # The push/listener source (source type "http") binds this port. It is
+        # exposed as an internal ClusterIP Service (no ingress) and locked down
+        # by a same-namespace NetworkPolicy: this is an internal ingest endpoint
+        # for trusted in-cluster producers, not the customer API.
+        listenerPort: 8081
+        networkPolicy:
+          enabled: true
+        podDisruptionBudget:
+          enabled: false
+          maxUnavailable: 1
+      reconcile:
+        enabled: true
+        replicas: 1
+        podDisruptionBudget:
+          enabled: false
+          maxUnavailable: 1
+
+    # Delivery target for rendered Benthos streams:
+    #   api       - push to a single Benthos via its streams REST API (default).
+    #   configmap - write streams into a ConfigMap that every Benthos replica
+    #               mounts, so Benthos can scale horizontally + be KEDA-autoscaled.
+    # configmap mode requires the reconcile role's RBAC (rbac.enabled) and a
+    # chart-owned or external Benthos that mounts the ConfigMap.
+    # databridge self-manages its bus + delivery plane (chart-owned Redpanda +
+    # Benthos), so delivery runs in configmap mode by default: the reconcile role
+    # writes rendered streams into the streams ConfigMap and the chart Benthos
+    # watches it. (Set mode=api + point at an external Benthos to opt out.)
+    delivery:
+      mode: configmap
+      streamsConfigMap: databridge-streams
+      # Governance posture for data_types with no field catalog: deny (export
+      # nothing - the safe default) or passthrough (raw).
+      uncataloged: deny
+      # Partition count for provisioned bus topics (source topics + their .dlq).
+      topicPartitions: 3
+
+    # Field-catalog directory the control plane loads (governance source of
+    # truth). Baked into the image at /straiker/databridge-fields; override to
+    # mount a ConfigMap/volume instead.
+    catalog:
+      dir: /straiker/databridge-fields
+
+    # Base prefix for databridge-managed sink credential secrets under the env's
+    # platform namespace (e.g. dev/platform/databridge/). Customer creds live at
+    # <prefix>tenants/<tenant_id>; platform creds at <prefix>platform; each a JSON
+    # object keyed by sink id. Set per-env (the env segment matters for IAM
+    # scoping and because stage/prod share an AWS account). Empty here -> the
+    # service falls back to a local-only default, fine for the in-memory dev store.
+    secrets:
+      prefix: ""
+
+    # Sink connectivity probe (api role). baseRoleArn, when set, is the role
+    # assume_role probes hop through before assuming the customer's role - set
+    # per-env to the databridge-delivery role Benthos runs as, so probe and
+    # delivery reach the customer as the same principal and customer trust
+    # policies name that one role. Its trust policy must allow platform-sa
+    # (infra live/*/tf/24_databridge) or probes fail with AccessDenied. Empty ->
+    # probes assume from the api's own identity (platform-sa).
+    sinkProbe:
+      baseRoleArn: ""
+
+    # RBAC for the reconcile role to manage the streams ConfigMap (configmap mode).
+    rbac:
+      enabled: true
+
+    # Chart-owned event bus (Redpanda, Kafka API): databridge's self-managed
+    # dependency so the whole pipeline ships together. The pod env points
+    # DATABRIDGE_BUS_BROKERS at the <name>-redpanda Service. Single-node by
+    # default for dev/onboarding; raise replicas + storage and harden for prod
+    # Grafana Alloy scrape annotations for the chart-owned data-plane pods
+    # (Redpanda :9644/public_metrics, Benthos :4195/metrics). The cluster's
+    # grafana-k8s-monitoring Alloy discovers targets by these annotations and
+    # ships to Grafana Cloud, where all other infra metrics live.
+    observability:
+      sentry:
+        # Sentry DSNs are write-only ingest keys, so keep this in the ConfigMap.
+        dsn: ""
+      grafanaScrape: true
+      otel:
+        enabled: true
+        # Shared OTel env bundle injected into app pods via envFrom.secretRef.
+        # Keep endpoints/headers out of chart values; provide them via this Secret.
+        secretName: otel-secret
+        # Stable base identity for OTEL_SERVICE_NAME; role suffix is appended
+        # in the Deployment template (e.g. databridge-api, databridge-ingest).
+        serviceNameBase: databridge
+        # Strict enrollment contract (optional): verify the target namespace has
+        # observability.straiker.io/otel-enabled=true before rendering app pods.
+        strictNamespaceEnrollment: false
+        namespaceLabelKey: observability.straiker.io/otel-enabled
+        namespaceLabelValue: "true"
+        # If true, fail rendering when namespace lookup is unavailable while
+        # strictNamespaceEnrollment is enabled (useful for cluster-connected CI).
+        failWhenNamespaceLookupUnavailable: false
+        # If true, otel-secret becomes required (optional=false) in envFrom.
+        requireSecret: true
+
+    # Event-bus auth (Kafka API). Defaults target the in-chart Redpanda (no TLS,
+    # no SASL). This same auth governs BOTH planes that talk to the bus: the Go
+    # app's own Kafka clients (ingest, config-API test events, the reconciler's
+    # topic admin) AND the rendered Benthos stream config (delivery data plane) -
+    # one config surface, so the two can never drift out of sync. To point any
+    # environment at Amazon MSK instead, set redpanda.enabled=false, supply
+    # DATABRIDGE_BUS_BROKERS via the platform-secret (the MSK IAM bootstrap
+    # brokers, port 9098), and set:
+    #   bus.tls: true
+    #   bus.sasl.mechanism: aws_msk_iam   # uses the pod's AWS identity - no secret
+    #   bus.sasl.region: <aws-region>
+    # If benthos.waitForKafkaBroker.enabled is true, set it to false: that gate
+    # only makes sense against the chart-owned Redpanda (its host defaults to the
+    # now-nonexistent <release>-redpanda Service, and MSK's bootstrap string is
+    # multiple hosts anyway, which its single-host check can't represent).
+    # SCRAM/PLAIN are also supported (bus.sasl.mechanism: scram-sha-512|plain) with
+    # the username/password supplied via the platform-secret
+    # (DATABRIDGE_BUS_SASL_USERNAME / DATABRIDGE_BUS_SASL_PASSWORD), never in values.
+    # The same auth is rendered into the Benthos data plane. For aws_msk_iam both
+    # the app (platform-sa) and the delivery plane (benthos.serviceAccount /
+    # databridge-delivery) pod-identity roles must allow MSK IAM
+    # (kafka-cluster:Connect, DescribeCluster, and topic/group actions) - an infra
+    # (Terraform) dependency. See templates/12-benthos-sa.yaml's comment for the
+    # delivery role's (narrower) action set.
+    bus:
+      tls: false
+      sasl:
+        # "" (none) | aws_msk_iam | scram-sha-512 | scram-sha-256 | plain
+        mechanism: ""
+        region: ""
+
+    # (or set enabled:false and supply external brokers via the platform-secret).
+    redpanda:
+      enabled: true
+      # Guards against losing the bus's data: annotates the StatefulSet with
+      # helm.sh/resource-policy: keep, so neither `helm uninstall` nor a values
+      # change that flips redpanda.enabled to false deletes it - Helm instead
+      # leaves it (and its PVCs, already Retain'd by the StatefulSet's own
+      # persistentVolumeClaimRetentionPolicy default) running/orphaned for an
+      # operator to consciously clean up. Set false for throwaway/ephemeral envs
+      # where fast, complete teardown matters more than accident-proofing.
+      deleteProtection: true
+      # Safety guard: current in-chart Redpanda mode is single-node. Keep true
+      # in non-prod unless you intentionally run clustered mode.
+      strictSingleNode: true
+      # Pinned (not :latest) for reproducible bus behavior; bump deliberately.
+      image: docker.redpanda.com/redpandadata/redpanda:v26.1.12
+      replicas: 1
+      clusterDomain: cluster.local
+      priorityClassName: ""
+      smp: 1
+      memory: 1G
+      storage: 10Gi
+      # Set explicitly per environment. Only two StorageClasses actually exist:
+      # - gp3 (generic, cluster-default; dev/stage use this directly)
+      # - redpanda-gp3-perf (dedicated gp3 + provisioned IOPS/throughput,
+      #   infra TF managed; required in production - see values-prod.yaml)
+      storageClass: ""
+      # Give brokers time to drain Raft leadership (preStop, only when
+      # replicas > 1) before Kubernetes SIGKILLs the process.
+      terminationGracePeriodSeconds: 90
+      podDisruptionBudget:
+        enabled: false
+        minAvailable: 1
+      podAntiAffinity:
+        enabled: false
+        # hard = requiredDuringSchedulingIgnoredDuringExecution
+        # soft = preferredDuringSchedulingIgnoredDuringExecution
+        type: hard
+        topologyKey: kubernetes.io/hostname
+      topologySpread:
+        enabled: false
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+      # Redpanda image runs as uid/gid 101; fsGroup lets it own its PVC data dir.
+      podSecurityContext:
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1536Mi
+        requests:
+          cpu: 250m
+          memory: 1Gi
+
+    # Chart-owned Benthos (Redpanda Connect) data plane. Enabled by default: in
+    # delivery.mode=configmap it mounts the streams ConfigMap and hot-reloads via
+    # the streams watcher. Set enabled:false to point delivery at an external Benthos.
+    benthos:
+      enabled: true
+      # Dedicated least-privilege identity for the data plane (separate from the
+      # shared platform-sa, to contain blast radius: a compromised Benthos must
+      # not be able to read the platform secret namespace). Benthos needs no
+      # Secrets Manager access (the reconciler inlines secrets into the rendered
+      # config); its IAM role only needs sts:AssumeRole (assume_role sinks) +
+      # per-bucket writes (ambient sinks), bound via an EKS pod-identity
+      # association in the infra repo. The chart creates the SA so deploys don't
+      # depend on infra ordering. When bus.sasl.mechanism is aws_msk_iam, this
+      # role also needs MSK IAM actions - see templates/12-benthos-sa.yaml.
+      serviceAccount:
+        create: true
+        name: databridge-delivery
+        annotations: {}
+      # Pinned (not :latest) so rendered-config lint semantics match production;
+      # keep in sync with the benthos-lint make target's image tag.
+      image: docker.redpanda.com/redpandadata/connect:4.99.0
+      replicas: 1
+      streamsMountPath: /streams
+      # Optional startup gate to avoid transient restarts when Benthos starts
+      # before Kafka is listening during rollouts. Default port (9092) is
+      # Redpanda's plaintext port; override to 9098 if enabling this against MSK
+      # IAM (or the matching port for SCRAM/PLAIN), or the gate polls the wrong
+      # port and blocks Benthos startup indefinitely.
+      waitForKafkaBroker:
+        enabled: false
+        # If empty, defaults to "<release>-redpanda" in the template.
+        host: ""
+        port: 9092
+        timeoutSeconds: 180
+        pollIntervalSeconds: 2
+        image: busybox:1.36.1
+      # Observability. Benthos exposes Prometheus metrics on the API port (4195,
+      # path /metrics), scraped by Grafana Alloy via the pod annotations below.
+      # otlpEndpoint (optional) turns on OTLP trace export to a collector, e.g.
+      # "otel-collector-cluster-opentelemetry-collector.honeycomb:4317"; empty = off.
+      otlpEndpoint: ""
+      resources:
+        limits:
+          cpu: "1"
+          memory: 512Mi
+        requests:
+          cpu: 200m
+          memory: 256Mi
+      # KEDA autoscaling on Kafka consumer-group lag. Benthos runs many consumer
+      # groups (one per route), so scale on an AGGREGATE lag metric via the
+      # Prometheus trigger (e.g. kafka-lag-exporter summed over databridge.delivery.*).
+      keda:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 10
+        prometheusAddress: ""
+        # Aggregate consumer lag across the delivery groups; tune to your exporter.
+        query: 'sum(kafka_consumergroup_group_lag{group=~"databridge.delivery..*"})'
+        threshold: "1000"
+      # Give in-flight batches time to flush to slow/retrying customer targets
+      # (S3, webhooks) before Kubernetes SIGKILLs the process. Benthos itself
+      # drains its pipeline and commits offsets on SIGTERM; this just gives it
+      # room to finish.
+      terminationGracePeriodSeconds: 30
+      # Keep full consumer capacity available during rollouts: never drop below
+      # current replica count, only ever add one extra pod at a time.
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+      podDisruptionBudget:
+        enabled: false
+        maxUnavailable: 1
+      podAntiAffinity:
+        enabled: false
+        # hard = requiredDuringSchedulingIgnoredDuringExecution
+        # soft = preferredDuringSchedulingIgnoredDuringExecution
+        type: soft
+        topologyKey: kubernetes.io/hostname
+      topologySpread:
+        enabled: false
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        # Soft by default: Benthos is a stateless consumer-group member, so an
+        # uneven zone spread is a throughput/availability concern, not a
+        # data-loss one - don't leave replicas Pending over it like Redpanda's
+        # storage-bound brokers must.
+        whenUnsatisfiable: ScheduleAnyway
+
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    # HPA targets the api role (the only horizontally-scalable tier today).
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the role Deployments (api, ingest, reconcile), each role on its
+    # own; Benthos and Redpanda have their own (benthos.topologySpread,
+    # redpanda.topologySpread). Off by default. minDomains: with eligible nodes in one
+    # zone only, a pod that would break the spread waits for a node in another zone
+    # instead of joining the first. matchLabelKeys: a rollout spreads the new
+    # ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

@@ -1,0 +1,405 @@
+{{- $top := . }}
+{{- $db := .Values.straiker.databridge }}
+{{- $rp := $db.redpanda }}
+{{- $name := include "straiker.name" . }}
+{{- $headless := printf "%s-redpanda-headless" $name }}
+{{- $clientSvc := printf "%s-redpanda" $name }}
+{{- if $rp.enabled }}
+{{- if eq $db.environment "production" }}
+{{- if lt (int $rp.replicas) 3 }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.replicas must be >= 3 when redpanda.enabled=true" }}
+{{- end }}
+{{- if lt (int $rp.smp) 2 }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.smp must be >= 2" }}
+{{- end }}
+{{- if not $rp.podDisruptionBudget.enabled }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.podDisruptionBudget.enabled must be true" }}
+{{- end }}
+{{- if lt (int $rp.podDisruptionBudget.minAvailable) 2 }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.podDisruptionBudget.minAvailable must be >= 2" }}
+{{- end }}
+{{- if not $rp.topologySpread.enabled }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.topologySpread.enabled must be true" }}
+{{- end }}
+{{- if ne $rp.topologySpread.whenUnsatisfiable "DoNotSchedule" }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.topologySpread.whenUnsatisfiable must be DoNotSchedule" }}
+{{- end }}
+{{- if eq (toString $rp.storageClass) "" }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.storageClass must be set explicitly" }}
+{{- end }}
+{{- if ne (toString $rp.storageClass) "redpanda-gp3-perf" }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.storageClass must be redpanda-gp3-perf (the only dedicated prod StorageClass infra TF actually provisions)" }}
+{{- end }}
+{{- if not (hasSuffix "Gi" (toString $rp.storage)) }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.storage must use Gi units and be >= 100Gi" }}
+{{- end }}
+{{- if lt (atoi (regexFind "[0-9]+" (toString $rp.storage))) 100 }}
+{{- fail "prod guardrail: straiker.databridge.redpanda.storage must be >= 100Gi" }}
+{{- end }}
+{{- end }}
+{{- if and $rp.strictSingleNode (gt (int $rp.replicas) 1) }}
+{{- fail "straiker.databridge.redpanda.replicas > 1 is not supported in strictSingleNode mode; use an external Kafka/Redpanda cluster or disable strictSingleNode only after clustered bootstrap is implemented." }}
+{{- end }}
+# Chart-owned Redpanda: databridge's self-managed event bus (Kafka API). The
+# ingest role produces to it, the reconcile role provisions topics + renders
+# Benthos streams against it, and the chart-owned Benthos consumes from it.
+# Single-node by default (dev/onboarding); raise replicas + harden for prod.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-redpanda
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge-redpanda
+    {{- include "straiker.labels" . | nindent 4 }}
+  {{- if $rp.deleteProtection }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  serviceName: {{ $headless }}
+  replicas: {{ $rp.replicas }}
+  # Explicit (matches the k8s default, but self-documenting): PVCs survive both
+  # a StatefulSet delete and a scale-down, so the bus's data is never garbage-
+  # collected as a side effect of a replica-count change or a redpanda.enabled
+  # flip. deleteProtection (above) additionally protects the StatefulSet/Pods
+  # themselves, not just the underlying storage.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.straiker.io/app: databridge-redpanda
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: databridge-redpanda
+        {{- include "straiker.labels" . | nindent 8 }}
+      {{- if $db.observability.grafanaScrape }}
+      annotations:
+        # Grafana Alloy scrape discovery: Redpanda's Prometheus endpoint.
+        k8s.grafana.com/scrape: "true"
+        k8s.grafana.com/metrics.portNumber: "9644"
+        k8s.grafana.com/metrics.path: "/public_metrics"
+      {{- end }}
+    spec:
+      {{- with $rp.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # Redpanda runs as the non-root `redpanda` user (uid/gid 101); fsGroup makes
+      # the kubelet chown the freshly-provisioned volume so it can write its data
+      # dir (otherwise it crash-loops on mkdir Permission denied).
+      securityContext:
+        {{- toYaml $rp.podSecurityContext | nindent 8 }}
+      {{- if $rp.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $rp.topologySpread.maxSkew }}
+          topologyKey: {{ $rp.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ $rp.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-redpanda
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: redpanda
+          image: {{ $rp.image }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              if [ "{{ $rp.strictSingleNode }}" = "true" ]; then
+                node_id="0"
+                advertise_kafka="{{ $clientSvc }}.{{ .Release.Namespace }}.svc.{{ $rp.clusterDomain }}:9092"
+                seed_arg=""
+              else
+                node_id="${POD_NAME##*-}"
+                advertise_kafka="${POD_NAME}.{{ $headless }}.${POD_NAMESPACE}.svc.{{ $rp.clusterDomain }}:9092"
+                if [ "$node_id" = "0" ]; then
+                  seed_arg=""
+                else
+                  seed_arg="--seeds={{ $name }}-redpanda-0.{{ $headless }}.${POD_NAMESPACE}.svc.{{ $rp.clusterDomain }}:33145"
+                fi
+              fi
+
+              advertise_rpc="${POD_NAME}.{{ $headless }}.${POD_NAMESPACE}.svc.{{ $rp.clusterDomain }}:33145"
+
+              exec rpk redpanda start \
+                --smp={{ $rp.smp }} \
+                --memory={{ $rp.memory }} \
+                --reserve-memory=0M \
+                --overprovisioned \
+                --node-id="$node_id" \
+                --rpc-addr=0.0.0.0:33145 \
+                --advertise-rpc-addr="$advertise_rpc" \
+                --kafka-addr=PLAINTEXT://0.0.0.0:9092 \
+                --advertise-kafka-addr=PLAINTEXT://$advertise_kafka \
+                ${seed_arg}
+          ports:
+            - name: kafka
+              containerPort: 9092
+              protocol: TCP
+            - name: rpc
+              containerPort: 33145
+              protocol: TCP
+            - name: admin
+              containerPort: 9644
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: admin
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          startupProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: admin
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+          resources:
+            {{- toYaml $rp.resources | nindent 12 }}
+          {{- if gt (int $rp.replicas) 1 }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -ec
+                  - |
+                    node_id="${POD_NAME##*-}"
+                    rpk cluster maintenance enable "$node_id" --api-urls localhost:9644 || true
+                    # Bounded wait for leadership to drain off this broker; never
+                    # block shutdown indefinitely if draining can't finish.
+                    for i in $(seq 1 30); do
+                      finished=$(rpk cluster maintenance status --api-urls localhost:9644 2>/dev/null \
+                        | awk -v n="$node_id" '$1==n {print $3}')
+                      if [ "$finished" = "true" ]; then
+                        break
+                      fi
+                      sleep 2
+                    done
+          {{- end }}
+      terminationGracePeriodSeconds: {{ $rp.terminationGracePeriodSeconds }}
+      {{- with $db.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $db.affinity $rp.podAntiAffinity.enabled }}
+      affinity:
+        {{- with $db.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $rp.podAntiAffinity.enabled }}
+        podAntiAffinity:
+          {{- if eq $rp.podAntiAffinity.type "soft" }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: {{ $rp.podAntiAffinity.topologyKey }}
+                labelSelector:
+                  matchLabels:
+                    app.straiker.io/app: databridge-redpanda
+                    {{- include "straiker.selectorLabels" . | nindent 20 }}
+          {{- else }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: {{ $rp.podAntiAffinity.topologyKey }}
+              labelSelector:
+                matchLabels:
+                  app.straiker.io/app: databridge-redpanda
+                  {{- include "straiker.selectorLabels" . | nindent 18 }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with $db.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $rp.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $rp.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $headless }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.straiker.io/app: databridge-redpanda
+    {{- include "straiker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: kafka
+      protocol: TCP
+      port: 9092
+      targetPort: kafka
+    - name: rpc
+      protocol: TCP
+      port: 33145
+      targetPort: rpc
+    - name: admin
+      protocol: TCP
+      port: 9644
+      targetPort: admin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $clientSvc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.straiker.io/app: databridge-redpanda
+    {{- include "straiker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: kafka
+      protocol: TCP
+      port: 9092
+      targetPort: kafka
+    - name: admin
+      protocol: TCP
+      port: 9644
+      targetPort: admin
+  type: ClusterIP
+{{- if $rp.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "straiker.name" . }}-redpanda
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ $rp.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: databridge-redpanda
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+{{- end }}
+---
+# Defense in depth for the plaintext, unauthenticated Kafka/admin listeners:
+# only chart-owned databridge/benthos pods (and Grafana Alloy, for metrics)
+# can reach Redpanda; only Redpanda pods can reach each other's RPC port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "straiker.name" . }}-redpanda
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.straiker.io/app: databridge-redpanda
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-benthos
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9092
+    - from:
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-redpanda
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 33145
+    - from:
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-redpanda
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.straiker.io/app: databridge-redpanda-bootstrap
+              {{- include "straiker.selectorLabels" . | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9644
+---
+# One-shot cluster bootstrap: sets the cluster-wide default replication
+# factor so topics created without an explicit replication.factor aren't
+# silently under-replicated. min(3, replicas) so single-node dev/stage
+# (replicas=1) doesn't request a replication factor the cluster can't satisfy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" . }}-redpanda-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: databridge-redpanda-bootstrap
+        {{- include "straiker.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: {{ $rp.image }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              rpk cluster health --exit-when-healthy --api-urls {{ $clientSvc }}:9644
+              rpk cluster config set default_topic_replications {{ min 3 (int $rp.replicas) }} --api-urls {{ $clientSvc }}:9644
+{{- end }}

@@ -1,0 +1,142 @@
+straiker:
+  foundation:
+    port: 8080
+    logLevel: info
+    environment: production
+
+    server:
+      readTimeout: 30
+      writeTimeout: 30
+      idleTimeout: 120
+
+    # Shared platform identity: one per-env `platform-sa` (EKS Pod Identity, created
+    # via eksctl in the infra repo) is used by ALL platform services, so Helm
+    # references it by name and does not create it.
+    serviceAccount:
+      create: false
+      name: platform-sa
+      annotations: {}
+
+    # ClusterIP everywhere by default. An environment that needs foundation
+    # reachable from outside the cluster (e.g. dev's Cognito pre-token-generation
+    # lambda, VPC-attached rather than exposed publicly - see values-dev.yaml)
+    # overrides type to LoadBalancer with internal-scheme AWS LB Controller
+    # annotations; ClusterIP is retained either way, so in-cluster callers of
+    # foundation.platform.svc.cluster.local are unaffected regardless of type.
+    service:
+      type: ClusterIP
+      annotations: {}
+
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: foundation
+      version: latest
+
+    # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
+    # {env}/platform Secrets Manager blob) consumed by ALL platform services via
+    # envFrom; keys are namespaced by prefix (FOUNDATION_*). See the service README.
+    secretName: platform-secret
+
+    # Outbound event bus (Kafka API): foundation's only producer is the audit
+    # relay, which drains audit_outbox to the platform.audit spine (see
+    # internal/config/config.go's BusConfig doc). Brokers is secret
+    # (FOUNDATION_BUS_BROKERS in the {env}/platform blob - shares databridge's
+    # existing Serverless MSK cluster, same broker string as
+    # DATABRIDGE_BUS_BROKERS/REGISTRY_BUS_BROKERS/NOTIFY_BUS_BROKERS just under
+    # a different key); tls/saslMechanism/saslRegion are non-secret (ConfigMap).
+    # Empty brokers disables the relay - audit records still commit to the
+    # outbox and accumulate until the bus is configured.
+    bus:
+      tls: false
+      saslMechanism: ""
+      saslRegion: ""
+
+    # Authorization policy. Set here rather than per-environment because the values
+    # are identical everywhere and four copies would only drift.
+    #
+    # NOTE these render as UNPREFIXED env vars, not FOUNDATION_*. That is
+    # deliberate for operatorDomains: the Cognito pre-token-generation lambda reads
+    # the same OPERATOR_DOMAINS variable, and a guard that must agree across two
+    # runtimes should not be spelled differently in each.
+    authz:
+      # Email domains permitted to hold operator-tier roles. Stated explicitly
+      # rather than relying on the code default so the effective value is
+      # reviewable here and visible in the startup log. An explicitly EMPTY value
+      # DENIES every operator role — it is not "no restriction"; `*` is.
+      operatorDomains: straiker.ai
+
+      # The day-zero floor for control-plane access, ensured idempotently at
+      # startup (after the role seeder, which the migration Job precedes as a
+      # pre-upgrade hook — so a single release orders schema, roles, then this).
+      #
+      # ENSURE-ONLY: operators granted through /api/v3/operator/users are NOT
+      # removed by being absent here. Conversely, removing someone from this list
+      # does not revoke them — that needs the API or a direct delete.
+      #
+      # Rollback caveat: deleting a bootstrapped user's platform_user row is NOT
+      # sufficient while they remain listed here, because the next pod restart
+      # recreates it. Unset the entry first, then delete the row.
+      bootstrapOperators: "sai@straiker.ai,john@straiker.ai"
+
+      # Applies to EVERY address above; there is no per-user role in this config.
+      bootstrapOperatorRole: superuser
+
+    observability:
+      sentry:
+        dsn: ""
+      otel:
+        enabled: true
+        # Shared OTel env bundle injected into app pods via envFrom.secretRef.
+        secretName: otel-secret
+        # Service identity used by OTEL_SERVICE_NAME.
+        serviceName: foundation
+        # If true, otel-secret becomes required (optional=false) in envFrom.
+        requireSecret: true
+
+    # Schema migrations run as a Helm pre-upgrade/pre-install hook Job using a
+    # dedicated Liquibase image built alongside the app.
+    migrations:
+      enabled: true
+      image:
+        pullPolicy: IfNotPresent
+        registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+        name: foundation-migrations
+        version: latest
+      backoffLimit: 1
+      # Time budget for the migration Job to complete (seconds).
+      activeDeadlineSeconds: 300
+
+    replicas: 1
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the Deployment's pods. Off by default. minDomains: with eligible
+    # nodes in one zone only, a pod that would break the spread waits for a node in
+    # another zone instead of joining the first. matchLabelKeys: a rollout spreads the
+    # new ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

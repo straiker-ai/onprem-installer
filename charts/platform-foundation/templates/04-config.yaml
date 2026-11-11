@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  FOUNDATION_PORT: {{ .Values.straiker.foundation.port | quote }}
+  FOUNDATION_LOG_LEVEL: {{ .Values.straiker.foundation.logLevel | quote }}
+  FOUNDATION_ENVIRONMENT: {{ .Values.straiker.foundation.environment | quote }}
+  # Sentry DSN is an ingest key, not a credential; keep it in the ConfigMap.
+  FOUNDATION_SENTRY_DSN: {{ .Values.straiker.foundation.observability.sentry.dsn | quote }}
+  FOUNDATION_SERVER_READ_TIMEOUT: {{ .Values.straiker.foundation.server.readTimeout | quote }}
+  FOUNDATION_SERVER_WRITE_TIMEOUT: {{ .Values.straiker.foundation.server.writeTimeout | quote }}
+  FOUNDATION_SERVER_IDLE_TIMEOUT: {{ .Values.straiker.foundation.server.idleTimeout | quote }}
+  FOUNDATION_BUS_TLS: {{ .Values.straiker.foundation.bus.tls | quote }}
+  FOUNDATION_BUS_SASL_MECHANISM: {{ .Values.straiker.foundation.bus.saslMechanism | quote }}
+  FOUNDATION_BUS_SASL_REGION: {{ .Values.straiker.foundation.bus.saslRegion | quote }}
+  # Authorization policy — UNPREFIXED on purpose (see values.yaml): OPERATOR_DOMAINS
+  # is read by the Cognito token minter under the same name, so one value configures
+  # both halves of the login path.
+  OPERATOR_DOMAINS: {{ .Values.straiker.foundation.authz.operatorDomains | quote }}
+  BOOTSTRAP_OPERATORS: {{ .Values.straiker.foundation.authz.bootstrapOperators | quote }}
+  BOOTSTRAP_OPERATOR_ROLE: {{ .Values.straiker.foundation.authz.bootstrapOperatorRole | quote }}

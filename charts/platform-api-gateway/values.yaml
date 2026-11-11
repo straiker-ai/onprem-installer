@@ -1,0 +1,170 @@
+straiker:
+  readonly:
+    enabled: false
+    configMapName: straiker-readonly-environments
+
+  apiGateway:
+    gateway:
+      baseUrl: ""
+      # Browser origins allowed to make credentialed cross-origin API calls
+      # (the console frontend, per environment). Empty = legacy any-origin
+      # behavior, with a startup warning.
+      corsAllowedOrigins: []
+    mcp:
+      # MCP server (tools derived from x-mcp-tool markers in service specs)
+      enabled: false
+      # Frontend OAuth authorization server(s) advertised in the MCP
+      # protected-resource metadata. Set per environment.
+      authorizationServers: []
+      # Per-tool scope enforcement: "strict" (every JWT must carry the
+      # required mcp scope) or "compat" (tokens without any mcp:* scope keep
+      # full tool access — rollout aid while a frontend authorization server
+      # that mints mcp scopes is not deployed yet).
+      enforceScopes: "strict"
+    openapi:
+      enabled: false
+      refreshInterval: 300000
+      docs:
+        enabled: false
+        authMode: basic
+        username: "admin"
+        password: "admin"
+        google:
+          clientIdKey: "GOOGLE_DOCS_OAUTH_CLIENT_ID"
+          clientSecretKey: "GOOGLE_DOCS_OAUTH_CLIENT_SECRET"
+          allowedDomain: "straiker.ai"
+          jwtSecretKey: "DOCS_JWT_SIGNING_KEY"
+          jwtTtlHours: 8
+      # Customer-facing API reference at /docs (x-public operations only).
+      # authMode "none" makes it fully public.
+      publicDocs:
+        enabled: false
+        authMode: basic
+        username: "admin"
+        password: "admin"
+    oauth:
+      mode: cognito
+      inmemory:
+        tokenTtlSeconds: 3600
+        # signingKey: ""   # PEM-encoded PKCS#8 RSA private key for stable tokens across pods
+        # clients:
+        #   - client-id: ""
+        #     client-secret: ""
+    cognito:
+      issuerUrl: 
+      domain: 
+      # Cognito U2S app-client id for the PAT -> token CUSTOM_AUTH exchange (the
+      # frontend client, which must allow ALLOW_CUSTOM_AUTH). Set per env.
+      u2sClientId: 
+      # Optional: pool region override. When unset it is derived from issuerUrl.
+      region: 
+    # PAT validation backing the /auth/token exchange. "foundation" is not yet GA,
+    # so the default is "inmemory". For inmemory, define tokens below (note:
+    # patHash is the credential the client presents -- inmemory assumes hash == key
+    # -- and is rendered into the ConfigMap, so keep real PATs out of git).
+    pat:
+      mode: inmemory
+      tokens: []
+      #  - patId: ""
+      #    patHash: ""
+      #    userId: ""
+      #    tenantId: ""
+      #    allowedScopes: []
+      #    createdAt: ""
+      #    expiresAt: ""
+    dynamodb:
+      region: us-east-1
+      environmentTable: dev-use1-table
+    secretManager:
+      enabled: true
+      secretName: 
+      region: us-east-1
+    singleNamespace: false
+    # Which namespace serves the v3 detection engine. Both v3 routes read it:
+    # `detect-v3` (/api/v3/detect/**) and `platform-argus-internal-v3`
+    # (/internal/argus/v3/**, the control definition contract the registry caches).
+    #
+    # THE TWO MOVE TOGETHER, AND THAT IS THE WHOLE REASON THIS IS ONE VALUE RATHER
+    # THAN TWO. There is one registry cache per environment, so whichever engine
+    # answers the definitions endpoint sets the control vocabulary the console
+    # renders and `platform.agent_config` then carries to *both* engines. The
+    # catalogs disagree -- v1 publishes 41 controls, v3 publishes 43, and the
+    # coding-agent controls are `ca_`-prefixed in v1 and not in v3 -- so splitting
+    # them across engines means an agent's stored settings name controls the engine
+    # scoring it has never heard of, which resolve to nothing and fall back to
+    # catalog defaults with no error anywhere.
+    #
+    # `argus` is the v1 engine, which serves an interim /api/v3/detect and the
+    # definitions endpoint today. Every environment restates this below rather
+    # than inheriting it, because the value is only safe to change once v3 is
+    # actually deployed and healthy in that cluster -- pointing at a namespace
+    # that does not exist 503s both routes, and the second one takes the console's
+    # control configuration UI down with it.
+    argusV3Namespace: argus
+    s2s:
+      apikeys:
+        - name: foundation
+          secretKey: FOUNDATION_API_KEY
+    
+      # Optional: Direct AWS credentials (not recommended for production)
+      # accessKeyId: ""
+      # secretAccessKey: ""
+
+    # Service Account Configuration
+    serviceAccount:
+      create: false
+      name: straiker-api-gateway-sa
+      annotations: {}
+      labels: {}
+
+    # Service Configuration
+    service:
+      annotations: {}
+      labels: {}
+
+    # Image Configuration
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: api-gateway
+      version: latest
+
+    # Deployment Configuration
+    replicas: 2
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 1000m
+        memory: 1Gi
+
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 4
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 70
+
+    # Additional annotations for the deployment
+    annotations: {}
+
+    # Node Selector, Affinity, Tolerations, and Topology Spread Constraints
+    nodeSelector: {}
+    affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+    tolerations:
+      - operator: Exists
+        effect: NoExecute
+      - operator: Exists
+        effect: NoSchedule
+    
+    topologySpreadConstraints: []

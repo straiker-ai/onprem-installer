@@ -1,0 +1,82 @@
+{{- $top := . }}
+{{- $c := .Values.straiker.connect }}
+{{- $roles := $c.roles }}
+{{- if $roles.connect.enabled }}
+---
+# connect API + internal connection broker. This is the in-cluster base URL notify
+# targets over the HTTP broker (NOTIFY_CONNECT_URL) when it runs separately.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" $top }}-connect
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" $top | nindent 4 }}
+  {{- with $c.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app.straiker.io/app: connect
+    app.straiker.io/role: connect
+    {{- include "straiker.selectorLabels" $top | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: {{ $c.port }}
+  type: ClusterIP
+{{- end }}
+{{- if (index $roles "notify-api").enabled }}
+---
+# notify HTTP surface (the internal :send hop + message audit).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" $top }}-notify
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" $top | nindent 4 }}
+  {{- with $c.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app.straiker.io/app: connect
+    app.straiker.io/role: notify-api
+    {{- include "straiker.selectorLabels" $top | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: {{ $c.port }}
+  type: ClusterIP
+{{- end }}
+{{- if $roles.all.enabled }}
+---
+# Single-process deployment (role=all): connect + notify served together.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" $top }}
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" $top | nindent 4 }}
+  {{- with $c.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    app.straiker.io/app: connect
+    app.straiker.io/role: all
+    {{- include "straiker.selectorLabels" $top | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: {{ $c.port }}
+  type: ClusterIP
+{{- end }}

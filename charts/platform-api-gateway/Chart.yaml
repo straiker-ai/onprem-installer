@@ -1,0 +1,19 @@
+apiVersion: v2
+name: platform-api-gateway
+version: "2.3.12"
+appVersion: "v2.3.12"
+description: Straiker API Gateway
+home: https://straiker.ai
+keywords:
+  - straiker
+  - api-gateway
+  - api
+kubeVersion: '>= 1.29.0-0'
+maintainers:
+  - email: ops@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/skywalker/tree/main/deploy/helm/api-gateway
+type: application
+icon: https://raw.githubusercontent.com/straiker-ai/skywalker/main/assets/logo.png

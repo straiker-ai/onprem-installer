@@ -1,0 +1,89 @@
+straiker:
+  portico:
+    port: 8080
+    logLevel: info
+    environment: production
+
+    server:
+      readTimeout: 30
+      writeTimeout: 30
+      idleTimeout: 120
+
+    # Frontend /internal_api control plane the native Defend/Ascend facades call.
+    # url is non-secret (set per env below); the key is sensitive and supplied via
+    # the portico secret as PORTICO_INTERNAL_API_KEY. Empty url => facades disabled.
+    internalApi:
+      url: ""
+
+    # Turns service the Ascend turn export calls (in-cluster, turns-api namespace).
+    # url is non-secret (set per env below); the key is supplied via the portico
+    # secret as PORTICO_TURNS_KEY. Empty url => the export route answers 503.
+    turns:
+      url: ""
+
+    # Shared platform identity: one per-env `platform-sa` (EKS Pod Identity, created
+    # via eksctl in the infra repo) is used by ALL platform services. Helm
+    # references it by name and does not create it.
+    serviceAccount:
+      create: false
+      name: platform-sa
+      annotations: {}
+
+    service:
+      annotations: {}
+
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: portico
+      version: latest
+
+    # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
+    # {env}/platform Secrets Manager blob) consumed by ALL platform services via
+    # envFrom; keys are namespaced by prefix (PORTICO_*). Required (a missing secret
+    # fails the rollout loudly rather than silently disabling the facades).
+    secretName: platform-secret
+
+    observability:
+      otel:
+        enabled: true
+        # Shared OTel env bundle injected into app pods via envFrom.secretRef.
+        secretName: otel-secret
+        # Service identity used by OTEL_SERVICE_NAME.
+        serviceName: portico
+        # If true, otel-secret becomes required (optional=false) in envFrom.
+        requireSecret: true
+
+    replicas: 1
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the Deployment's pods. Off by default. minDomains: with eligible
+    # nodes in one zone only, a pod that would break the spread waits for a node in
+    # another zone instead of joining the first. matchLabelKeys: a rollout spreads the
+    # new ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

@@ -1,0 +1,19 @@
+apiVersion: v2
+name: platform-grid
+version: "2026.11.300"
+appVersion: "v2026.11.3"
+description: Straiker Grid - read/query plane over the AI event-fact spine (inventory / activity / insights)
+home: https://straiker.ai
+keywords:
+  - straiker
+  - platform
+  - grid
+  - api
+maintainers:
+  - email: info@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/platform/tree/main/services/grid/deploy/helm/grid
+type: application
+kubeVersion: '>= 1.29.0-0'

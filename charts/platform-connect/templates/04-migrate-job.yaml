@@ -1,0 +1,69 @@
+{{- $top := . }}
+{{- $c := .Values.straiker.connect }}
+{{- if $c.migrations.enabled }}
+{{- range $target := list "auth" "connect" "notify" }}
+---
+# One migrate Job per domain. The migrations image carries all changelog trees;
+# MIGRATE_TARGET selects which one runs, and its DSN is read from the
+# platform-secret (auth/connect -> CONNECT_DATABASE_CONNECTION_STRING,
+# notify -> NOTIFY_DATABASE_CONNECTION_STRING).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" $top }}-migrate-{{ $target }}
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    app.straiker.io/app: connect
+    app.straiker.io/migrate-target: {{ $target }}
+    {{- include "straiker.labels" $top | nindent 4 }}
+  annotations:
+    # Run before the app is installed/upgraded so the schema is ready; re-run on
+    # every release. Cleaned up before the next hook fires and after it succeeds
+    # (failed Jobs are kept for debugging).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $c.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ $c.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: connect
+        app.straiker.io/migrate-target: {{ $target }}
+        {{- include "straiker.selectorLabels" $top | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $c.serviceAccount.name }}
+      {{- if $c.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range $c.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ $c.migrations.image.registry }}/{{ $c.migrations.image.name }}:{{ $c.migrations.image.version }}"
+          imagePullPolicy: {{ $c.migrations.image.pullPolicy }}
+          args: ["update"]
+          env:
+            - name: MIGRATE_TARGET
+              value: {{ $target | quote }}
+          envFrom:
+            # The entrypoint selects the DSN and changelog for MIGRATE_TARGET.
+            - secretRef:
+                name: {{ $c.secretName }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

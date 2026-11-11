@@ -1,0 +1,34 @@
+{{- $top := . }}
+{{- $db := .Values.straiker.databridge }}
+{{- range $role, $cfg := $db.roles }}
+{{- if $cfg.enabled }}
+{{- $pdb := $cfg.podDisruptionBudget | default (dict "enabled" false) }}
+{{- if eq $db.environment "production" }}
+{{- if not $pdb.enabled }}
+{{- fail (printf "prod guardrail: straiker.databridge.roles.%s.podDisruptionBudget.enabled must be true" $role) }}
+{{- end }}
+{{- if lt (int $cfg.replicas) 2 }}
+{{- fail (printf "prod guardrail: straiker.databridge.roles.%s.replicas must be >= 2 when podDisruptionBudget.enabled=true (else it blocks all voluntary disruption)" $role) }}
+{{- end }}
+{{- end }}
+{{- if $pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "straiker.name" $top }}-{{ $role }}
+  namespace: {{ $top.Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge
+    app.straiker.io/role: {{ $role }}
+    {{- include "straiker.labels" $top | nindent 4 }}
+spec:
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: databridge
+      app.straiker.io/role: {{ $role }}
+      {{- include "straiker.selectorLabels" $top | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}
