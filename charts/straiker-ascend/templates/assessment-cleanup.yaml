@@ -46,8 +46,7 @@ spec:
                   value: "production"
                 - name: SYS__SECRET_MANAGER_ENABLED
                   value: "false"
-                - name: SYS__REDIS_URL
-                  value: {{ include "ascend.redisUrl" . | quote }}
+                {{- include "ascend.redisEnv" . | nindent 16 }}
                 # Double underscore -- assessment_cleanup's own SaaS cronjob is the
                 # one exception to every other component's SYS__LOGGING_LEVEL,
                 # confirmed against iris/deploy/helm/assessment_cleanup/templates/

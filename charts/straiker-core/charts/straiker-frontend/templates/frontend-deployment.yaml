@@ -73,6 +73,18 @@ spec:
               value: {{ printf "postgresql://$(DB_USER):$(DB_PASSWORD)@%s:%v/%s?sslmode=%s" (include "frontend.dbHost" .) .Values.frontend.db.port .Values.frontend.db.name .Values.frontend.db.sslMode | quote }}
             - name: OPENSEARCH_URL
               value: {{ include "frontend.opensearchUrl" . | quote }}
+            {{- if .Values.frontend.opensearch.credentialsSecret }}
+            - name: OPENSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frontend.opensearch.credentialsSecret | quote }}
+                  key: username
+            - name: OPENSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frontend.opensearch.credentialsSecret | quote }}
+                  key: password
+            {{- end }}
             # Session signing — required, signs local JWTs. Chart-managed
             # secret; preserved across helm upgrades (rotating invalidates
             # every active session).

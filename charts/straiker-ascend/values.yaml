@@ -85,6 +85,10 @@ dbMigrate:
 # ── Redis (shared straiker-system valkey instance) ───────────────────────
 redis:
   url: ""
+  # Read SYS__REDIS_URL from an existing Secret instead (e.g. an AUTH-token URL); takes precedence over url.
+  existingSecret:
+    name: ""
+    key: REDIS_URL
 
 # ── Bifrost LLM gateway override ──────────────────────────────────────────
 # Empty (default): iris calls its own in-cluster Bifrost (charts/straiker-
