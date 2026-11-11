@@ -1,0 +1,54 @@
+{{- if .Values.straiker.foundation.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: foundation
+    {{- include "straiker.labels" . | nindent 4 }}
+  annotations:
+    # Run before the app is installed/upgraded so the schema is ready; re-run on
+    # every release. The Job is cleaned up before the next hook fires and after
+    # it succeeds (failed Jobs are kept for debugging).
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.straiker.foundation.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.straiker.foundation.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: foundation
+        {{- include "straiker.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ .Values.straiker.foundation.serviceAccount.name }}
+      {{- if .Values.straiker.foundation.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.foundation.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.straiker.foundation.migrations.image.registry }}/{{ .Values.straiker.foundation.migrations.image.name }}:{{ .Values.straiker.foundation.migrations.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.foundation.migrations.image.pullPolicy }}
+          args: ["update"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.straiker.foundation.secretName }}
+      {{- with .Values.straiker.foundation.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.foundation.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.foundation.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

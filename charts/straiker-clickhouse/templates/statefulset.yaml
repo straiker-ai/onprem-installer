@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ch.fullname" . }}
+spec:
+  serviceName: {{ include "ch.fullname" . }}-headless
+  replicas: {{ .Values.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: {{ include "ch.fullname" . }} }
+  template:
+    metadata:
+      labels: { app: {{ include "ch.fullname" . }} }
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if gt (int .Values.replicas) 1 }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: { app: {{ include "ch.fullname" . }} }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: {{ include "ch.fullname" . }} }
+      {{- end }}
+      securityContext: { fsGroup: 101 }
+      containers:
+        - name: clickhouse
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: native, containerPort: 9000 }
+            - { name: http, containerPort: 8123 }
+            - { name: interserver, containerPort: 9009 }
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            # The postgresql() table function (ch-sync reads Aurora through it) uses libpq. The container's HOME is
+            # /root, which the clickhouse user cannot read: libpq then fails on its default client-certificate path
+            # ("could not open certificate file /root/.postgresql/postgresql.crt: Permission denied"), falls back to
+            # an unencrypted connection, and Aurora rejects that. A readable HOME plus an explicit TLS mode fixes it.
+            - { name: HOME, value: /var/lib/clickhouse }
+            - { name: PGSSLMODE, value: {{ .Values.postgresSslMode | quote }} }
+            - name: CH_POD_FQDN
+              value: "$(POD_NAME).{{ include "ch.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+            {{- range $u, $_ := .Values.users }}
+            - name: CH_PW_{{ $u | upper }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.credentialsSecret }}, key: {{ $u }}_password } }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+            - { name: config, mountPath: /etc/clickhouse-server/config.d/listen.xml, subPath: listen.xml }
+            {{- if include "ch.replicated" . }}
+            - { name: config, mountPath: /etc/clickhouse-server/config.d/cluster.xml, subPath: cluster.xml }
+            {{- end }}
+            - { name: config, mountPath: /etc/clickhouse-server/users.d/users.xml, subPath: users.xml }
+      volumes:
+        - name: config
+          configMap: { name: {{ include "ch.fullname" . }}-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.persistence.size }} } }

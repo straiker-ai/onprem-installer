@@ -1,0 +1,17 @@
+# On-prem overlay for platform-grid (hand-maintained; scripts/sync-platform-charts.sh never touches it).
+# Passed by 'install-straiker.sh' phase 'platform-services' together with --set for the
+# per-install values: image.registry/version, bus region, namespace-specific URLs.
+# Reads platform-secret / platform-sa created by chart straiker-data.
+straiker:
+  grid:
+    environment: onprem
+    clickhouse: { secure: false }   # in-cluster ClickHouse pod, plain native protocol
+    observability:
+      otel: { enabled: false }
+    serviceAccount: { create: false, name: platform-sa }
+    replicas: 1
+    # ClickHouse DDL via GRID_CH_MIGRATE_* in platform-secret; the CDC replica tables come from chart straiker-ch-sync.
+    migrations: { enabled: true }
+    hpa: { enabled: false }
+    # Needs ClickHouse (handover step 5); GRID_CLICKHOUSE_ADDR comes from platform-secret.
+    # registryBaseURL (namespace-specific) is set by the installer.

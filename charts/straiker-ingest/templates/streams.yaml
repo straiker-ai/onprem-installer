@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-ingest
+data:
+  benthos.yaml: |
+    http: { address: 0.0.0.0:4195 }
+    logger: { level: INFO, format: json }
+  events.yaml: |
+{{ tpl (.Files.Get "files/events.yaml") . | indent 4 }}
+  findings.yaml: |
+{{ tpl (.Files.Get "files/findings.yaml") . | indent 4 }}
+  audit.yaml: |
+{{ tpl (.Files.Get "files/audit.yaml") . | indent 4 }}

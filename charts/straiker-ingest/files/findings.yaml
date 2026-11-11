@@ -1,0 +1,16 @@
+# s6r.findings -> grid.raw_finding. Does NOT map ingested_at (MATERIALIZED, server-stamped).
+# `span` is a nested object on the wire and one String column in ClickHouse.
+input:
+  kafka_franz:
+{{ include "ingest.kafka" . | indent 4 }}
+    topics: [ s6r.findings ]
+    consumer_group: {{ .Values.consumerGroupPrefix }}-s6r-findings
+    start_from_oldest: true
+pipeline:
+  processors:
+    - mapping: |
+        root = this.without("ingested_at")
+        root.metadata = if this.metadata.type() == "object" { this.metadata.map_each(kv -> kv.value.string()) } else { {} }
+        root.span = if this.span.type() == "object" { this.span.format_json(indent: "").string() } else { "" }
+output:
+{{ include "ingest.output" (dict "ctx" . "table" "raw_finding" "topic" "s6r.findings") | indent 2 }}

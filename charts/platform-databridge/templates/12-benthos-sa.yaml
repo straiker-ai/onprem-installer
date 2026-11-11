@@ -1,0 +1,27 @@
+{{- $db := .Values.straiker.databridge }}
+{{- $benthos := $db.benthos }}
+{{- if and $benthos.enabled $benthos.serviceAccount.create }}
+# Dedicated data-plane identity. Bind an IAM role to it via an EKS pod-identity
+# association (infra repo): sts:AssumeRole for assume_role sinks + per-bucket
+# writes for ambient operator sinks. Deliberately NOT the shared platform-sa, so
+# a data-plane compromise can't read the platform secret namespace.
+#
+# When bus.sasl.mechanism is aws_msk_iam (see values.yaml), this role ALSO needs
+# MSK IAM actions scoped to the target cluster/topic/group ARNs: kafka-cluster:
+# Connect, DescribeCluster, DescribeTopic, ReadData, WriteData, DescribeGroup,
+# AlterGroup. Unlike the platform-sa role, it does NOT need CreateTopic/AlterTopic*
+# - source + .dlq topics are provisioned by the reconcile role (platform-sa), never
+# by Benthos. Granting this role is infra-repo Terraform, out of this chart.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $benthos.serviceAccount.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: databridge-benthos
+    {{- include "straiker.labels" . | nindent 4 }}
+  {{- with $benthos.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

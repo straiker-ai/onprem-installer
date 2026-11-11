@@ -1,0 +1,19 @@
+apiVersion: v2
+name: platform-registry
+version: "2026.11.300"
+appVersion: "v2026.11.3"
+description: Straiker Registry - the canonical resource-identity spine and estate Postgres system of record (inventory writes / taxonomy / reconciliation)
+home: https://straiker.ai
+keywords:
+  - straiker
+  - platform
+  - registry
+  - api
+maintainers:
+  - email: info@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/platform/tree/main/services/registry/deploy/helm/registry
+type: application
+kubeVersion: '>= 1.29.0-0'

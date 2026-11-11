@@ -1,0 +1,25 @@
+# Clients (grid, registry, ingest, ch-sync) use this Service; it spreads connections over the ready replicas.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ch.fullname" . }}
+spec:
+  selector: { app: {{ include "ch.fullname" . }} }
+  ports:
+    - { name: native, port: {{ .Values.ports.native }} }
+    - { name: http, port: {{ .Values.ports.http }} }
+---
+# Stable per-replica DNS (clickhouse-0.clickhouse-headless...), also before a pod is ready: replicas find
+# each other through it, and DDL (grid migrations, ch-sync init) is pinned to replica 0.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ch.fullname" . }}-headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: {{ include "ch.fullname" . }} }
+  ports:
+    - { name: native, port: {{ .Values.ports.native }} }
+    - { name: http, port: {{ .Values.ports.http }} }
+    - { name: interserver, port: 9009 }

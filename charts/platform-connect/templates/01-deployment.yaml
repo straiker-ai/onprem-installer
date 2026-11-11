@@ -1,0 +1,149 @@
+{{- $top := . }}
+{{- $c := .Values.straiker.connect }}
+{{- $otel := $c.observability.otel }}
+{{- $otelEnabled := $otel.enabled | default true }}
+{{- $connectURL := $c.notify.connectURL | default (printf "http://%s-connect" (include "straiker.name" $top)) }}
+{{- range $role, $cfg := $c.roles }}
+{{- if $cfg.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.straiker.io/app: connect
+    app.straiker.io/role: {{ $role }}
+    {{- include "straiker.labels" $top | nindent 4 }}
+  {{- with $c.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  name: {{ include "straiker.name" $top }}-{{ $role }}
+  namespace: {{ $top.Release.Namespace }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: connect
+      app.straiker.io/role: {{ $role }}
+      {{- include "straiker.selectorLabels" $top | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: connect
+        app.straiker.io/role: {{ $role }}
+        {{- include "straiker.labels" $top | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $c.serviceAccount.name }}
+      {{- if $c.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range $c.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: connect
+          ports:
+            - name: http
+              containerPort: {{ $c.port }}
+              protocol: TCP
+          image: "{{ $c.image.registry }}/{{ $c.image.name }}:{{ $c.image.version }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          envFrom:
+            - configMapRef:
+                name: {{ include "straiker.name" $top }}-config
+            # Shared platform-secret (required): a missing secret fails the rollout
+            # loudly instead of starting without the DB DSNs / S2S key / bus + OAuth
+            # secrets. Holds CONNECT_DATABASE_CONNECTION_STRING,
+            # NOTIFY_DATABASE_CONNECTION_STRING, PLATFORM_INTERNAL_S2S_API_KEY,
+            # NOTIFY_BUS_BROKERS / _SASL_USERNAME / _SASL_PASSWORD, and
+            # CONNECT_OAUTH_STATE_SECRET / _SLACK_CLIENT_SECRET.
+            # Provider credentials live in the secret store (AWS Secrets Manager),
+            # not the platform-secret; connect accesses it via the pod IAM role.
+            - secretRef:
+                name: {{ $c.secretName }}
+            {{- if $otelEnabled }}
+            - secretRef:
+                name: {{ $otel.secretName | default "otel-secret" }}
+                {{- if not ($otel.requireSecret | default false) }}
+                optional: true
+                {{- end }}
+            {{- end }}
+          env:
+            - name: CONNECT_ROLE
+              value: {{ $role | quote }}
+            {{- if or (eq $role "notify-api") (eq $role "notify-worker") }}
+            # notify runs as its own deployment: reach connect's connection broker
+            # over HTTP (the in-cluster connect Service). Left unset for role=all /
+            # connect, where notify uses the in-process broker.
+            - name: NOTIFY_CONNECT_URL
+              value: {{ $connectURL | quote }}
+            {{- end }}
+            - name: OTEL_SERVICE_NAME
+              value: "{{ $otel.serviceNameBase | default (include "straiker.name" $top) }}-{{ $role }}"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.version={{ $c.image.version }},deployment.environment={{ $c.environment }}"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.topologySpread }}
+      {{- if .enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .maxSkew }}
+          {{- with .minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.straiker.io/app: connect
+              app.straiker.io/role: {{ $role }}
+              {{- include "straiker.selectorLabels" $top | nindent 14 }}
+          {{- with .matchLabelKeys }}
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+{{- end }}
+{{- end }}

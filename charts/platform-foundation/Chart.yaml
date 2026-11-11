@@ -1,0 +1,19 @@
+apiVersion: v2
+name: platform-foundation
+version: "2026.11.300"
+appVersion: "v2026.11.3"
+description: Straiker Platform foundation - public /api/v3 API and platform API-key management
+home: https://straiker.ai
+keywords:
+  - straiker
+  - platform
+  - foundation
+  - api
+maintainers:
+  - email: info@straiker.ai
+    name: Straiker AI Security
+    url: https://straiker.ai
+sources:
+  - https://github.com/straiker-ai/platform/tree/main/services/foundation/deploy/helm/foundation
+type: application
+kubeVersion: '>= 1.29.0-0'

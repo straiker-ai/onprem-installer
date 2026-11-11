@@ -1,0 +1,17 @@
+# s6r.events -> grid.raw_event. MAPS `revision` (the RMT version column); every other field is
+# the producer's own column name. Metadata values are coerced to strings (Map(String, String)).
+input:
+  kafka_franz:
+{{ include "ingest.kafka" . | indent 4 }}
+    topics: [ s6r.events ]
+    consumer_group: {{ .Values.consumerGroupPrefix }}-s6r-events
+    start_from_oldest: true
+pipeline:
+  processors:
+    - mapping: |
+        root = this
+        root.metadata = if this.metadata.type() == "object" { this.metadata.map_each(kv -> kv.value.string()) } else { {} }
+        root.compliance = this.compliance.or([]).map_each(c -> c.string())
+        root.revision = this.revision.or(1)
+output:
+{{ include "ingest.output" (dict "ctx" . "table" "raw_event" "topic" "s6r.events") | indent 2 }}

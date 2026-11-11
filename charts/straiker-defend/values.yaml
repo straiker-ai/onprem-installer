@@ -187,3 +187,7 @@ bifrost:
 # the fine-tuned verdict) and never actually overturns anything.
 frontier:
   enabled: false
+
+# SYS__ARGUS_SESSION_SECRET_KEY source: a Secret with that key, synced from Secrets Manager by the installer's
+# ExternalSecret. Empty = generate in-cluster (legacy).
+sessionKeySecret: ""

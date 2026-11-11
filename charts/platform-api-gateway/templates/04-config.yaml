@@ -1,0 +1,162 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  SPRING_PROFILES_ACTIVE: live
+  application-live.yaml: |
+    server:
+      port: 8080
+      http2:
+        enabled: true
+    management:
+      server:
+        port: 9090
+        address: 0.0.0.0
+      endpoints:
+        web:
+          exposure:
+            include: health,info,metrics,prometheus,gateway
+          base-path: /management
+      endpoint:
+        gateway:
+          enabled: true
+        health:
+          show-details: when-authorized
+          probes:
+            enabled: true
+    spring:
+      ai:
+        mcp:
+          server:
+            enabled: {{ .Values.straiker.apiGateway.mcp.enabled | default false }}
+            version: {{ .Values.straiker.apiGateway.image.version | default "1.0.0" | quote }}
+      cloud:
+        gateway:
+          server:
+            webflux:
+              routes: {{ toYaml (fromYaml (tpl (.Files.Get "values/routes.yaml") .)).routes | nindent 16 }}
+    openapi:
+      enabled: {{ .Values.straiker.apiGateway.openapi.enabled | default false }}
+      refresh-interval: {{ .Values.straiker.apiGateway.openapi.refreshInterval | default 300000 }}
+      docs:
+        enabled: {{ .Values.straiker.apiGateway.openapi.docs.enabled | default false }}
+        {{- if .Values.straiker.apiGateway.openapi.docs.enabled }}
+        auth-mode: {{ .Values.straiker.apiGateway.openapi.docs.authMode | default "basic" }}
+        {{- if eq (.Values.straiker.apiGateway.openapi.docs.authMode | default "basic") "basic" }}
+        username: {{ .Values.straiker.apiGateway.openapi.docs.username | default "admin" | quote }}
+        password: {{ .Values.straiker.apiGateway.openapi.docs.password | default "admin" | quote }}
+        {{- end }}
+        {{- if eq (.Values.straiker.apiGateway.openapi.docs.authMode | default "basic") "google" }}
+        google:
+          client-id-key: {{ .Values.straiker.apiGateway.openapi.docs.google.clientIdKey | default "GOOGLE_DOCS_OAUTH_CLIENT_ID" }}
+          client-secret-key: {{ .Values.straiker.apiGateway.openapi.docs.google.clientSecretKey | default "GOOGLE_DOCS_OAUTH_CLIENT_SECRET" }}
+          allowed-domain: {{ .Values.straiker.apiGateway.openapi.docs.google.allowedDomain | default "straiker.ai" }}
+          jwt-secret-key: {{ .Values.straiker.apiGateway.openapi.docs.google.jwtSecretKey | default "DOCS_JWT_SIGNING_KEY" }}
+          jwt-ttl-hours: {{ .Values.straiker.apiGateway.openapi.docs.google.jwtTtlHours | default 8 }}
+        {{- end }}
+        {{- end }}
+      public-docs:
+        enabled: {{ .Values.straiker.apiGateway.openapi.publicDocs.enabled | default false }}
+        {{- if .Values.straiker.apiGateway.openapi.publicDocs.enabled }}
+        auth-mode: {{ .Values.straiker.apiGateway.openapi.publicDocs.authMode | default "basic" }}
+        {{- if eq (.Values.straiker.apiGateway.openapi.publicDocs.authMode | default "basic") "basic" }}
+        username: {{ .Values.straiker.apiGateway.openapi.publicDocs.username | default "admin" | quote }}
+        password: {{ .Values.straiker.apiGateway.openapi.publicDocs.password | default "admin" | quote }}
+        {{- end }}
+        {{- end }}
+    straiker:
+      gateway:
+        base-url: {{ .Values.straiker.apiGateway.gateway.baseUrl | default "" | quote }}
+        cors:
+          allowed-origins: {{ join "," (.Values.straiker.apiGateway.gateway.corsAllowedOrigins | default list) | quote }}
+      mcp:
+        authorization-servers: {{ toYaml (.Values.straiker.apiGateway.mcp.authorizationServers | default list) | nindent 10 }}
+        {{- /* scopes-supported is a code constant (application.yml); only the
+             enforcement mode is an environment decision. */}}
+        enforce-scopes: {{ .Values.straiker.apiGateway.mcp.enforceScopes | default "strict" | quote }}
+      readonly:
+        enabled: {{ .Values.straiker.readonly.enabled | default false }}
+        config-file: /etc/straiker/config/readonly-config.yaml
+      oauth:
+        mode: {{ .Values.straiker.apiGateway.oauth.mode | default "cognito" }}
+        {{- if eq (.Values.straiker.apiGateway.oauth.mode | default "cognito") "inmemory" }}
+        inmemory:
+          token-ttl-seconds: {{ .Values.straiker.apiGateway.oauth.inmemory.tokenTtlSeconds | default 3600 }}
+          {{- if .Values.straiker.apiGateway.oauth.inmemory.signingKey }}
+          signing-key: |
+{{ .Values.straiker.apiGateway.oauth.inmemory.signingKey | indent 12 }}
+          {{- end }}
+          {{- if .Values.straiker.apiGateway.oauth.inmemory.clients }}
+          clients: {{ toYaml .Values.straiker.apiGateway.oauth.inmemory.clients | nindent 12 }}
+          {{- end }}
+        {{- end }}
+      pat:
+        mode: {{ .Values.straiker.apiGateway.pat.mode | default "foundation" }}
+        {{- if eq (.Values.straiker.apiGateway.pat.mode | default "foundation") "inmemory" }}
+        {{- with .Values.straiker.apiGateway.pat.tokens }}
+        tokens:
+          {{- range . }}
+          - pat-id: {{ .patId | quote }}
+            pat-hash: {{ .patHash | quote }}
+            user-id: {{ .userId | quote }}
+            {{- if .tenantId }}
+            tenant-id: {{ .tenantId | quote }}
+            {{- end }}
+            {{- with .allowedScopes }}
+            allowed-scopes: {{ toYaml . | nindent 14 }}
+            {{- end }}
+            {{- if .createdAt }}
+            created-at: {{ .createdAt | quote }}
+            {{- end }}
+            {{- if .expiresAt }}
+            expires-at: {{ .expiresAt | quote }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
+      cognito:
+        issuer: {{ .Values.straiker.apiGateway.cognito.issuerUrl }}
+        domain: {{ .Values.straiker.apiGateway.cognito.domain }}
+        # App client used to drive the PAT -> token CUSTOM_AUTH exchange.
+        u2s-client-id: {{ .Values.straiker.apiGateway.cognito.u2sClientId | default "" | quote }}
+        # Region of the Cognito user pool; auto-derived from the issuer URL when unset.
+        region: {{ .Values.straiker.apiGateway.cognito.region | default (regexFind "[a-z]{2}-[a-z]+-[0-9]" .Values.straiker.apiGateway.cognito.issuerUrl) | default "us-east-1" }}
+      secret-manager:
+        enabled: true
+        secret-name: {{ .Values.straiker.apiGateway.secretManager.secretName | default "dev-secrets" }}
+        region: {{ .Values.straiker.apiGateway.secretManager.region | default "us-east-1" }}
+      # Integration-key edge for the detection-engine API (/api/v3/detect).
+      # Renders (and ACTIVATES) only when integrationKeys.secretPrefix is set for
+      # the env; unset -> the detect chain/beans are not registered and
+      # /api/v3/detect fails closed (falls to the /api/** chain). secretPrefix MUST
+      # match the registry's SM namespace for the env (records at
+      # {prefix}keys/{keyId}); the gateway pod role needs
+      # secretsmanager:GetSecretValue on {prefix}keys/*.
+      {{- with .Values.straiker.apiGateway.integrationKeys }}
+      {{- if .secretPrefix }}
+      integration-keys:
+        secret-prefix: {{ .secretPrefix | quote }}
+        region: {{ .region | default "us-east-1" }}
+        {{- with .positiveTtlSeconds }}
+        positive-ttl-seconds: {{ . }}
+        {{- end }}
+        {{- with .negativeTtlSeconds }}
+        negative-ttl-seconds: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+      s2s:
+        apikeys:
+          - name: foundation
+            secretKey: FOUNDATION_API_KEY
+          # registry -> Argus control-definitions (dedicated /internal/argus chain, Basic).
+          # Password is the shared key; validated against this Secrets Manager entry.
+          - name: argus
+            secretKey: SYS__ARGUS_INTERNAL_S2S_KEY
+      dynamodb:
+        region: {{ .Values.straiker.apiGateway.dynamodb.region | default "us-east-1" }}
+        environment-table: {{ .Values.straiker.apiGateway.dynamodb.environmentTable }}

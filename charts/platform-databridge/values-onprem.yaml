@@ -1,0 +1,21 @@
+# On-prem overlay for platform-databridge (hand-maintained; scripts/sync-platform-charts.sh never touches it).
+# Passed by 'install-straiker.sh' phase 'platform-services' together with --set for the
+# per-install values: image.registry/version, bus region, namespace-specific URLs.
+# Reads platform-secret / platform-sa created by chart straiker-data.
+straiker:
+  databridge:
+    # Not "production": the chart's prod guardrails (Benthos >= 2, PDBs, Redpanda sizing) key off that exact value.
+    environment: onprem
+    observability:
+      otel: { enabled: false }
+    serviceAccount: { create: false, name: platform-sa }
+    # MSK Serverless replaces the in-cluster Redpanda.
+    redpanda: { enabled: false }
+    bus: { tls: true, sasl: { mechanism: aws_msk_iam } }   # region set by the installer
+    benthos:
+      replicas: 1
+      waitForKafkaBroker: { enabled: false }
+    roles:
+      api: { replicas: 1 }
+      ingest: { replicas: 1 }
+      reconcile: { replicas: 1 }

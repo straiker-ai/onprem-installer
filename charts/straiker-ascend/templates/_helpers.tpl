@@ -24,8 +24,7 @@ Env vars common to every ascend component.
   value: {{ .Values.image.tag | quote }}
 - name: SYS__SECRET_MANAGER_ENABLED
   value: "false"
-- name: SYS__REDIS_URL
-  value: {{ include "ascend.redisUrl" . | quote }}
+{{ include "ascend.redisEnv" . }}
 - name: SYS__APPSYNC_ENABLED
   value: "false"
 - name: SYS__ARCHIVE_ENABLED
@@ -127,6 +126,22 @@ Redis — reuses charts/straiker-system's own instance (service "valkey", a
 Redis-protocol-compatible fork) in this same namespace, rather than
 deploying a second one.
 */}}
+{{/*
+SYS__REDIS_URL env entry: from an existing Secret when redis.existingSecret.name is set
+(keeps an AUTH token out of the pod spec), otherwise the plain URL.
+*/}}
+{{- define "ascend.redisEnv" -}}
+- name: SYS__REDIS_URL
+{{- if .Values.redis.existingSecret.name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.existingSecret.name | quote }}
+      key: {{ .Values.redis.existingSecret.key | quote }}
+{{- else }}
+  value: {{ include "ascend.redisUrl" . | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "ascend.redisUrl" -}}
 {{- if .Values.redis.url -}}
 {{- .Values.redis.url -}}

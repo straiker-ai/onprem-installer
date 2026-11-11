@@ -1,0 +1,88 @@
+{{- if include "ch.replicated" . }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ch.keeperName" . }}-headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: {{ include "ch.keeperName" . }} }
+  ports:
+    - { name: client, port: 9181 }
+    - { name: raft, port: 9234 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ch.keeperName" . }}
+spec:
+  serviceName: {{ include "ch.keeperName" . }}-headless
+  replicas: {{ .Values.keeper.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: {{ include "ch.keeperName" . }} }
+  template:
+    metadata:
+      labels: { app: {{ include "ch.keeperName" . }} }
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/keeper-config.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.keeper.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.keeper.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      # Members on different nodes: losing one node must not lose the quorum.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: { app: {{ include "ch.keeperName" . }} }
+      securityContext: { runAsUser: 101, runAsGroup: 101, fsGroup: 101 }
+      containers:
+        - name: keeper
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              export KEEPER_SERVER_ID=$(( ${HOSTNAME##*-} + 1 ))
+              exec clickhouse-keeper --config-file=/etc/clickhouse-keeper/keeper.xml
+          ports:
+            - { name: client, containerPort: 9181 }
+            - { name: raft, containerPort: 9234 }
+          readinessProbe:
+            tcpSocket: { port: client }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: client }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources: {{ toYaml .Values.keeper.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse-keeper }
+            - { name: config, mountPath: /etc/clickhouse-keeper }
+      volumes:
+        - name: config
+          configMap: { name: {{ include "ch.keeperName" . }}-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.keeper.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.keeper.persistence.size }} } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ch.keeperName" . }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: {{ include "ch.keeperName" . }} }
+{{- end }}

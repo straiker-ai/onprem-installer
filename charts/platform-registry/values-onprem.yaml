@@ -1,0 +1,14 @@
+# On-prem overlay for platform-registry (hand-maintained; scripts/sync-platform-charts.sh never touches it).
+# Passed by 'install-straiker.sh' phase 'platform-services' together with --set for the
+# per-install values: image.registry/version, bus region, namespace-specific URLs.
+# Reads platform-secret / platform-sa created by chart straiker-data.
+straiker:
+  registry:
+    environment: onprem
+    clickhouse: { secure: false }   # in-cluster ClickHouse pod, plain native protocol
+    observability:
+      otel: { enabled: false }
+    serviceAccount: { create: false, name: platform-sa }
+    replicas: 1
+    hpa: { enabled: false }
+    bus: { tls: true, sasl: { mechanism: aws_msk_iam } }   # region set by the installer

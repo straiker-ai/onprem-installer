@@ -1,0 +1,167 @@
+straiker:
+  connect:
+    port: 8080
+    logLevel: info
+    environment: development
+
+    server:
+      readTimeout: 10
+      writeTimeout: 10
+      idleTimeout: 60
+
+    # Pod identity. The SA is provisioned outside this chart (create: false) and
+    # carries the IAM role granting connect ambient AWS access. That role is used
+    # for SES email delivery (CONNECT_EMAIL_*) and now also for the provider-
+    # credential secret store: its IAM policy must allow
+    # secretsmanager:GetSecretValue|CreateSecret|PutSecretValue|DeleteSecret on
+    # <env>/platform/connect/* (dev|stage|prod). This chart does not manage the
+    # SA object or its IAM annotations.
+    serviceAccount:
+      create: false
+      name: platform-sa
+
+    image:
+      # registry includes the "/straiker" prefix (not just the bare ECR host) -
+      # CD.yml's --set image.registry=...amazonaws.com/straiker expects name to
+      # be the bare service name, same convention as databridge's chart.
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: connect
+      version: latest
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+
+    # Shared per-env Kubernetes Secret (ESO-synced) consumed via envFrom. Holds
+    # both database DSNs (CONNECT_DATABASE_CONNECTION_STRING /
+    # NOTIFY_DATABASE_CONNECTION_STRING), the bus creds (NOTIFY_BUS_BROKERS /
+    # NOTIFY_BUS_SASL_USERNAME / _PASSWORD), the OAuth secrets
+    # (CONNECT_OAUTH_STATE_SECRET / CONNECT_OAUTH_SLACK_CLIENT_SECRET) and the
+    # platform-wide PLATFORM_INTERNAL_S2S_API_KEY (shared across services).
+    # Provider credentials are NOT stored here: they live in the secret store
+    # (AWS Secrets Manager), keyed by the opaque secret_ref handle kept in Postgres.
+    secretName: platform-secret
+
+    # Provider-credential secret store (CONNECT_SECRETS_*). connect stores provider
+    # credentials in a secret store and keeps only an opaque secret_ref handle in
+    # Postgres (no app-side encryption key). In cloud this is AWS Secrets Manager,
+    # accessed via the pod IAM role (see serviceAccount above); prefix namespaces
+    # the secrets per env. Set dev to a JSON blob to select an in-memory store
+    # instead (local/dev only); leave it empty in cloud so AWS Secrets Manager is used.
+    secrets:
+      prefix: "dev/platform/connect/"
+      dev: ""
+
+    # Schema migrations run as Helm pre-install/pre-upgrade hook Jobs using a
+    # Liquibase image with independent auth/connect/notify changelogs. Auth and
+    # connect currently share CONNECT_DATABASE_CONNECTION_STRING.
+    migrations:
+      enabled: true
+      image:
+        registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+        name: connect-migrations
+        version: latest
+        pullPolicy: IfNotPresent
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+
+    # Role-scoped Deployments (one image, CONNECT_ROLE selects components).
+    #   connect       = connect API + internal connection broker
+    #   notify-api    = notify HTTP (sync :send + message audit)
+    #   notify-worker = notify async delivery worker + reconcile sweeper
+    #   all           = everything in one process, in-process broker (local/dev);
+    #                   off by default in cloud, where the split shape runs.
+    # Enable EITHER the split trio (connect + notify-api + notify-worker) OR all,
+    # not both.
+    roles:
+      connect:
+        enabled: true
+        replicas: 2
+      notify-api:
+        enabled: true
+        replicas: 2
+      notify-worker:
+        enabled: true
+        replicas: 2
+      all:
+        enabled: false
+        replicas: 1
+
+    # connect subservice (CONNECT_*): provider credentials (stored in the secret
+    # store, referenced by secret_ref in Postgres) + OAuth.
+    oauth:
+      # Public base URL used to build provider OAuth callback URLs (e.g.
+      # https://api.dev.straiker.ai). Empty disables the OAuth start/callback
+      # endpoints. Non-secret. The HMAC state secret + Slack client secret are
+      # supplied via platform-secret, never chart values.
+      redirectBaseURL: ""
+      # Console integrations page used after a provider callback.
+      returnURL: ""
+      slackClientID: ""
+
+    # SES email delivery (CONNECT_EMAIL_*). connect owns the SES connector, the
+    # sys_email system channel, and all delivery. Non-secret; AWS credentials
+    # come from the pod IAM role / platform-secret, never chart values.
+    email:
+      region: us-east-1
+      defaultFrom: ""
+
+    # notify subservice (NOTIFY_*): delivery bus, topics, reconcile sweeper.
+    notify:
+      # connect's in-cluster base URL for the HTTP connection broker, used only
+      # when notify runs as its own deployment (role notify-api/notify-worker).
+      # Empty -> the deployment template defaults it to the in-cluster connect
+      # Service (http://<release>-connect). Ignored for role=all (in-process broker).
+      connectURL: ""
+
+      # Async bus (shared MSK). Brokers + SASL credentials come from platform-secret.
+      bus:
+        tls: true
+        sasl:
+          mechanism: aws_msk_iam
+          region: us-east-1
+
+      topics:
+        requested: notify.requested
+        dlq: notify.dlq
+        consumerGroup: notify.delivery
+        partitions: 3
+        retentionSeconds: 604800
+        dlqRetentionSeconds: 2592000
+
+      reconcile:
+        intervalSeconds: 30
+        staleSeconds: 120
+
+    observability:
+      otel:
+        enabled: true
+        secretName: otel-secret
+        requireSecret: false
+        serviceNameBase: connect
+
+    service:
+      annotations: {}
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the Deployment's pods (each connect role on its own). Off by
+    # default. minDomains: with eligible nodes in one zone only, a pod that would break
+    # the spread waits for a node in another zone instead of joining the first.
+    # matchLabelKeys: a rollout spreads the new ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ch.fullname" . }}-config
+data:
+  listen.xml: |
+    <clickhouse><listen_host>0.0.0.0</listen_host></clickhouse>
+  {{- if include "ch.replicated" . }}
+  cluster.xml: |
+    <clickhouse>
+      <zookeeper>
+        {{- range $i := until (int .Values.keeper.replicas) }}
+        <node><host>{{ include "ch.keeperHost" (dict "root" $ "i" $i) }}</host><port>9181</port></node>
+        {{- end }}
+      </zookeeper>
+      <macros>
+        <shard>01</shard>
+        <replica from_env="POD_NAME"/>
+      </macros>
+      <interserver_http_host from_env="CH_POD_FQDN"/>
+      <remote_servers>
+        <straiker>
+          <shard>
+            <internal_replication>true</internal_replication>
+            {{- range $i := until (int .Values.replicas) }}
+            <replica><host>{{ include "ch.replicaHost" (dict "root" $ "i" $i) }}</host><port>{{ $.Values.ports.native }}</port></replica>
+            {{- end }}
+          </shard>
+        </straiker>
+      </remote_servers>
+    </clickhouse>
+  {{- end }}
+  users.xml: |
+    <clickhouse>
+      <profiles><readonly><readonly>1</readonly></readonly></profiles>
+      <users>
+        {{- /* grid's dictionaries use SOURCE(CLICKHOUSE(db 'grid' table '...')) with no credentials, so the
+               server connects to itself as "default". Keep it, but local-host only (other pods are denied)
+               and read-only on grid. */}}
+        <default replace="replace">
+          <password></password>
+          <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants><query>GRANT SELECT ON grid.*</query></grants>
+        </default>
+        {{- range $u, $cfg := .Values.users }}
+        <{{ $u }}>
+          <password from_env="CH_PW_{{ $u | upper }}"/>
+          <networks><ip>::/0</ip></networks>
+          <profile>{{ if $cfg.readonly }}readonly{{ else }}default{{ end }}</profile>
+          <quota>default</quota>
+          {{- if $cfg.accessManagement }}
+          <access_management>1</access_management>
+          {{- end }}
+          {{- if $cfg.grants }}
+          <grants>
+            {{- range $cfg.grants }}
+            <query>{{ . }}</query>
+            {{- end }}
+          </grants>
+          {{- end }}
+        </{{ $u }}>
+        {{- end }}
+      </users>
+    </clickhouse>

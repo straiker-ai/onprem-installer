@@ -1,0 +1,14 @@
+# On-prem overlay for platform-portico (hand-maintained; scripts/sync-platform-charts.sh never touches it).
+# Passed by 'install-straiker.sh' phase 'platform-services' together with --set for the
+# per-install values: image.registry/version, bus region, namespace-specific URLs.
+# Reads platform-secret / platform-sa created by chart straiker-data.
+straiker:
+  portico:
+    environment: onprem
+    observability:
+      otel: { enabled: false }
+    serviceAccount: { create: false, name: platform-sa }
+    replicas: 1
+    hpa: { enabled: false }
+    # internalApi.url -> the in-cluster frontend, set by the installer; turns.url stays empty
+    # (the turn export answers 503 until a turns service exists).

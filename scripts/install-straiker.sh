@@ -28,6 +28,7 @@ INSTALLER_BUNDLE_URL="${STRAIKER_INSTALLER_BUNDLE_URL:-}"
 TFBE_SRC="${REPO_ROOT}/terraform/aws/tfbe"
 EKS_SRC="${REPO_ROOT}/terraform/aws/eks"
 ARTIFACTS_SRC="${REPO_ROOT}/terraform/aws/artifacts"
+DATA_SRC="${REPO_ROOT}/terraform/aws/data"
 # Named EDGE_INFRA_* (not EDGE_*) to avoid colliding with the unrelated
 # charts/straiker-edge Helm-chart identifiers (EDGE_RELEASE/EDGE_TYPE/
 # EDGE_CHART_NAME) already used throughout this script.
@@ -46,6 +47,7 @@ TF_WORK_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
 TFBE_DIR="${TF_WORK_ROOT}/aws/tfbe"
 EKS_DIR="${TF_WORK_ROOT}/aws/eks"
 ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
+DATA_DIR="${TF_WORK_ROOT}/aws/data"
 EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
 GCP_TFBE_DIR="${TF_WORK_ROOT}/gcp/tfbe"
 GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
@@ -99,6 +101,22 @@ CERT_MANAGER_RELEASE="cert-manager"
 CERT_MANAGER_NAMESPACE="cert-manager"
 CERT_MANAGER_SERVICE_ACCOUNT="cert-manager"
 EXTERNAL_DNS_VERSION="1.21.1"
+
+# External Secrets Operator (third-party chart, same as SaaS: ESO syncs Secrets Manager -> K8s Secrets via
+# the ClusterSecretStore "aws-sm"). Its AWS access is Pod Identity (role "<cluster>-eso", created by aws-data).
+ESO_HELM_REPO_NAME="external-secrets"
+ESO_HELM_REPO_URL="https://charts.external-secrets.io"
+ESO_RELEASE="external-secrets"
+ESO_NAMESPACE="external-secrets"
+ESO_SERVICE_ACCOUNT="external-secrets"
+ESO_VERSION="0.14.4"
+ESO_STORE_NAME="aws-sm"
+# Aurora roles whose passwords live in Secrets Manager "<cluster>/db/passwords" (charts/straiker-data databases + readers).
+DB_PASSWORD_ROLES="foundation registry databridge connect notify frontend iris bifrost grid_cdc"
+# ClickHouse users (chart straiker-clickhouse `users`) whose passwords live in "<cluster>/clickhouse/credentials".
+CLICKHOUSE_PASSWORD_USERS="admin grid_query_ro grid_ingest grid_purge"
+# Keys of Secret straiker-secrets (SHARED_SECRETS_NAME) kept in Secrets Manager "<cluster>/platform/shared".
+SHARED_SECRET_PROPS="INTERNAL_API_KEY SYS__FOUNDATION_API_KEY VLLM_API_KEY SYS__INFERENCE_API_KEY IRIS_ADMIN_API_KEY BOOTSTRAP_ADMIN_PASSWORD BOOTSTRAP_ADMIN_PASSWORD_HASH"
 
 # Shared provider plugin cache across tfbe and eks (both need hashicorp/aws)
 # and across invocations — avoids re-downloading the same large provider.
@@ -201,6 +219,16 @@ GCP_PROJECT_OPT="${GOOGLE_CLOUD_PROJECT:-}"
 # place isn't supported by either cloud's Terraform provider. Only
 # meaningful when this installer provisions the cluster (--install-eks).
 PROVISION_STRATEGY="${PROVISION_STRATEGY:-min}"
+
+# Opt-in (--data-layer): provision the AWS-managed data tier (Aurora PostgreSQL,
+# ElastiCache Serverless Redis, MSK Serverless, EFS model cache, KMS, Secrets
+# Manager) via terraform/aws/data, in phase 'aws-data'. Off by default so
+# existing installs (in-cluster Postgres/Valkey) are untouched.
+DATA_LAYER="${DATA_LAYER:-false}"
+# Platform services installed by phase platform-services (also drives platform-sa's IAM grants).
+PLATFORM_SERVICES_EXPLICIT=false
+[[ -n "${PLATFORM_SERVICES:-}" ]] && PLATFORM_SERVICES_EXPLICIT=true
+PLATFORM_SERVICES="${PLATFORM_SERVICES:-foundation databridge portico api-gateway}"
 
 # Kubernetes API server exposure, and the NAT gateway count that
 # provision_strategy would otherwise dictate on its own. All three get the
@@ -416,7 +444,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "artifacts-sync" "straiker-system" "shared-secrets" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -447,6 +475,10 @@ Options:
   --phase <name>[,<name>...]       Run only the given phase(s), in the listed order.
   --from-phase <name>             Run from phase through the end.
   --rerun-phase                   Re-run selected phases even if already marked done.
+  --data-layer                    Also provision the AWS-managed data tier (Aurora PostgreSQL,
+                                   ElastiCache Serverless Redis, MSK Serverless, EFS, KMS, Secrets
+                                   Manager) in phase 'aws-data'. Sized by --provision-strategy.
+                                   Needs an existing EKS cluster (ours or --cluster-name).
   --install-eks                   Also provision an EKS cluster via Terraform (the AWS
                                    bootstrap phase runs regardless of this flag).
   --install-tofu                  Download and install OpenTofu ${TOFU_VERSION} to
@@ -975,6 +1007,10 @@ Installer phases:
   5) aws-artifacts        - create the ECR image mirror + models S3 bucket + hauler IAM role
                              (EKS Pod Identity). Always runs; needs a cluster to already exist
                              (ours via eks-cluster, or the customer's own via --cluster-name).
+  5b) aws-data            - (optional, requires --data-layer) provision Aurora PostgreSQL, ElastiCache
+                             Serverless Redis, MSK Serverless, EFS, KMS and Secrets Manager via
+                             terraform/aws/data, in the cluster's private subnets. Endpoints are
+                             saved to install state for the later chart phases.
   6) artifacts-sync       - install/upgrade release 'straiker-artifact' (its own chart), which
                              creates the K8s Secret and runs the in-cluster image-mirror/model-sync
                              Jobs (plain resources, not Helm hooks — they can run for hours without
@@ -994,6 +1030,27 @@ Installer phases:
                              frontend, and VLLM_API_KEY / SYS__INFERENCE_API_KEY (same value)
                              for argus calling straiker-inference. All three charts read
                              this same Secret name; this phase is what creates it.
+  8a) clickhouse          - (optional, requires --data-layer) install chart 'straiker-clickhouse': single-node
+                             ClickHouse pod (PVC), users and Secret 'clickhouse-credentials', database grid.
+                             Runs before data-bootstrap, which projects its address/credentials into
+                             'platform-secret'. Ingestion into it is not included.
+  8b) data-bootstrap      - (optional, requires --data-layer) create the Aurora admin Secret and install
+                             chart 'straiker-data': per-service databases/roles + DSN Secret
+                             'straiker-db-dsn', and the MSK topics (Jobs, SASL/IAM via Pod Identity).
+  8b2) ch-sync            - (optional, requires --data-layer) install chart 'straiker-ch-sync': creates the grid.*
+                             CDC replica tables in ClickHouse and syncs them every minute from the registry
+                             Postgres DB (read-only role grid_cdc). Replaces the ClickPipes Postgres pipe.
+  8c) platform-services   - (optional, requires --data-layer) install the vendored platform charts
+                             (charts/platform-<svc>, overlay values-onprem.yaml) from the ECR mirror:
+                             PLATFORM_SERVICES, default "foundation databridge portico api-gateway", plus registry and
+                             grid with --data-layer (they need ClickHouse). connect needs SES, so it is opt-in.
+  8d) ingest              - (optional, requires --data-layer) install chart 'straiker-ingest': Redpanda Connect
+                             streams s6r.events / s6r.findings / platform.audit -> ClickHouse grid.* landing
+                             tables (MSK SASL/IAM; rejects go to <topic>.dlq). Replaces the ClickPipes Kafka pipes.
+                             Needs grid's migration to have created the tables (phase platform-services with grid).
+  8e) verify-data-layer   - (optional, requires --data-layer) post-install checks, run before the app
+                             charts: EFS CSI driver + models PVC Bound, ElastiCache PING over TLS,
+                             Aurora sslmode=require (iris role), and no failed Jobs. Any FAIL blocks the run.
   9) ai-provider-secrets  - only when 'ascend' is selected. Writes whichever provider
                              credential(s) AI_PROVIDER_MODE needs into 'straiker-secrets'
                              (own-keys: OpenAI/Anthropic/xAI; bedrock: static AWS
@@ -1330,6 +1387,10 @@ parse_args() {
         INSTALL_EKS_EXPLICIT=true
         shift
         ;;
+      --data-layer)
+        DATA_LAYER=true
+        shift
+        ;;
       --install-tofu)
         INSTALL_TOFU=true
         shift
@@ -1622,6 +1683,22 @@ terraform {
   backend "s3" {
     bucket       = "${bucket_name}"
     key          = "s6r-onprem/artifacts.tfstate"
+    region       = "${AWS_REGION}"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+EOF
+}
+
+write_data_backend_config() {
+  local bucket_name=$1
+  cat > "${DATA_DIR}/backend.tf" <<EOF
+# Generated by scripts/install-straiker.sh — safe to delete between runs.
+terraform {
+  backend "s3" {
+    bucket       = "${bucket_name}"
+    key          = "s6r-onprem/data.tfstate"
     region       = "${AWS_REGION}"
     encrypt      = true
     use_lockfile = true
@@ -2242,10 +2319,17 @@ phase_karpenter() {
     set_metadata "karpenter_queue_name" "${queue_name}"
   fi
 
+  # The chart requires one replica per node (anti-affinity) and spreads them across zones.
+  # --provision-strategy min has a single system node, so a second replica can never
+  # schedule and the rollout deadlocks. Run one replica there.
+  local karpenter_replicas=2
+  [[ "${PROVISION_STRATEGY}" == "min" ]] && karpenter_replicas=1
+
   helm upgrade --install karpenter "oci://public.ecr.aws/karpenter/karpenter" \
     --version "${KARPENTER_VERSION}" \
     --namespace "${KARPENTER_NAMESPACE}" \
     --create-namespace \
+    --set "replicas=${karpenter_replicas}" \
     --set "settings.clusterName=${cluster_name}" \
     --set "settings.interruptionQueue=${queue_name}" \
     --set "controller.resources.requests.cpu=1" \
@@ -2508,6 +2592,234 @@ phase_aws_artifacts() {
   [[ -n "${bedrock_role_arn}" ]] && set_metadata "bedrock_role_arn" "${bedrock_role_arn}"
 }
 
+# AWS-managed data tier (opt-in via --data-layer). Runs after aws-artifacts:
+# needs the cluster (Pod Identity associations) and the bootstrap bucket.
+phase_aws_data() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping AWS data tier."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
+    mark_phase_blocked "--data-layer is AWS-only."
+    return
+  fi
+  if [[ -z "${AWS_REGION}" ]]; then
+    mark_phase_blocked "AWS region is required. Use --aws-region, AWS_REGION, or configure the AWS CLI."
+    return
+  fi
+
+  require_command aws
+  require_command tofu
+  require_terraform_dir "${DATA_SRC}" || return
+  sync_terraform_workdir "${DATA_SRC}" "${DATA_DIR}"
+
+  local bucket_name
+  bucket_name="$(get_metadata "bootstrap_bucket")"
+  if [[ -z "${bucket_name}" ]]; then
+    bucket_name="$(resolve_bucket_name)"
+  fi
+  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
+    mark_phase_blocked "Bootstrap bucket '${bucket_name}' not found. Run phase 'eks-tfbe' first."
+    return
+  fi
+
+  if ! aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    mark_phase_blocked "EKS cluster '${CLUSTER_NAME}' not found in ${AWS_REGION}. Run with --install-eks to provision one, or pass --cluster-name matching your existing cluster."
+    return
+  fi
+
+  # VPC + private subnets come from the live cluster so this works for both our
+  # own VPC and bring-your-own. Private = tagged internal-elb (set by eks-cluster
+  # and required of BYO subnets); fall back to every cluster subnet if untagged.
+  local vpc_id subnet_ids
+  vpc_id="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+    --query 'cluster.resourcesVpcConfig.vpcId' --output text)"
+  subnet_ids="$(aws ec2 describe-subnets --region "${AWS_REGION}" \
+    --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:kubernetes.io/role/internal-elb,Values=1" \
+    --query 'Subnets[].SubnetId' --output json)"
+  if [[ "${subnet_ids}" == "[]" ]]; then
+    subnet_ids="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+      --query 'cluster.resourcesVpcConfig.subnetIds' --output json)"
+  fi
+
+  # Preflight: MSK/EFS/Aurora need >=2 AZs; Aurora engine version must exist in the region.
+  local azs_distinct
+  azs_distinct="$(aws ec2 describe-subnets --region "${AWS_REGION}" --subnet-ids $(echo "${subnet_ids}" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))') \
+    --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null | tr '\t' '\n' | sort -u | wc -l | tr -d ' ')"
+  if [[ "${azs_distinct}" -lt 2 ]]; then
+    mark_phase_blocked "The data tier needs private subnets in at least 2 AZs (found ${azs_distinct})."
+    return
+  fi
+  # Default: the newest Aurora PostgreSQL 17.x in this region (the SaaS regions run 17.11). An existing
+  # cluster ignores later version changes (minor upgrades are applied by AWS). Set AURORA_ENGINE_VERSION to pin one.
+  local aurora_ver="${AURORA_ENGINE_VERSION:-}"
+  if [[ -z "${aurora_ver}" ]]; then
+    aurora_ver="$(aws rds describe-db-engine-versions --engine aurora-postgresql --region "${AWS_REGION}" \
+      --query 'DBEngineVersions[?starts_with(EngineVersion, `17.`)].EngineVersion' --output text 2>/dev/null \
+      | tr '\t' '\n' | sort -V | tail -1)"
+    aurora_ver="${aurora_ver:-17.11}"
+  fi
+  if [[ -z "$(aws rds describe-db-engine-versions --engine aurora-postgresql --engine-version "${aurora_ver}" \
+      --region "${AWS_REGION}" --query 'DBEngineVersions[0].EngineVersion' --output text 2>/dev/null | grep -v '^None$')" ]]; then
+    mark_phase_blocked "Aurora PostgreSQL ${aurora_ver} is not available in ${AWS_REGION}. List: aws rds describe-db-engine-versions --engine aurora-postgresql --region ${AWS_REGION} --query 'DBEngineVersions[].EngineVersion'; then set AURORA_ENGINE_VERSION."
+    return
+  fi
+
+  write_data_backend_config "${bucket_name}"
+
+  # platform-sa grants follow the services being installed: databridge delivers into customer
+  # accounts (sts:AssumeRole), connect sends email (SES).
+  local platform_assume_roles=false platform_ses_send=false
+  [[ " ${PLATFORM_SERVICES} " == *" databridge "* ]] && platform_assume_roles=true
+  [[ " ${PLATFORM_SERVICES} " == *" connect "* ]] && platform_ses_send=true
+
+  # Pod Identity role for the data-bootstrap Jobs (chart straiker-data's ServiceAccount).
+  cat > "${DATA_DIR}/terraform.auto.tfvars.json" <<EOF
+{
+  "pod_identities": {
+    "data-bootstrap": {
+      "namespace": "${INFRA_NAMESPACE}",
+      "service_account": "straiker-data",
+      "msk_clusters": ["bus"]
+    },
+    "platform": {
+      "namespace": "${INFRA_NAMESPACE}",
+      "service_account": "platform-sa",
+      "msk_clusters": ["bus"],
+      "s3_read": ["grid-artifacts"],
+      "secret_prefixes_rw": ["${CLUSTER_NAME}/platform/"],
+      "assume_roles": ${platform_assume_roles},
+      "ses_send": ${platform_ses_send}
+    },
+    "grid-ingest": {
+      "namespace": "${INFRA_NAMESPACE}",
+      "service_account": "grid-ingest",
+      "msk_clusters": ["bus"]
+    },
+    "eso": {
+      "namespace": "${ESO_NAMESPACE}",
+      "service_account": "${ESO_SERVICE_ACCOUNT}",
+      "secret_prefixes_read": ["${CLUSTER_NAME}/"],
+      "aurora_master_secret": true
+    },
+    "api-gateway": {
+      "namespace": "${INFRA_NAMESPACE}",
+      "service_account": "straiker-api-gateway-sa",
+      "secret_keys": ["platform/api-gateway"],
+      "secret_prefixes_read": ["${CLUSTER_NAME}/platform/integration/keys/"],
+      "dynamodb_query": ["environment"]
+    }
+  },
+  "secrets": {
+    "platform/shared": {
+      "description": "Shared service keys and bootstrap admin login (Secret straiker-secrets); synced to K8s by External Secrets",
+      "generated_keys": [$(printf '"%s",' ${SHARED_SECRET_PROPS} | sed 's/,$//')]
+    },
+    "frontend/auth": {
+      "description": "Frontend session signing key; synced to K8s by External Secrets",
+      "generated_keys": ["SESSION_SIGNING_KEY"],
+      "password_length": 64
+    },
+    "argus/session": {
+      "description": "Defend (Argus) session secret key; synced to K8s by External Secrets",
+      "generated_keys": ["SYS__ARGUS_SESSION_SECRET_KEY"],
+      "password_length": 64
+    },
+    "platform/keys": {
+      "description": "Platform-internal service-to-service key; synced to K8s by External Secrets",
+      "generated_keys": ["PLATFORM_INTERNAL_S2S_API_KEY"],
+      "password_length": 48
+    },
+    "clickhouse/credentials": {
+      "description": "ClickHouse user passwords (admin, grid_query_ro, ...); synced to K8s by External Secrets",
+      "generated_keys": [$(printf '"%s",' ${CLICKHOUSE_PASSWORD_USERS} | sed 's/,$//')]
+    },
+    "db/passwords": {
+      "description": "Aurora role passwords (foundation, registry, ...); synced to K8s by External Secrets",
+      "generated_keys": [$(printf '"%s",' ${DB_PASSWORD_ROLES} | sed 's/,$//')]
+    },
+    "platform/api-gateway": {
+      "description": "api-gateway key bundle; PLATFORM_VALIDATE_KEY and SYS__ARGUS_INTERNAL_S2S_KEY are shared with foundation/registry/argus",
+      "generated_keys": ["PLATFORM_VALIDATE_KEY", "PAT_EXCHANGE_ASSERTION_SECRET", "SYS__ARGUS_INTERNAL_S2S_KEY", "FOUNDATION_API_KEY"]
+    }
+  }
+}
+EOF
+
+  # OpenSearch VPC domains need the service-linked role. It exists once any domain was created in the account;
+  # decided once and remembered (a later "exists" must not make Terraform destroy a role it created).
+  local os_slr
+  os_slr="$(get_metadata "opensearch_create_slr")"
+  if [[ -z "${os_slr}" ]]; then
+    if aws iam get-role --role-name AWSServiceRoleForAmazonOpenSearchService >/dev/null 2>&1; then os_slr=false; else os_slr=true; fi
+    set_metadata "opensearch_create_slr" "${os_slr}"
+  fi
+
+  tofu -chdir="${DATA_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu -chdir="${DATA_DIR}" apply -auto-approve -input=false \
+    -var="region=${AWS_REGION}" \
+    -var="cluster_name=${CLUSTER_NAME}" \
+    -var="vpc_id=${vpc_id}" \
+    -var="private_subnet_ids=${subnet_ids}" \
+    -var="provision_strategy=${PROVISION_STRATEGY}" \
+    -var="create_opensearch_service_linked_role=${os_slr}" \
+    -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
+
+  out() { tofu -chdir="${DATA_DIR}" output -raw "$1" 2>/dev/null || true; }
+  set_metadata "aurora_endpoint" "$(out aurora_endpoint)"
+  set_metadata "aurora_reader_endpoint" "$(out aurora_reader_endpoint)"
+  set_metadata "aurora_port" "$(out aurora_port)"
+  set_metadata "aurora_master_secret_arn" "$(out aurora_master_secret_arn)"
+  # Every other Aurora cluster ("ascend", ...) as aurora_<key>_endpoint / _reader_endpoint /
+  # _master_secret_arn; "platform" keeps the original keys above.
+  local aurora_clusters_json ck cf aurora_others
+  aurora_clusters_json="$(tofu -chdir="${DATA_DIR}" output -json aurora_clusters 2>/dev/null || echo '{}')"
+  aurora_others="$(printf '%s' "${aurora_clusters_json}" | python3 -c 'import json,sys; print(" ".join(k for k in json.load(sys.stdin) if k != "platform"))' 2>/dev/null || true)"
+  set_metadata "aurora_other_clusters" "${aurora_others}"
+
+  # Static cluster parameters (shared_preload_libraries, rds.logical_replication) only take effect
+  # after a reboot. A new cluster is created with them, so nothing is pending; an existing one that
+  # just got the parameter group reports "pending-reboot", and its instances are rebooted here,
+  # readers first and the writer last (about a minute of writer downtime).
+  local rb_cid rb_inst rb_status rb_try
+  for rb_cid in $(printf '%s' "${aurora_clusters_json}" | python3 -c 'import json,sys; print(" ".join(v.get("id","") for v in json.load(sys.stdin).values()))' 2>/dev/null || true); do
+    for rb_inst in \
+      $(aws rds describe-db-clusters --db-cluster-identifier "${rb_cid}" --region "${AWS_REGION}" --query 'DBClusters[0].DBClusterMembers[?IsClusterWriter==`false`].DBInstanceIdentifier' --output text 2>/dev/null || true) \
+      $(aws rds describe-db-clusters --db-cluster-identifier "${rb_cid}" --region "${AWS_REGION}" --query 'DBClusters[0].DBClusterMembers[?IsClusterWriter==`true`].DBInstanceIdentifier' --output text 2>/dev/null || true); do
+      rb_status=""
+      for rb_try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        rb_status="$(aws rds describe-db-instances --db-instance-identifier "${rb_inst}" --region "${AWS_REGION}" \
+          --query 'DBInstances[0].DBParameterGroups[0].ParameterApplyStatus' --output text 2>/dev/null || true)"
+        [[ "${rb_status}" == "applying" ]] || break
+        sleep 10
+      done
+      if [[ "${rb_status}" == "pending-reboot" ]]; then
+        log "Rebooting Aurora instance '${rb_inst}' to apply static cluster parameters..."
+        aws rds reboot-db-instance --db-instance-identifier "${rb_inst}" --region "${AWS_REGION}" >/dev/null
+        aws rds wait db-instance-available --db-instance-identifier "${rb_inst}" --region "${AWS_REGION}"
+      fi
+    done
+  done
+
+  for ck in ${aurora_others}; do
+    for cf in endpoint reader_endpoint master_secret_arn; do
+      set_metadata "aurora_${ck}_${cf}" "$(printf '%s' "${aurora_clusters_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["'"${ck}"'"]["'"${cf}"'"])' 2>/dev/null || true)"
+    done
+  done
+  set_metadata "data_redis_endpoint" "$(tofu -chdir="${DATA_DIR}" output -json cache_endpoints 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("main") or next(iter(d.values()), {}); print(c.get("address",""))' 2>/dev/null || true)"
+  # Node-based Valkey group for iris (SaaS shape); empty when the stack predates it.
+  set_metadata "iris_redis_endpoint" "$(tofu -chdir="${DATA_DIR}" output -json redis_replication_groups 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("iris",{}).get("primary_endpoint",""))' 2>/dev/null || true)"
+  set_metadata "iris_redis_secret_name" "$(tofu -chdir="${DATA_DIR}" output -json redis_replication_groups 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("iris",{}).get("secret_name",""))' 2>/dev/null || true)"
+  set_metadata "opensearch_endpoint" "$(tofu -chdir="${DATA_DIR}" output -json opensearch_domains 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("endpoint",""))' 2>/dev/null || true)"
+  set_metadata "opensearch_secret_name" "$(tofu -chdir="${DATA_DIR}" output -json opensearch_domains 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("secret_name",""))' 2>/dev/null || true)"
+  set_metadata "msk_cluster_arn" "$(tofu -chdir="${DATA_DIR}" output -json msk_cluster_arns 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("bus") or next(iter(d.values()), ""))' 2>/dev/null || true)"
+  set_metadata "efs_file_system_id" "$(tofu -chdir="${DATA_DIR}" output -json efs_file_system_ids 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("models") or next(iter(d.values()), ""))' 2>/dev/null || true)"
+  set_metadata "grid_artifacts_bucket" "$(tofu -chdir="${DATA_DIR}" output -json s3_bucket_names 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("grid-artifacts",""))' 2>/dev/null || true)"
+  set_metadata "dynamodb_environment_table" "$(tofu -chdir="${DATA_DIR}" output -json dynamodb_table_names 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("environment",""))' 2>/dev/null || true)"
+  set_metadata "data_kms_key_arn" "$(tofu -chdir="${DATA_DIR}" output -json kms_key_arns 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",""))' 2>/dev/null || true)"
+}
+
 # GCP equivalent. Stores the Artifact Registry host under the SAME
 # "ecr_registry" metadata key the AWS branch uses (and every downstream
 # phase already reads) rather than a parallel gke-specific key — it's
@@ -2730,6 +3042,50 @@ phase_artifacts_sync() {
     mark_phase_blocked "Artifact sync still running in-cluster (it survives this command exiting). straiker-system will not run until this completes. Re-run --phase artifacts-sync any time to check again."
     return
   fi
+
+  ensure_multiarch_images
+}
+
+# Opt-in, off by default (nothing changes for existing installs). Set
+#   MULTIARCH_OVERRIDES="<repo>:<tag>=<upstream-ref> [...]"   (space-separated)
+# e.g. "maximhq/bifrost:v1.6.7=docker.io/maximhq/bifrost:v1.6.7".
+# Some images in the Straiker artifact mirror are single-arch (amd64) while this
+# cluster's shared pool is arm64 (Graviton), so those pods die with "exec format
+# error". Once the mirror Job has finished, any listed image whose copy in THIS
+# account's ECR lacks arm64 is replaced by the full multi-arch index copied
+# straight from the upstream ref. Only this account's ECR is written; the Straiker
+# mirror is untouched. Re-applied on every artifacts-sync pass, because re-running
+# the mirror Job copies the single-arch image back over it. Needs `crane` locally.
+ensure_multiarch_images() {
+  [[ -n "${MULTIARCH_OVERRIDES:-}" ]] || return 0
+  if ! command -v crane >/dev/null 2>&1; then
+    log "WARN  MULTIARCH_OVERRIDES is set but 'crane' is not installed (brew install crane); skipping the multi-arch fix."
+    return 0
+  fi
+
+  local ecr_registry registry_prefixed entry dest_ref upstream archs
+  ecr_registry="$(get_metadata "ecr_registry")"
+  [[ -n "${ecr_registry}" ]] || return 0
+  registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
+  aws ecr get-login-password --region "${AWS_REGION}" \
+    | crane auth login "${ecr_registry}" -u AWS --password-stdin >/dev/null
+
+  for entry in ${MULTIARCH_OVERRIDES}; do
+    dest_ref="${registry_prefixed}/${entry%%=*}"
+    upstream="${entry#*=}"
+    archs="$(crane manifest "${dest_ref}" 2>/dev/null \
+      | python3 -c 'import sys,json; m=json.load(sys.stdin); print("\n".join((x.get("platform") or {}).get("architecture","") for x in m.get("manifests",[])))' 2>/dev/null || true)"
+    if [[ -z "${archs}" ]]; then
+      archs="$(crane config "${dest_ref}" 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin).get("architecture",""))' 2>/dev/null || true)"
+    fi
+    if printf '%s\n' "${archs}" | grep -qx arm64; then
+      log "Multi-arch OK: ${dest_ref} already includes arm64."
+      continue
+    fi
+    log "Multi-arch fix: ${dest_ref} lacks arm64 (has: $(printf '%s' "${archs}" | tr '\n' ' ')); copying from ${upstream}..."
+    crane copy "${upstream}" "${dest_ref}"
+  done
 }
 
 # Helm refuses to manage a resource that already exists but wasn't created by
@@ -2805,8 +3161,18 @@ phase_straiker_system() {
   helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
+  # Prefer the in-workspace chart (as the artifact chart does) so local chart changes apply at once, e.g. the
+  # straiker-clickhouse node pool. A pinned --chart-version, or a bundle without charts/, uses the published chart.
+  local infra_chart_ref="${HELM_REPO_NAME}/${INFRA_CHART_NAME}"
+  local local_infra_chart="${REPO_ROOT}/charts/${INFRA_CHART_NAME}"
+  if [[ -z "${CHART_VERSION}" && -d "${local_infra_chart}" ]]; then
+    helm dependency build "${local_infra_chart}" >/dev/null
+    infra_chart_ref="${local_infra_chart}"
+    log "Using local chart at '${infra_chart_ref}'."
+  fi
+
   local cmd=(
-    helm upgrade --install "${INFRA_RELEASE}" "${HELM_REPO_NAME}/${INFRA_CHART_NAME}"
+    helm upgrade --install "${INFRA_RELEASE}" "${infra_chart_ref}"
     --namespace "${INFRA_NAMESPACE}"
     --create-namespace
     --wait
@@ -2879,9 +3245,42 @@ phase_straiker_system() {
   # postgres has no "use the cluster default" mechanism of its own —
   # postgres.storage.storageClassName is required() and fails loudly if unset —
   # so unlike opensearch above, this is always passed explicitly.
+  # --data-layer: Aurora replaces the in-cluster postgres, ElastiCache replaces valkey, and
+  # EFS backs the model cache. postgres/valkey are nulled so their templates don't render.
+  # The postgres storage class is skipped in that case: setting any postgres.* key would
+  # re-create the map and render the pod again.
   local resolved_storage_class
   resolved_storage_class="$(get_metadata "resolved_storage_class")"
-  if [[ -n "${resolved_storage_class}" ]]; then
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    local efs_fs_id
+    efs_fs_id="$(get_metadata "efs_file_system_id")"
+    if [[ -z "${efs_fs_id}" ]]; then
+      mark_phase_blocked "No EFS file system in state. Run phase 'aws-data' first."
+      return
+    fi
+    log "--data-layer: in-cluster postgres/valkey disabled; model cache on EFS (${efs_fs_id})."
+    cmd+=(
+      --set "postgres=null"
+      --set "valkey=null"
+      --set "efs.enabled=true"
+      --set-string "efs.fileSystemId=${efs_fs_id}"
+      --set "efs.modelsPvc.enabled=true"
+      --set-string "efs.modelsPvc.name=models-filestore-pvc"
+      --set-string "efs.modelsPvc.size=1Ti"
+    )
+    # Managed OpenSearch (Amazon OpenSearch Service) replaces the bundled pod when the data layer created one.
+    local os_endpoint os_secret
+    os_endpoint="$(get_metadata "opensearch_endpoint")"
+    os_secret="$(get_metadata "opensearch_secret_name")"
+    if [[ -n "${os_endpoint}" && -n "${os_secret}" ]]; then
+      ensure_opensearch_credentials_secret "${os_secret}" || return
+      cmd+=(
+        --set "tags.opensearch=false"
+        --set-string "opensearchExternal.url=https://${os_endpoint}"
+        --set-string "opensearchExternal.credentialsSecret=opensearch-credentials"
+      )
+    fi
+  elif [[ -n "${resolved_storage_class}" ]]; then
     cmd+=(--set "postgres.storage.storageClassName=${resolved_storage_class}")
   fi
 
@@ -2901,7 +3300,23 @@ phase_straiker_system() {
   for values_file in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do
     cmd+=(-f "${values_file}")
   done
+  # Karpenter caches the instance types of a node class when it first sees it; a node class created in the same
+  # moment as its pool can be cached empty ("nodepool requirements filtered out all instance types") and nothing
+  # launches until the controller restarts. So when this upgrade creates node pools, restart the controller.
+  local pools_before=""
+  if [[ "${CLOUD_PROVIDER}" != "gke" ]]; then
+    pools_before="$(kubectl get nodepools.karpenter.sh -o name 2>/dev/null | sort || true)"
+  fi
   "${cmd[@]}"
+  if [[ "${CLOUD_PROVIDER}" != "gke" ]]; then
+    local pools_after
+    pools_after="$(kubectl get nodepools.karpenter.sh -o name 2>/dev/null | sort || true)"
+    if [[ -n "${pools_after}" && "${pools_after}" != "${pools_before}" ]]; then
+      log "New Karpenter node pool(s) created; restarting the Karpenter controller so it picks up their instance types."
+      kubectl rollout restart deployment/karpenter -n "${KARPENTER_NAMESPACE:-karpenter}" >/dev/null 2>&1 || true
+      kubectl rollout status deployment/karpenter -n "${KARPENTER_NAMESPACE:-karpenter}" --timeout=180s >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 # Ensures SHARED_SECRETS_NAME exists with every key this installer expects,
@@ -2960,7 +3375,885 @@ phase_shared_secrets() {
     patch_shared_secret "BOOTSTRAP_ADMIN_PASSWORD" "${bootstrap_password}"
     patch_shared_secret "BOOTSTRAP_ADMIN_PASSWORD_HASH" "$(bcrypt_hash "${bootstrap_password}")"
   fi
+  # --data-layer: Secrets Manager "<cluster>/platform/shared" is the source of truth. The keys generated
+  # above (or already live) are copied there once, then synced back hourly; keys added by other phases
+  # (provider API keys, ...) are left alone (creationPolicy Merge).
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    ensure_synced_secret straiker-secrets-sync "${CLUSTER_NAME}/platform/shared" "${SHARED_SECRETS_NAME}" "%s" \
+      "${SHARED_SECRET_PROPS}" "${SHARED_SECRETS_NAME}" Merge || return
+  fi
   log "Secret '${SHARED_SECRETS_NAME}' has all expected service-to-service credentials."
+}
+
+# ClickHouse as a pod (opt-in via --data-layer). Image from the customer's ECR mirror.
+# True when ClickHouse runs as more than one replica (chart straiker-clickhouse: replicas + Keeper). Then grid's
+# migrations and ch-sync's CDC tables must be created with Replicated* engines.
+clickhouse_replicated() {
+  local n
+  n="$(kubectl get statefulset clickhouse -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  if [[ "${n:-1}" =~ ^[0-9]+$ && "${n:-1}" -gt 1 ]]; then echo true; else echo false; fi
+}
+
+phase_clickhouse() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping ClickHouse."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command kubectl
+  require_command helm
+  ensure_k8s_ready_for_charts || return
+
+  local ecr_registry
+  ecr_registry="$(get_metadata "ecr_registry")"
+  if [[ -z "${ecr_registry}" ]]; then
+    mark_phase_blocked "No ECR registry in state. Run phase 'aws-artifacts' first."
+    return
+  fi
+  ensure_clickhouse_passwords_secret || return
+  helm upgrade --install straiker-clickhouse "${REPO_ROOT}/charts/straiker-clickhouse" \
+    --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
+    --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/clickhouse/clickhouse-server"
+}
+
+# Sync a Secrets Manager secret (JSON, one property per name) into the K8s Secret <es_name> with an
+# ExternalSecret (K8s key = printf <key_fmt> <property>). On an install that predates it (live <seed_secret>
+# holding the same keys, no ExternalSecret yet) the live values are first copied into Secrets Manager where
+# they differ, so nothing rotates. Marks the phase blocked on failure.
+#   $1 es_name  $2 secrets-manager id  $3 seed_secret  $4 key_fmt  $5 properties (space separated)
+#   $6 target Secret (default es_name)  $7 creationPolicy (default Owner; Merge adds the keys to an existing
+#      Secret and leaves its other keys alone)
+ensure_synced_secret() {
+  local es_name="$1" sm_id="$2" seed_secret="$3" key_fmt="$4" props="$5" target="${6:-$1}" policy="${7:-Owner}"
+  require_command aws
+  require_command python3
+  if ! kubectl get clustersecretstore "${ESO_STORE_NAME}" >/dev/null 2>&1; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
+    return 1
+  fi
+  if ! aws secretsmanager describe-secret --secret-id "${sm_id}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    mark_phase_blocked "Secrets Manager secret '${sm_id}' not found. Re-run phase 'aws-data' (--rerun-phase)."
+    return 1
+  fi
+
+  if ! kubectl get externalsecret "${es_name}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 \
+     && kubectl get secret "${seed_secret}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    local live_json merged seeded tmp
+    live_json="$(kubectl get secret "${seed_secret}" -n "${INFRA_NAMESPACE}" -o json)"
+    merged="$(aws secretsmanager get-secret-value --secret-id "${sm_id}" --region "${AWS_REGION}" \
+        --query SecretString --output text \
+      | LIVE="${live_json}" PROPS="${props}" KEY_FMT="${key_fmt}" python3 -c '
+import base64, json, os, sys
+sm = json.loads(sys.stdin.read())
+live = json.loads(os.environ["LIVE"]).get("data", {})
+seeded = []
+for p in os.environ["PROPS"].split():
+    k = os.environ["KEY_FMT"] % p
+    if k in live:
+        v = base64.b64decode(live[k]).decode()
+        if sm.get(p) != v:
+            sm[p] = v
+            seeded.append(p)
+print(json.dumps({"seeded": seeded, "secret": sm}))')"
+    seeded="$(printf '%s' "${merged}" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["seeded"]))')"
+    if [[ -n "${seeded}" ]]; then
+      tmp="$(mktemp)"
+      printf '%s' "${merged}" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(json.load(sys.stdin)["secret"]))' > "${tmp}"
+      aws secretsmanager put-secret-value --secret-id "${sm_id}" --region "${AWS_REGION}" \
+        --secret-string "file://${tmp}" >/dev/null
+      rm -f "${tmp}"
+      log "Seeded Secrets Manager '${sm_id}' with the live values of: ${seeded}"
+    fi
+  fi
+
+  local p entries=""
+  for p in ${props}; do
+    entries+="    - {secretKey: $(printf "${key_fmt}" "${p}"), remoteRef: {key: ${sm_id}, property: ${p}}}"$'\n'
+  done
+  kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: ${es_name}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ${ESO_STORE_NAME}, kind: ClusterSecretStore}
+  target: {name: ${target}, creationPolicy: ${policy}}
+  data:
+${entries}
+EOF
+  if ! kubectl wait externalsecret/"${es_name}" -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+    mark_phase_blocked "ExternalSecret ${es_name} is not Ready. Check: kubectl describe externalsecret ${es_name} -n ${INFRA_NAMESPACE}"
+    return 1
+  fi
+}
+
+# Aurora role passwords and the platform-internal S2S key (charts/straiker-data reads both).
+ensure_db_passwords_secret() {
+  ensure_synced_secret straiker-db-passwords "${CLUSTER_NAME}/db/passwords" straiker-db-dsn "PASSWORD_%s" "${DB_PASSWORD_ROLES}" || return 1
+  ensure_synced_secret platform-keys "${CLUSTER_NAME}/platform/keys" platform-secret "%s" "PLATFORM_INTERNAL_S2S_API_KEY"
+}
+
+# ClickHouse user passwords (chart straiker-clickhouse reads them).
+ensure_clickhouse_passwords_secret() {
+  ensure_synced_secret clickhouse-passwords "${CLUSTER_NAME}/clickhouse/credentials" clickhouse-credentials "%s_password" "${CLICKHOUSE_PASSWORD_USERS}"
+}
+
+# creationPolicy for an ExternalSecret that takes over K8s Secret <name>: keep an existing ExternalSecret's
+# policy; Merge for a pre-existing, unowned (Helm-created) Secret, so ESO adopts it without deleting it; else Owner.
+eso_creation_policy() {
+  local name="$1" policy
+  policy="$(kubectl get externalsecret "${name}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.target.creationPolicy}' 2>/dev/null || true)"
+  if [[ -n "${policy}" ]]; then
+    printf '%s' "${policy}"
+  elif kubectl get secret "${name}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 \
+       && [[ -z "$(kubectl get secret "${name}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.metadata.ownerReferences[0].name}' 2>/dev/null)" ]]; then
+    printf 'Merge'
+  else
+    printf 'Owner'
+  fi
+}
+
+# Dry run before straiker-data's ExternalSecrets take over straiker-db-dsn / platform-secret: render the same
+# ExternalSecrets against "<name>-preview" targets, wait for them, and compare every key with the live Secrets.
+# Any differing value blocks the phase (a template mistake would otherwise overwrite working Secrets). Values
+# are never printed. Skipped on a fresh install (no live Secrets) and once the ExternalSecrets exist.
+# Args: the helm --set flags of the straiker-data install.
+eso_preview_diff() {
+  local live
+  for live in straiker-db-dsn platform-secret; do
+    if kubectl get externalsecret "${live}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then return 0; fi
+  done
+  for live in straiker-db-dsn platform-secret; do
+    if ! kubectl get secret "${live}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then return 0; fi
+  done
+
+  log "Previewing the ExternalSecret-built straiker-db-dsn / platform-secret against the live Secrets..."
+  if ! helm template straiker-data "${REPO_ROOT}/charts/straiker-data" --namespace "${INFRA_NAMESPACE}" "$@" \
+        --set-string eso.previewSuffix=-preview --show-only templates/eso-secrets.yaml \
+      | kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null; then
+    mark_phase_blocked "Could not render/apply the preview ExternalSecrets for straiker-data."
+    return 1
+  fi
+
+  local rc=0 out
+  for live in straiker-db-dsn platform-secret; do
+    if ! kubectl wait externalsecret/"${live}-preview" -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+      log "FAIL  preview ExternalSecret ${live}-preview is not Ready (kubectl describe externalsecret ${live}-preview -n ${INFRA_NAMESPACE})."
+      rc=1
+      continue
+    fi
+    out="$(LIVE="$(kubectl get secret "${live}" -n "${INFRA_NAMESPACE}" -o json)" \
+           PREV="$(kubectl get secret "${live}-preview" -n "${INFRA_NAMESPACE}" -o json)" python3 -c '
+import json, os
+live = json.loads(os.environ["LIVE"]).get("data", {})
+prev = json.loads(os.environ["PREV"]).get("data", {})
+diff = sorted(k for k in prev if k in live and prev[k] != live[k])
+new = sorted(k for k in prev if k not in live)
+gone = sorted(k for k in live if k not in prev)
+print("DIFF " + " ".join(diff))
+print("NEW " + " ".join(new))
+print("ONLY-LIVE " + " ".join(gone))')"
+    if [[ "$(printf '%s\n' "${out}" | sed -n 's/^DIFF *//p')" != "" ]]; then
+      log "FAIL  ${live}: values would change for: $(printf '%s\n' "${out}" | sed -n 's/^DIFF *//p')"
+      rc=1
+    else
+      log "PASS  ${live}: every key matches the live Secret (new keys: $(printf '%s\n' "${out}" | sed -n 's/^NEW *//p'); only in live: $(printf '%s\n' "${out}" | sed -n 's/^ONLY-LIVE *//p'))"
+    fi
+  done
+
+  for live in straiker-db-dsn platform-secret; do
+    kubectl delete externalsecret "${live}-preview" -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete secret "${live}-preview" -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  done
+  if [[ "${rc}" -ne 0 ]]; then
+    mark_phase_blocked "The ExternalSecret-built Secrets would differ from the live ones (see FAIL lines above); nothing was changed. Send the output before re-running."
+    return 1
+  fi
+}
+
+# Bootstraps the AWS data tier from inside the cluster (opt-in via --data-layer):
+# Aurora databases/roles + DSN Secret and MSK topics, via chart straiker-data.
+phase_data_bootstrap() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping data bootstrap."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command aws
+  require_command kubectl
+  require_command helm
+  require_command python3
+  ensure_k8s_ready_for_charts || return
+
+  local aurora_host aurora_port master_arn msk_arn
+  aurora_host="$(get_metadata "aurora_endpoint")"
+  aurora_port="$(get_metadata "aurora_port")"
+  master_arn="$(get_metadata "aurora_master_secret_arn")"
+  msk_arn="$(get_metadata "msk_cluster_arn")"
+  if [[ -z "${aurora_host}" || -z "${master_arn}" || -z "${msk_arn}" ]]; then
+    mark_phase_blocked "Data tier metadata missing (aurora/msk). Run phase 'aws-data' first."
+    return
+  fi
+
+  local brokers
+  brokers="$(aws kafka get-bootstrap-brokers --cluster-arn "${msk_arn}" --region "${AWS_REGION}" \
+    --query 'BootstrapBrokerStringSaslIam' --output text 2>/dev/null || true)"
+  if [[ -z "${brokers}" || "${brokers}" == "None" ]]; then
+    mark_phase_blocked "Could not get SASL/IAM bootstrap brokers for ${msk_arn}."
+    return
+  fi
+
+  # Per Aurora cluster: RDS-managed master login -> K8s Secret read by that cluster's bootstrap
+  # Job, and its host/port -> chart values. "platform" uses the original aurora_endpoint /
+  # aurora_master_secret_arn metadata and Secret name; the others (aws-data records them in
+  # aurora_other_clusters) use aurora_<key>_endpoint / _master_secret_arn and
+  # Secret straiker-aurora-admin-<key>. A cluster missing from state is skipped: the chart then
+  # places its databases on "platform" (single-cluster installs keep working).
+  local secret_json user pass ck ck_host ck_arn ck_secret
+  local -a aurora_sets=()
+  for ck in platform $(get_metadata "aurora_other_clusters"); do
+    if [[ "${ck}" == "platform" ]]; then
+      ck_host="${aurora_host}"; ck_arn="${master_arn}"; ck_secret="straiker-aurora-admin"
+    else
+      ck_host="$(get_metadata "aurora_${ck}_endpoint")"; ck_arn="$(get_metadata "aurora_${ck}_master_secret_arn")"
+      ck_secret="straiker-aurora-admin-${ck}"
+    fi
+    if [[ -z "${ck_host}" || -z "${ck_arn}" ]]; then
+      log "WARN  Aurora cluster '${ck}' has no endpoint/secret in install state; its databases fall back to 'platform'. Re-run phase 'aws-data'."
+      continue
+    fi
+    ensure_aurora_admin_secret "${ck_secret}" "${ck_arn}" || return
+    aurora_sets+=(
+      --set-string "aurora.clusters.${ck}.host=${ck_host}"
+      --set "aurora.clusters.${ck}.port=${aurora_port:-5432}"
+      --set-string "aurora.clusters.${ck}.adminSecret=${ck_secret}"
+    )
+  done
+
+  # api-gateway key bundle (Terraform-generated): foundation/registry/argus must share two of its keys.
+  local gw_json validate_key s2s_key
+  gw_json="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/platform/api-gateway" --region "${AWS_REGION}" \
+    --query SecretString --output text 2>/dev/null || true)"
+  if [[ -n "${gw_json}" ]]; then
+    validate_key="$(printf '%s' "${gw_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("PLATFORM_VALIDATE_KEY",""))')"
+    s2s_key="$(printf '%s' "${gw_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("SYS__ARGUS_INTERNAL_S2S_KEY",""))')"
+    # argus reads the same key from the shared secret
+    if kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 && [[ -n "${s2s_key}" ]]; then
+      patch_shared_secret "SYS__ARGUS_INTERNAL_S2S_KEY" "${s2s_key}"
+    fi
+  fi
+
+  ensure_db_passwords_secret || return
+
+  local -a data_sets=(
+    --set-string "platform.validateKey=${validate_key:-}"
+    --set-string "platform.gatewayS2SKey=${s2s_key:-}"
+    --set "aws.region=${AWS_REGION}"
+    --set-string "msk.bootstrapBrokers=${brokers//,/\\,}"
+  )
+  data_sets+=(${aurora_sets[@]+"${aurora_sets[@]}"})
+
+  # straiker-db-dsn and platform-secret are ExternalSecrets reading Secrets Manager (like SaaS). ClickHouse
+  # host/port are not secret: passed as values from the live clickhouse-credentials Secret.
+  data_sets+=(--set "eso.enabled=true" --set-string "eso.smPrefix=${CLUSTER_NAME}")
+  if kubectl get secret clickhouse-credentials -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    local chk
+    for chk in host ddlHost nativePort; do
+      data_sets+=(--set-string "platform.clickhouse.${chk}=$(kubectl get secret clickhouse-credentials -n "${INFRA_NAMESPACE}" -o jsonpath="{.data.${chk}}" | base64 -d)")
+    done
+  fi
+  data_sets+=(
+    --set-string "eso.dsnCreationPolicy=$(eso_creation_policy straiker-db-dsn)"
+    --set-string "eso.platformCreationPolicy=$(eso_creation_policy platform-secret)"
+  )
+
+  eso_preview_diff "${data_sets[@]}" || return
+
+  helm upgrade --install straiker-data "${REPO_ROOT}/charts/straiker-data" \
+    --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
+    "${data_sets[@]}" || return
+
+  local es
+  for es in straiker-db-dsn platform-secret; do
+    if ! kubectl wait externalsecret/"${es}" -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=180s >/dev/null 2>&1; then
+      mark_phase_blocked "ExternalSecret ${es} is not Ready. Check: kubectl describe externalsecret ${es} -n ${INFRA_NAMESPACE}"
+      return
+    fi
+  done
+}
+
+# Registry Postgres -> ClickHouse dimension sync (opt-in via --data-layer).
+phase_ch_sync() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping ClickHouse sync."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command kubectl
+  require_command helm
+  ensure_k8s_ready_for_charts || return
+
+  local ecr_registry aurora_host aurora_port
+  ecr_registry="$(get_metadata "ecr_registry")"
+  aurora_host="$(get_metadata "aurora_endpoint")"
+  aurora_port="$(get_metadata "aurora_port")"
+  if [[ -z "${ecr_registry}" || -z "${aurora_host}" ]]; then
+    mark_phase_blocked "Missing ECR/Aurora state. Run phases 'aws-artifacts' and 'aws-data' first."
+    return
+  fi
+  if ! kubectl get secret clickhouse-credentials -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    mark_phase_blocked "Secret 'clickhouse-credentials' missing. Run phase 'clickhouse' first."
+    return
+  fi
+  if ! kubectl get secret straiker-db-dsn -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.PASSWORD_grid_cdc}' 2>/dev/null | grep -q .; then
+    mark_phase_blocked "No grid_cdc password in 'straiker-db-dsn'. Run phase 'data-bootstrap' first."
+    return
+  fi
+  # Tables missing in Postgres (registry not installed yet) are skipped each cycle and picked up
+  # once registry's migration creates them, so this can run before platform-services.
+  helm upgrade --install straiker-ch-sync "${REPO_ROOT}/charts/straiker-ch-sync" \
+    --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
+    --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/clickhouse/clickhouse-server" \
+    --set-string postgres.host="${aurora_host}" \
+    --set-string postgres.port="${aurora_port:-5432}" \
+    --set clickhouse.replicated="$(clickhouse_replicated)"
+}
+
+# Kafka -> ClickHouse ingestion (opt-in via --data-layer). Requires grid's ClickHouse tables.
+phase_ingest() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping ingestion."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command kubectl
+  require_command helm
+  ensure_k8s_ready_for_charts || return
+
+  local ecr_registry msk_arn brokers
+  ecr_registry="$(get_metadata "ecr_registry")"
+  msk_arn="$(get_metadata "msk_cluster_arn")"
+  if [[ -z "${ecr_registry}" || -z "${msk_arn}" ]]; then
+    mark_phase_blocked "Missing ECR/MSK state. Run phases 'aws-artifacts' and 'aws-data' first."
+    return
+  fi
+  brokers="$(aws kafka get-bootstrap-brokers --cluster-arn "${msk_arn}" --region "${AWS_REGION}" \
+    --query 'BootstrapBrokerStringSaslIam' --output text 2>/dev/null || true)"
+  if [[ -z "${brokers}" || "${brokers}" == "None" ]]; then
+    mark_phase_blocked "Could not get SASL/IAM bootstrap brokers for ${msk_arn}."
+    return
+  fi
+  # Inserting before grid's migration has created the tables would send every message to the DLQ.
+  local ch_pw
+  ch_pw="$(kubectl get secret clickhouse-credentials -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.admin_password}' 2>/dev/null | base64 -d || true)"
+  if [[ -z "${ch_pw}" ]] || ! kubectl exec -n "${INFRA_NAMESPACE}" statefulset/clickhouse -- \
+      clickhouse-client --user admin --password "${ch_pw}" --query 'EXISTS TABLE grid.raw_event' 2>/dev/null | grep -qx 1; then
+    mark_phase_blocked "grid.raw_event does not exist yet. Install grid (PLATFORM_SERVICES must include grid, so its migration runs) first."
+    return
+  fi
+  helm upgrade --install straiker-ingest "${REPO_ROOT}/charts/straiker-ingest" \
+    --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
+    --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/redpandadata/connect" \
+    --set-string bus.brokers="${brokers//,/\\,}" \
+    --set-string bus.sasl.region="${AWS_REGION}"
+}
+
+# api-gateway. FULL mode when the data tier provides the DynamoDB environment table (state key
+# dynamodb_environment_table): environments in DynamoDB (apiKey-index), s2s keys from Secrets Manager
+# <cluster>/platform/api-gateway, integration-key edge for /api/v3/detect. Otherwise READ-ONLY mode (static
+# environment ConfigMap, no AWS services). OAuth and PAT stay in-memory in both (Cognito is not part of the
+# on-prem stack yet). Generated once and kept in K8s Secrets: OAuth signing key + client ('api-gateway-oauth')
+# and the first environment's API key ('api-gateway-env').
+install_api_gateway() {
+  local ecr_registry=$1 chart="${REPO_ROOT}/charts/platform-api-gateway" tag tmp table
+  require_command openssl
+  tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${chart}/Chart.yaml")"
+  table="$(get_metadata "dynamodb_environment_table")"
+
+  if ! kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    tmp="$(mktemp -d)"
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${tmp}/signing-key.pem" 2>/dev/null
+    kubectl create secret generic api-gateway-oauth -n "${INFRA_NAMESPACE}" \
+      --from-file=signing-key.pem="${tmp}/signing-key.pem" \
+      --from-literal=client-id=onprem-client \
+      --from-literal=client-secret="$(openssl rand -hex 32)" >/dev/null
+    rm -rf "${tmp}"
+  fi
+  if ! kubectl get secret api-gateway-env -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    kubectl create secret generic api-gateway-env -n "${INFRA_NAMESPACE}" \
+      --from-literal=env-key="$(openssl rand -hex 24)" >/dev/null
+  fi
+  local env_key
+  env_key="$(kubectl get secret api-gateway-env -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.env-key}' | base64 -d)"
+
+  local -a mode_args=()
+  if [[ -n "${table}" ]]; then
+    require_command aws
+    log "api-gateway: full mode (DynamoDB table ${table})."
+    # First environment (straikerId 1 / environmentId 1), created only if absent.
+    aws dynamodb put-item --table-name "${table}" --region "${AWS_REGION}" \
+      --condition-expression 'attribute_not_exists(pk)' \
+      --item "{\"pk\":{\"S\":\"ENV#1\"},\"sk\":{\"S\":\"META\"},\"apiKey\":{\"S\":\"${env_key}\"},\"environmentId\":{\"N\":\"1\"},\"straikerId\":{\"N\":\"1\"}}" \
+      >/dev/null 2>&1 || true
+    mode_args+=(
+      --set straiker.readonly.enabled=false
+      --set-string "straiker.apiGateway.secretManager.secretName=${CLUSTER_NAME}/platform/api-gateway"
+      --set-string "straiker.apiGateway.secretManager.region=${AWS_REGION}"
+      --set-string "straiker.apiGateway.dynamodb.region=${AWS_REGION}"
+      --set-string "straiker.apiGateway.dynamodb.environmentTable=${table}"
+      --set-string "straiker.apiGateway.integrationKeys.secretPrefix=${CLUSTER_NAME}/platform/integration/"
+      --set-string "straiker.apiGateway.integrationKeys.region=${AWS_REGION}"
+    )
+  else
+    log "api-gateway: read-only mode (no DynamoDB table in state; run with --data-layer for full mode)."
+    # Static environment the gateway authenticates agents against (schema: api-gateway
+    # deploy/k8s/straiker-readonly-environments.yaml). Created once; edit the ConfigMap to add environments.
+    if ! kubectl get configmap straiker-readonly-environments -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+      kubectl create configmap straiker-readonly-environments -n "${INFRA_NAMESPACE}" \
+        --from-literal=readonly-config.yaml="environments:
+  - straiker-id: \"1\"
+    environment-id: \"1\"
+    app-id: \"1\"
+    env-key: \"${env_key}\"
+    controls:
+      remote_code_execution: block
+      tool_misuse: detect
+      resource_exhaustion: detect
+      data_exfiltration: block
+" >/dev/null
+    fi
+    mode_args+=(--set straiker.readonly.enabled=true)
+  fi
+
+  local key_file client_id client_secret
+  key_file="$(mktemp)"
+  kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.signing-key\.pem}' | base64 -d > "${key_file}"
+  client_id="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-id}' | base64 -d)"
+  client_secret="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-secret}' | base64 -d)"
+
+  log "Installing platform service 'api-gateway' (${tag})..."
+  helm upgrade --install api-gateway "${chart}" \
+    --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
+    -f "${chart}/values-onprem.yaml" \
+    --set-string straiker.apiGateway.image.registry="$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
+    --set-string straiker.apiGateway.image.version="${tag}" \
+    --set-file straiker.apiGateway.oauth.inmemory.signingKey="${key_file}" \
+    --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-id=${client_id}" \
+    --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-secret=${client_secret}" \
+    "${mode_args[@]}"
+  local rc=$?
+  rm -f "${key_file}"
+  return ${rc}
+}
+
+# Post-install checks for the AWS data tier (opt-in via --data-layer). Gate between the data
+# layer and the app charts (core/ascend/defend): any FAIL blocks the run so those charts don't
+# install against a broken database, Redis or model volume.
+# External Secrets Operator + the ClusterSecretStore "aws-sm" (Secrets Manager, region of the cluster).
+# Auth is the controller's Pod Identity role (no keys); see "eso" in the aws-data pod_identities.
+phase_external_secrets() {
+  require_command helm
+  require_command kubectl
+  ensure_k8s_ready_for_charts || return
+
+  helm repo add --force-update "${ESO_HELM_REPO_NAME}" "${ESO_HELM_REPO_URL}" >/dev/null
+  helm repo update "${ESO_HELM_REPO_NAME}" >/dev/null
+
+  helm upgrade --install "${ESO_RELEASE}" "${ESO_HELM_REPO_NAME}/external-secrets" \
+    --version "${ESO_VERSION}" \
+    --namespace "${ESO_NAMESPACE}" \
+    --create-namespace \
+    --set "installCRDs=true" \
+    --set "serviceAccount.name=${ESO_SERVICE_ACCOUNT}" \
+    --wait \
+    --timeout "${HELM_TIMEOUT}"
+
+  # The webhook must be serving before the store (a CRD instance) is admitted.
+  kubectl -n "${ESO_NAMESPACE}" rollout status deploy/"${ESO_RELEASE}-webhook" --timeout=180s >/dev/null
+
+  kubectl apply -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: ${ESO_STORE_NAME}
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: ${AWS_REGION}
+EOF
+
+  local i state=""
+  for i in $(seq 1 30); do
+    state="$(kubectl get clustersecretstore "${ESO_STORE_NAME}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+    [[ "${state}" == "True" ]] && break
+    sleep 5
+  done
+  if [[ "${state}" != "True" ]]; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' is not Ready. Check: kubectl describe clustersecretstore ${ESO_STORE_NAME} (the 'eso' Pod Identity role comes from phase 'aws-data'; restart the ESO pods if the role was created after they started)."
+    return
+  fi
+  log "ESO ${ESO_VERSION} installed; ClusterSecretStore '${ESO_STORE_NAME}' is Ready."
+}
+
+# K8s Secret "opensearch-credentials" (username/password/url of the managed OpenSearch domain) synced from
+# Secrets Manager "<cluster>/opensearch/main" with an ExternalSecret. Needs phase 'external-secrets'.
+ensure_opensearch_credentials_secret() {
+  local secret_name="$1"
+  if ! kubectl get clustersecretstore "${ESO_STORE_NAME}" >/dev/null 2>&1; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
+    return 1
+  fi
+  kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: opensearch-credentials
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ${ESO_STORE_NAME}, kind: ClusterSecretStore}
+  target: {name: opensearch-credentials, creationPolicy: Owner}
+  data:
+    - {secretKey: username, remoteRef: {key: ${secret_name}, property: username}}
+    - {secretKey: password, remoteRef: {key: ${secret_name}, property: password}}
+    - {secretKey: url, remoteRef: {key: ${secret_name}, property: url}}
+EOF
+  if ! kubectl wait externalsecret/opensearch-credentials -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+    mark_phase_blocked "ExternalSecret opensearch-credentials is not Ready (secret '${secret_name}'). Check: kubectl describe externalsecret opensearch-credentials -n ${INFRA_NAMESPACE}"
+    return 1
+  fi
+}
+
+# Chart reference for an installer-owned chart: the in-workspace copy (so local chart changes apply at once,
+# as for the artifact/infra/data charts), unless --chart-version pins the published one or the bundle has no charts/.
+chart_ref() {
+  local name="$1"
+  if [[ -z "${CHART_VERSION}" && -d "${REPO_ROOT}/charts/${name}" ]]; then
+    printf '%s' "${REPO_ROOT}/charts/${name}"
+  else
+    printf '%s' "${HELM_REPO_NAME}/${name}"
+  fi
+}
+
+# K8s Secret <name> (username/password of an Aurora cluster's RDS-managed master login) synced straight from
+# the RDS secret with an ExternalSecret, so it follows RDS's automatic password rotation.
+ensure_aurora_admin_secret() {
+  local name="$1" arn="$2"
+  if ! kubectl get clustersecretstore "${ESO_STORE_NAME}" >/dev/null 2>&1; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
+    return 1
+  fi
+  # A Secret from before ESO (created by kubectl) has no owner; drop it so ESO creates its own.
+  if kubectl get secret "${name}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 \
+     && [[ -z "$(kubectl get secret "${name}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.metadata.ownerReferences[0].name}' 2>/dev/null)" ]]; then
+    kubectl delete secret "${name}" -n "${INFRA_NAMESPACE}" >/dev/null
+  fi
+  kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: ${name}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ${ESO_STORE_NAME}, kind: ClusterSecretStore}
+  target: {name: ${name}, creationPolicy: Owner}
+  data:
+    - {secretKey: username, remoteRef: {key: "${arn}", property: username}}
+    - {secretKey: password, remoteRef: {key: "${arn}", property: password}}
+EOF
+  if ! kubectl wait externalsecret/"${name}" -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+    mark_phase_blocked "ExternalSecret ${name} is not Ready. Check: kubectl describe externalsecret ${name} -n ${INFRA_NAMESPACE} (the 'eso' role needs read on the RDS master secret; re-run phase 'aws-data')."
+    return 1
+  fi
+}
+
+# Sync iris's Valkey connection details (Secrets Manager "<cluster>/iris/redis") into the K8s Secret
+# "iris-redis" with an ExternalSecret, as SaaS does. Needs phase 'external-secrets'. Marks the phase
+# blocked on failure.
+ensure_iris_redis_secret() {
+  local secret_name="$1"
+  if ! kubectl get clustersecretstore "${ESO_STORE_NAME}" >/dev/null 2>&1; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
+    return 1
+  fi
+  # A Secret from before ESO (created by kubectl) has no owner; drop it so ESO creates its own.
+  if kubectl get secret iris-redis -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 \
+     && [[ -z "$(kubectl get secret iris-redis -n "${INFRA_NAMESPACE}" -o jsonpath='{.metadata.ownerReferences[0].name}' 2>/dev/null)" ]]; then
+    kubectl delete secret iris-redis -n "${INFRA_NAMESPACE}" >/dev/null
+  fi
+  kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: iris-redis
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ${ESO_STORE_NAME}, kind: ClusterSecretStore}
+  target: {name: iris-redis, creationPolicy: Owner}
+  data:
+    - {secretKey: REDIS_URL, remoteRef: {key: ${secret_name}, property: url}}
+    - {secretKey: REDIS_HOST, remoteRef: {key: ${secret_name}, property: host}}
+    - {secretKey: REDIS_PORT, remoteRef: {key: ${secret_name}, property: port}}
+    - {secretKey: REDIS_AUTH_TOKEN, remoteRef: {key: ${secret_name}, property: auth_token}}
+    - {secretKey: REDIS_TLS_ENABLED, remoteRef: {key: ${secret_name}, property: tls}}
+EOF
+  if ! kubectl wait externalsecret/iris-redis -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+    mark_phase_blocked "ExternalSecret iris-redis is not Ready (secret '${secret_name}'). Check: kubectl describe externalsecret iris-redis -n ${INFRA_NAMESPACE}"
+    return 1
+  fi
+}
+
+phase_verify_data_layer() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping data-layer verification."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command kubectl
+  require_command python3
+  ensure_k8s_ready_for_charts || return
+
+  local ecr_registry aurora_host redis_endpoint
+  ecr_registry="$(get_metadata "ecr_registry")"
+  aurora_host="$(get_metadata "aurora_endpoint")"
+  redis_endpoint="$(get_metadata "data_redis_endpoint")"
+  if [[ -z "${ecr_registry}" || -z "${aurora_host}" || -z "${redis_endpoint}" ]]; then
+    mark_phase_blocked "Missing ecr_registry/aurora_endpoint/data_redis_endpoint in install state. Run phases 'aws-artifacts' and 'aws-data' first."
+    return
+  fi
+  local registry_prefixed
+  registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
+
+  # Bash 3.2 (macOS /bin/bash) has no safe empty-array expansion, so count failures instead.
+  local fail_count=0
+  local result pvc_phase
+
+  log "Verifying data layer..."
+
+  # 1. EFS CSI driver — the models PVC mounts through it; without it pods can't mount.
+  if kubectl get csidriver efs.csi.aws.com >/dev/null 2>&1; then
+    log "PASS  EFS CSI driver (efs.csi.aws.com) is installed."
+  else
+    log "FAIL  EFS CSI driver (efs.csi.aws.com) is not installed. Install the aws-efs-csi-driver EKS addon (with a Pod Identity role for EFS) so the models volume can mount."
+    fail_count=$((fail_count + 1))
+  fi
+
+  pvc_phase="$(kubectl get pvc models-filestore-pvc -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [[ "${pvc_phase}" == "Bound" ]]; then
+    log "PASS  models-filestore-pvc is Bound."
+  else
+    log "FAIL  models-filestore-pvc is '${pvc_phase:-missing}', expected Bound."
+    fail_count=$((fail_count + 1))
+  fi
+
+  # 2. ElastiCache accepts TLS (rediss://). Serverless caches are TLS-only.
+  kubectl delete pod verify-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  result="$(kubectl run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
+    --restart=Never --rm -i --quiet -- valkey-cli --tls -h "${redis_endpoint}" -p 6379 PING </dev/null 2>&1 || true)"
+  if printf '%s\n' "${result}" | grep -qx 'PONG'; then
+    log "PASS  ElastiCache (${redis_endpoint}) answers PING over TLS."
+  else
+    log "FAIL  ElastiCache did not answer PING over TLS (${redis_endpoint}): ${result}"
+    fail_count=$((fail_count + 1))
+  fi
+
+  # 2b. iris's node-based Valkey: TLS + AUTH (token from the K8s Secret via env, never on the command line).
+  local iris_redis_host
+  iris_redis_host="$(get_metadata "iris_redis_endpoint")"
+  if [[ -n "${iris_redis_host}" ]]; then
+    ensure_iris_redis_secret "$(get_metadata "iris_redis_secret_name")" || return
+    kubectl delete pod verify-iris-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    result="$(kubectl run verify-iris-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
+      --restart=Never --rm -i --quiet \
+      --overrides='{"spec":{"containers":[{"name":"verify-iris-redis","image":"'"${registry_prefixed}"'/valkey/valkey:8-alpine","command":["valkey-cli","--tls","-h","'"${iris_redis_host}"'","-p","6379","PING"],"env":[{"name":"REDISCLI_AUTH","valueFrom":{"secretKeyRef":{"name":"iris-redis","key":"REDIS_AUTH_TOKEN"}}}],"stdin":true}]}}' \
+      </dev/null 2>&1 || true)"
+    if printf '%s\n' "${result}" | grep -qx 'PONG'; then
+      log "PASS  iris Valkey (${iris_redis_host}) answers PING over TLS with AUTH."
+    else
+      log "FAIL  iris Valkey did not answer PING over TLS with AUTH (${iris_redis_host}); needs the iris-redis Secret (phase 'straiker-ascend'): ${result}"
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 2b'. Managed OpenSearch answers _cluster/health (green/yellow) with the master login from the K8s Secret.
+  local os_host
+  os_host="$(get_metadata "opensearch_endpoint")"
+  if [[ -n "${os_host}" ]]; then
+    ensure_opensearch_credentials_secret "$(get_metadata "opensearch_secret_name")" || return
+    kubectl delete pod verify-opensearch -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    result="$(kubectl run verify-opensearch -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
+      --restart=Never --rm -i --quiet \
+      --overrides='{"spec":{"containers":[{"name":"verify-opensearch","image":"curlimages/curl:8.11.0","command":["sh","-c","curl -s --max-time 20 -u \"$OS_USER:$OS_PASS\" https://'"${os_host}"'/_cluster/health"],"env":[{"name":"OS_USER","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"username"}}},{"name":"OS_PASS","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"password"}}}],"stdin":true}]}}' \
+      </dev/null 2>&1 || true)"
+    if printf '%s' "${result}" | grep -qE '"status":"(green|yellow)"'; then
+      log "PASS  OpenSearch (${os_host}) cluster health is green/yellow with the master login."
+    else
+      log "FAIL  OpenSearch (${os_host}) did not report green/yellow health: ${result}"
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 2c. Ascend really uses the iris cache secret (not a default in-cluster Redis), once Ascend is installed.
+  if [[ -n "${iris_redis_host}" ]] && kubectl get deploy straiker-ascend-control-plane -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    local ascend_redis_secret
+    ascend_redis_secret="$(kubectl get deploy straiker-ascend-control-plane -n "${INFRA_NAMESPACE}" \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYS__REDIS_URL")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)"
+    if [[ "${ascend_redis_secret}" == "iris-redis" ]]; then
+      log "PASS  Ascend reads SYS__REDIS_URL from the iris-redis Secret."
+    else
+      log "FAIL  Ascend's SYS__REDIS_URL does not come from the iris-redis Secret; re-run phase 'straiker-ascend' (--rerun-phase)."
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 2d. Every ExternalSecret is synced.
+  local es_bad
+  es_bad="$(kubectl get externalsecret -A --no-headers 2>/dev/null | awk '$NF != "True" {print $1"/"$2}' | tr '\n' ' ')"
+  if [[ -z "${es_bad}" ]]; then
+    log "PASS  All ExternalSecrets are Ready."
+  else
+    log "FAIL  ExternalSecrets not Ready: ${es_bad}"
+    fail_count=$((fail_count + 1))
+  fi
+
+  # 3. Every Aurora cluster accepts sslmode=require with its own application role (same DSNs the
+  #    app charts use): "platform" as the frontend role, "ascend" (when present) as iris.
+  local pg_overrides pg_check pg_label pg_host pg_role pg_port
+  local ascend_pg_host
+  pg_port="$(get_metadata "aurora_port")"
+  ascend_pg_host="$(get_metadata "aurora_ascend_endpoint")"
+  for pg_check in "platform|${aurora_host}|frontend" ${ascend_pg_host:+"ascend|${ascend_pg_host}|iris"}; do
+    IFS='|' read -r pg_label pg_host pg_role <<<"${pg_check}"
+    # --overrides replaces the whole containers array (JSON merge patch), so the command
+    # must be inside it: trailing `-- psql ...` args would be dropped and the postgres
+    # image would start its server instead.
+    pg_overrides='{"spec":{"containers":[{"name":"verify-psql","image":"'"${registry_prefixed}"'/library/postgres:16-alpine","stdin":true,"command":["psql","host='"${pg_host}"' port='"${pg_port:-5432}"' dbname='"${pg_role}"' user='"${pg_role}"' sslmode=require","-tAc","select ssl from pg_stat_ssl where pid = pg_backend_pid();"],"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"straiker-db-dsn","key":"PASSWORD_'"${pg_role}"'"}}}]}]}}'
+    kubectl delete pod verify-psql -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    result="$(kubectl run verify-psql -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+      --restart=Never --rm -i --quiet --overrides="${pg_overrides}" </dev/null 2>&1 || true)"
+    if printf '%s\n' "${result}" | grep -qx 't'; then
+      log "PASS  Aurora '${pg_label}' accepts sslmode=require (${pg_role} role, pg_stat_ssl.ssl = t)."
+    else
+      log "FAIL  Aurora '${pg_label}' sslmode=require check failed: ${result}"
+      fail_count=$((fail_count + 1))
+    fi
+  done
+
+  # 3b. ClickHouse as replicas + Keeper: every replica and Keeper member ready, no read-only replica.
+  if [[ "$(clickhouse_replicated)" == "true" ]]; then
+    local ch_spec ch_ready kp_spec kp_ready ch_ro
+    ch_spec="$(kubectl get statefulset clickhouse -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    ch_ready="$(kubectl get statefulset clickhouse -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    kp_spec="$(kubectl get statefulset clickhouse-keeper -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    kp_ready="$(kubectl get statefulset clickhouse-keeper -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    ch_ro="$(kubectl exec -n "${INFRA_NAMESPACE}" clickhouse-0 -c clickhouse -- sh -c 'clickhouse-client --user admin --password "$CH_PW_ADMIN" -q "SELECT countIf(is_readonly) FROM system.replicas"' 2>/dev/null || echo unknown)"
+    if [[ -n "${ch_spec}" && "${ch_ready:-0}" == "${ch_spec}" && -n "${kp_spec}" && "${kp_ready:-0}" == "${kp_spec}" && "${ch_ro}" == "0" ]]; then
+      log "PASS  ClickHouse replicated: ${ch_ready}/${ch_spec} servers, ${kp_ready}/${kp_spec} Keeper members, 0 read-only replicas."
+    else
+      log "FAIL  ClickHouse replication: servers ${ch_ready:-0}/${ch_spec:-?}, Keeper ${kp_ready:-0}/${kp_spec:-?}, read-only replicas: ${ch_ro}."
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 4. No failed Jobs (data bootstrap, grid/registry migrations, ch-sync init, topics).
+  local failed_jobs
+  # A failed run of a CronJob (e.g. ch-sync while ClickHouse restarted) does not count once a later run of the
+  # same CronJob has succeeded.
+  failed_jobs="$(kubectl get jobs -n "${INFRA_NAMESPACE}" -o json 2>/dev/null | python3 -c '
+import json, sys
+items = json.load(sys.stdin).get("items", [])
+def owner(j):
+    for o in j["metadata"].get("ownerReferences", []):
+        if o.get("kind") == "CronJob":
+            return o["name"]
+    return None
+latest_ok = {}
+for j in items:
+    o = owner(j)
+    if o and j.get("status", {}).get("succeeded", 0):
+        t = j["metadata"]["creationTimestamp"]
+        latest_ok[o] = max(latest_ok.get(o, ""), t)
+for j in items:
+    s = j.get("status", {})
+    if s.get("failed", 0) and not s.get("succeeded", 0):
+        o = owner(j)
+        if o and latest_ok.get(o, "") > j["metadata"]["creationTimestamp"]:
+            continue
+        print(j["metadata"]["name"])
+' || true)"
+  if [[ -z "${failed_jobs}" ]]; then
+    log "PASS  No failed Jobs in '${INFRA_NAMESPACE}'."
+  else
+    log "FAIL  Failed Jobs in '${INFRA_NAMESPACE}': $(printf '%s' "${failed_jobs}" | tr '\n' ' ')— see kubectl -n ${INFRA_NAMESPACE} logs job/<name>."
+    fail_count=$((fail_count + 1))
+  fi
+
+  if [[ "${fail_count}" -gt 0 ]]; then
+    mark_phase_blocked "${fail_count} data-layer check(s) failed — see the FAIL lines above. Fix, then re-run: --phase verify-data-layer --rerun-phase."
+    return
+  fi
+  log "All data-layer checks passed."
+}
+
+# Installs the vendored platform service charts (opt-in via --data-layer). Images come
+# from the customer's ECR mirror; DSNs/brokers/keys from platform-secret (straiker-data).
+phase_platform_services() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "--data-layer not set — skipping platform services."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  require_command kubectl
+  require_command helm
+  ensure_k8s_ready_for_charts || return
+
+  local ecr_registry
+  ecr_registry="$(get_metadata "ecr_registry")"
+  if [[ -z "${ecr_registry}" ]]; then
+    mark_phase_blocked "No ECR registry in state. Run phase 'aws-artifacts' first."
+    return
+  fi
+  if ! kubectl get secret platform-secret -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    mark_phase_blocked "Secret 'platform-secret' missing. Run phase 'data-bootstrap' first."
+    return
+  fi
+
+  local svc chart tag key
+  for svc in ${PLATFORM_SERVICES}; do
+    if [[ "${svc}" == "api-gateway" ]]; then
+      install_api_gateway "${ecr_registry}" || return
+      continue
+    fi
+    chart="${REPO_ROOT}/charts/platform-${svc}"
+    [[ -d "${chart}" ]] || { mark_phase_blocked "Unknown platform service '${svc}' (no ${chart})."; return; }
+    tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${chart}/Chart.yaml")"
+    key="straiker.${svc}"
+    local -a extra=()
+    case "${svc}" in
+      foundation) extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}") ;;
+      registry) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/") ;;
+      databridge) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/databridge/") ;;
+      connect) extra+=(--set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/connect/" --set-string "${key}.email.region=${AWS_REGION}" --set-string "${key}.notify.bus.sasl.region=${AWS_REGION}") ;;
+      portico) extra+=(--set-string "${key}.internalApi.url=http://straiker-frontend-service.${INFRA_NAMESPACE}.svc.cluster.local") ;;
+      grid)
+        extra+=(--set-string "${key}.registryBaseURL=http://registry.${INFRA_NAMESPACE}.svc.cluster.local:80")
+        # ClickHouse as replicas + Keeper: grid's migrations must create Replicated* tables (init container rewrite).
+        extra+=(--set "${key}.migrations.replicatedEngines=$(clickhouse_replicated)")
+        extra+=(--set-string "${key}.artifacts.bucket=$(get_metadata "grid_artifacts_bucket")" --set-string "${key}.artifacts.region=${AWS_REGION}")
+        ;;
+    esac
+    log "Installing platform service '${svc}' (${tag})..."
+    helm upgrade --install "${svc}" "${chart}" \
+      --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
+      -f "${chart}/values-onprem.yaml" \
+      --set-string "${key}.image.registry=$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
+      --set-string "${key}.image.version=${tag}" \
+      --set-string "${key}.migrations.image.registry=$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
+      --set-string "${key}.migrations.image.version=${tag}" \
+      --set "${key}.observability.otel.requireSecret=false" \
+      ${extra[@]+"${extra[@]}"}
+  done
 }
 
 # $1=key name (e.g. "SYS__OPENAI_API_KEY"). True if that key already has a
@@ -3160,7 +4453,7 @@ phase_straiker_core() {
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
   local cmd=(
-    helm upgrade --install "${APP_RELEASE}" "${HELM_REPO_NAME}/${APP_CHART_NAME}"
+    helm upgrade --install "${APP_RELEASE}" "$(chart_ref "${APP_CHART_NAME}")"
     --namespace "${INFRA_NAMESPACE}"
     --create-namespace
     --wait
@@ -3212,6 +4505,39 @@ phase_straiker_core() {
   # Unconditional — straiker-defend is always installed now (see
   # phase_straiker_defend), regardless of product selection.
   cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
+
+  # --data-layer: frontend's platform DB is Aurora (not straiker-system's postgres). Password
+  # comes from straiker-data's DSN Secret; Aurora requires TLS (the DSNs use sslmode=require).
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    local aurora_host
+    aurora_host="$(get_metadata "aurora_endpoint")"
+    if [[ -z "${aurora_host}" ]]; then
+      mark_phase_blocked "No aurora_endpoint in install state. Run phase 'aws-data' first."
+      return
+    fi
+    local os_endpoint os_secret
+    os_endpoint="$(get_metadata "opensearch_endpoint")"
+    os_secret="$(get_metadata "opensearch_secret_name")"
+    if [[ -n "${os_endpoint}" && -n "${os_secret}" ]]; then
+      ensure_opensearch_credentials_secret "${os_secret}" || return
+      cmd+=(
+        --set-string "straiker-frontend.frontend.opensearch.url=https://${os_endpoint}"
+        --set-string "straiker-frontend.frontend.opensearch.credentialsSecret=opensearch-credentials"
+      )
+    fi
+    ensure_synced_secret frontend-session-source "${CLUSTER_NAME}/frontend/auth" straiker-frontend-auth "%s" \
+      "SESSION_SIGNING_KEY" || return
+    cmd+=(--set-string "straiker-frontend.sessionKeySecret=frontend-session-source")
+    cmd+=(
+      --set-string "straiker-frontend.frontend.db.host=${aurora_host}"
+      --set "straiker-frontend.frontend.db.port=$(get_metadata "aurora_port")"
+      --set "straiker-frontend.frontend.db.sslMode=require"
+      --set "straiker-frontend.frontend.db.passwordSecret.name=straiker-db-dsn"
+      --set "straiker-frontend.frontend.db.name=frontend"
+      --set "straiker-frontend.frontend.db.user=frontend"
+      --set "straiker-frontend.frontend.db.passwordSecret.key=PASSWORD_frontend"
+    )
+  fi
 
   # Same reasoning for 'ascend' — charts/straiker-ascend's control-plane
   # Service (frontend calls this to start/pause/stream assessment runs).
@@ -3469,7 +4795,7 @@ phase_straiker_defend() {
 
   local ecr_registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
   local cmd=(
-    helm upgrade --install "${DEFEND_RELEASE}" "${HELM_REPO_NAME}/${DEFEND_CHART_NAME}"
+    helm upgrade --install "${DEFEND_RELEASE}" "$(chart_ref "${DEFEND_CHART_NAME}")"
     --namespace "${INFRA_NAMESPACE}"
     --create-namespace
     --set "global.dockerRegistry=${ecr_registry_prefixed}"
@@ -3477,6 +4803,19 @@ phase_straiker_defend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  # --data-layer: Redis is ElastiCache Serverless (TLS only), not straiker-system's valkey.
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    local redis_endpoint
+    redis_endpoint="$(get_metadata "data_redis_endpoint")"
+    if [[ -z "${redis_endpoint}" ]]; then
+      mark_phase_blocked "No data_redis_endpoint in install state. Run phase 'aws-data' first."
+      return
+    fi
+    cmd+=(--set-string "redis.url=rediss://${redis_endpoint}:6379")
+    ensure_synced_secret defend-session-source "${CLUSTER_NAME}/argus/session" straiker-defend-session-secret "%s" \
+      "SYS__ARGUS_SESSION_SECRET_KEY" || return
+    cmd+=(--set-string "sessionKeySecret=defend-session-source")
+  fi
   if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
     cmd+=(--set "cloudProvider=gke")
     local workload_gsa
@@ -3568,15 +4907,49 @@ phase_straiker_ascend() {
   helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
+  # --data-layer: iris's DB is Aurora and its Redis is ElastiCache (TLS). Password from
+  # straiker-data's DSN Secret; Aurora requires TLS (the DSNs use sslmode=require).
+  local ascend_db_host="postgres.${INFRA_NAMESPACE}.svc.cluster.local"
+  local ascend_data_layer_args=()
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    # iris lives in the "ascend" Aurora cluster; an install with a single cluster keeps it on "platform".
+    ascend_db_host="$(get_metadata "aurora_ascend_endpoint")"
+    [[ -n "${ascend_db_host}" ]] || ascend_db_host="$(get_metadata "aurora_endpoint")"
+    local ascend_redis_endpoint
+    ascend_redis_endpoint="$(get_metadata "data_redis_endpoint")"
+    if [[ -z "${ascend_db_host}" || -z "${ascend_redis_endpoint}" ]]; then
+      mark_phase_blocked "Missing aurora_endpoint/data_redis_endpoint in install state. Run phase 'aws-data' first."
+      return
+    fi
+    ascend_data_layer_args=(
+      --set "db.port=$(get_metadata "aurora_port")"
+      --set "db.sslMode=require"
+      --set "db.passwordSecret.name=straiker-db-dsn"
+      --set "db.passwordSecret.key=PASSWORD_iris"
+    )
+    # iris's own node-based Valkey (SaaS shape, TLS + AUTH): connection details live in Secrets Manager;
+    # copy them into a K8s Secret so the token never appears in Helm values or the pod spec.
+    # Without it (older stack), fall back to the shared serverless cache.
+    local iris_redis_secret
+    iris_redis_secret="$(get_metadata "iris_redis_secret_name")"
+    if [[ -n "${iris_redis_secret}" ]]; then
+      ensure_iris_redis_secret "${iris_redis_secret}" || return
+      ascend_data_layer_args+=(--set "redis.existingSecret.name=iris-redis")
+    else
+      ascend_data_layer_args+=(--set-string "redis.url=rediss://${ascend_redis_endpoint}:6379")
+    fi
+  fi
+
   local cmd=(
-    helm upgrade --install "${ASCEND_RELEASE}" "${HELM_REPO_NAME}/${ASCEND_CHART_NAME}"
+    helm upgrade --install "${ASCEND_RELEASE}" "$(chart_ref "${ASCEND_CHART_NAME}")"
     --namespace "${INFRA_NAMESPACE}"
     --create-namespace
     --set "global.dockerRegistry=$(docker_registry_with_prefix "${ecr_registry}")"
-    --set "db.host=postgres.${INFRA_NAMESPACE}.svc.cluster.local"
+    --set-string "db.host=${ascend_db_host}"
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  cmd+=("${ascend_data_layer_args[@]+"${ascend_data_layer_args[@]}"}")
   # See helm_ssa_conflict_flags's declaration above for why these can't just
   # always be passed, and why they must be passed together. (Note: `kubectl
   # patch --type=json remove metadata/managedFields` does NOT work as an
@@ -5148,9 +6521,17 @@ run_phase() {
     karpenter) phase_karpenter ;;
     k8s-preflight) phase_k8s_preflight ;;
     aws-artifacts) phase_aws_artifacts ;;
+    aws-data) phase_aws_data ;;
+    external-secrets) phase_external_secrets ;;
     artifacts-sync) phase_artifacts_sync ;;
     straiker-system) phase_straiker_system ;;
     shared-secrets) phase_shared_secrets ;;
+    clickhouse) phase_clickhouse ;;
+    data-bootstrap) phase_data_bootstrap ;;
+    ch-sync) phase_ch_sync ;;
+    platform-services) phase_platform_services ;;
+    ingest) phase_ingest ;;
+    verify-data-layer) phase_verify_data_layer ;;
     ai-provider-secrets) phase_ai_provider_secrets ;;
     straiker-core) phase_straiker_core ;;
     straiker-inference) phase_straiker_inference ;;
@@ -5233,6 +6614,11 @@ main() {
   trap on_interrupt HUP INT TERM
 
   parse_args "$@"
+  # --data-layer provisions ClickHouse and Aurora, which registry and grid need (grid's migration creates the
+  # tables ingest writes to), so they join the default set. An explicit PLATFORM_SERVICES always wins.
+  if [[ "${DATA_LAYER}" == "true" && "${PLATFORM_SERVICES_EXPLICIT}" != true ]]; then
+    PLATFORM_SERVICES="foundation registry databridge portico grid api-gateway"
+  fi
   if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
     resolve_gcp_region
     resolve_gcp_project

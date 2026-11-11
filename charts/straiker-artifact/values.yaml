@@ -89,6 +89,45 @@ imageMirror:
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
       tag: onprem-v2026.9.12.3
       destRepository: straiker/iris
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/api-gateway
+      tag: v2.3.12
+      destRepository: straiker/api-gateway
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/foundation
+      tag: v2026.11.3
+      destRepository: straiker/foundation
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/foundation-migrations
+      tag: v2026.11.3
+      destRepository: straiker/foundation-migrations
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/registry
+      tag: v2026.11.3
+      destRepository: straiker/registry
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/registry-migrations
+      tag: v2026.11.3
+      destRepository: straiker/registry-migrations
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/databridge
+      tag: v2026.11.3
+      destRepository: straiker/databridge
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/databridge-migrations
+      tag: v2026.11.3
+      destRepository: straiker/databridge-migrations
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/grid
+      tag: v2026.11.3
+      destRepository: straiker/grid
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/grid-migrations
+      tag: v2026.11.3
+      destRepository: straiker/grid-migrations
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/portico
+      tag: v2026.11.3
+      destRepository: straiker/portico
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/connect
+      tag: v2026.11.3
+      destRepository: straiker/connect
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/connect-migrations
+      tag: v2026.11.3
+      destRepository: straiker/connect-migrations
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/clickhouse/clickhouse-server
+      tag: "25.8"
+      destRepository: clickhouse/clickhouse-server
   image:
     repository: gcr.io/go-containerregistry/crane
     tag: debug

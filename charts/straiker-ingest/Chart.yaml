@@ -1,0 +1,13 @@
+apiVersion: v2
+name: straiker-ingest
+description: >
+  Replaces the ClickPipes Kafka pipes for on-prem: Redpanda Connect (streams mode) reads
+  s6r.events, s6r.findings and platform.audit from MSK (SASL/IAM via Pod Identity) and inserts
+  into the grid.* landing tables over ClickHouse HTTP. Unmappable or rejected messages go to
+  <topic>.dlq. See doc/clickhouse-ingestion-design.md.
+type: application
+version: 0.1.0
+appVersion: "4.101.0"
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai

@@ -39,6 +39,15 @@ module "eks" {
       most_recent              = true
       before_compute           = true
       service_account_role_arn = module.vpc_cni_irsa.iam_role_arn
+      # Default WARM_ENI_TARGET=1 keeps a whole spare network interface of idle IPs on every node. With one
+      # private /24 per AZ (251 IPs) and large nodes (GPU, ClickHouse) that exhausts the subnet and new pods
+      # fail with "failed to assign an IP address to container". Keep only a few spare IPs per node instead.
+      configuration_values = jsonencode({
+        env = {
+          WARM_IP_TARGET    = "2"
+          MINIMUM_IP_TARGET = "8"
+        }
+      })
     }
     coredns = {
       most_recent = true

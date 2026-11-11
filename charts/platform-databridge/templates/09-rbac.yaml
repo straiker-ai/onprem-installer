@@ -1,0 +1,36 @@
+{{- $db := .Values.straiker.databridge }}
+{{- if $db.rbac.enabled }}
+# Lets the reconcile role manage the streams ConfigMap (configmap delivery mode).
+# Scoped to the single streams ConfigMap by name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "straiker.name" . }}-streams
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ $db.delivery.streamsConfigMap }}"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "straiker.name" . }}-streams
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "straiker.name" . }}-streams
+subjects:
+  - kind: ServiceAccount
+    name: {{ $db.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

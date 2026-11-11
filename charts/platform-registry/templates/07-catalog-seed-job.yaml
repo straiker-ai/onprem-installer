@@ -1,0 +1,73 @@
+{{- if .Values.straiker.registry.catalogSeed.enabled }}
+{{- $seed := .Values.straiker.registry.catalogSeed }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "straiker.name" . }}-catalog-seed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.straiker.io/app: registry
+    {{- include "straiker.labels" . | nindent 4 }}
+  annotations:
+    # Seed the operator catalogs AFTER the schema is migrated (hook-weight -4 runs
+    # after the migrate Job's -5) and before the app rolls. Idempotent +
+    # version/checksum-gated, so re-running each release is a no-op until a manifest
+    # version bumps. Failed Jobs are kept for debugging.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $seed.backoffLimit }}
+  activeDeadlineSeconds: {{ $seed.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: registry
+        {{- include "straiker.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      # A Service named `registry` injects REGISTRY_PORT=tcp://<ip>:<port> into
+      # every pod. Viper maps that onto Config.Port (int) and seed dies with
+      # "cannot parse value as 'int'". The Deployment is fine because its
+      # ConfigMap overlays REGISTRY_PORT=8080; this Job has no ConfigMap
+      # (pre-install hook, ConfigMap may not exist yet).
+      enableServiceLinks: false
+      serviceAccountName: {{ .Values.straiker.registry.serviceAccount.name }}
+      {{- if .Values.straiker.registry.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.registry.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: catalog-seed
+          image: "{{ .Values.straiker.registry.image.registry }}/{{ .Values.straiker.registry.image.name }}:{{ .Values.straiker.registry.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.registry.image.pullPolicy }}
+          # The app image uses CMD ["/straiker/registry"] (no ENTRYPOINT). K8s
+          # `args` replace CMD, so without `command` the kubelet execs `seed`
+          # as a binary and the Job StartError's with "executable file not found".
+          command: ["/straiker/registry"]
+          args:
+            - "seed"
+            {{- range $seed.only }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- if $seed.force }}
+            - "--force"
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.straiker.registry.secretName }}
+      {{- with .Values.straiker.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.registry.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

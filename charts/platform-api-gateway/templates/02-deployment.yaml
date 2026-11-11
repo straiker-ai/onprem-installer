@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.straiker.io/app: api-gateway
+    {{- include "straiker.labels" . | nindent 4 }}
+  {{- if .Values.straiker.apiGateway.annotations }}
+  annotations:
+    {{- toYaml .Values.straiker.apiGateway.annotations | nindent 4 }}
+  {{- end }}
+  name: {{ include "straiker.name" . }}-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.straiker.apiGateway.replicas }}
+  selector:
+    matchLabels:
+      app.straiker.io/app: api-gateway
+      {{- include "straiker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.straiker.io/app: api-gateway
+        {{- include "straiker.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.straiker.apiGateway.serviceAccount.name }}
+      {{- if .Values.straiker.apiGateway.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.straiker.apiGateway.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "straiker.name" . }}-config
+            items:
+              - key: application-live.yaml
+                path: application-live.yaml
+        {{- if .Values.straiker.readonly.enabled }}
+        - name: readonly-environments
+          configMap:
+            name: {{ .Values.straiker.readonly.configMapName }}
+        {{- end }}
+      # preStop drain (45s, covers NLB deregistration propagation) + graceful
+      # shutdown (25s) must both fit inside the grace period.
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: api-gateway
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: actuator
+              containerPort: 9090
+              protocol: TCP
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "45"]
+          image: "{{ .Values.straiker.apiGateway.image.registry }}/{{ .Values.straiker.apiGateway.image.name }}:{{ .Values.straiker.apiGateway.image.version }}"
+          imagePullPolicy: {{ .Values.straiker.apiGateway.image.pullPolicy }}
+          startupProbe:
+            httpGet:
+              path: /management/health/liveness
+              port: actuator
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /management/health/liveness
+              port: actuator
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /management/health/readiness
+              port: actuator
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          envFrom:
+            - secretRef:
+                name: {{ include "straiker.name" . }}-secrets
+            - secretRef:
+                name: otel-secret
+                optional: true
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SPRING_PROFILES_ACTIVE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "straiker.name" . }}-config
+                  key: SPRING_PROFILES_ACTIVE
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.name=api-gateway,service.namespace={{ .Release.Namespace }},service.version={{ .Values.straiker.apiGateway.image.version }}"
+
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/application-live.yaml
+              subPath: application-live.yaml
+            {{- if .Values.straiker.readonly.enabled }}
+            - name: readonly-environments
+              mountPath: /etc/straiker/config
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.straiker.apiGateway.resources | nindent 12 }}
+      
+      {{- with .Values.straiker.apiGateway.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.apiGateway.affinity }}
+      affinity:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.apiGateway.topologySpreadConstraints }}
+      topologySpreadConstraints:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.straiker.apiGateway.tolerations }}
+      tolerations:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1

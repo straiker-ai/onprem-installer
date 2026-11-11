@@ -1,0 +1,341 @@
+straiker:
+  registry:
+    # Saved GitHub credentials for private MCP/skill scans. Off by default; the
+    # callback Secret and internal ALB must already exist (infra 27_surveyor).
+    scanCredentials:
+      enabled: false
+      authSecretName: scan-credential-callback
+      # https://<private host>/internal/scan-credentials/authorize (Prism).
+      authorizeUrl: ""
+    port: 8080
+    logLevel: info
+    environment: production
+
+    server:
+      readTimeout: 15
+      writeTimeout: 30
+      idleTimeout: 60
+
+    # Shared platform identity: one per-env `platform-sa` (EKS Pod Identity, created
+    # via eksctl in the infra repo) is used by ALL platform services, so Helm
+    # references it by name and does not create it. Registry's only AWS call is
+    # sts:AssumeRole into encryption.roleArn to verify customer keys; platform-sa
+    # already holds it.
+    serviceAccount:
+      create: false
+      name: platform-sa
+      annotations: {}
+
+    service:
+      annotations: {}
+
+    image:
+      pullPolicy: IfNotPresent
+      imagePullSecrets: []
+      registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+      name: registry
+      version: latest
+
+    # Postgres pool sizing (non-secret; in the ConfigMap). Registry is the estate
+    # system of record — it is the ONLY writer to the unified resource* / governance
+    # / taxonomy tables, which ClickPipes CDC-replicates into ClickHouse `grid.*`.
+    database:
+      maxConns: 10
+      minConns: 2
+
+    # Integration credential store (AWS Secrets Manager). `prefix` is the
+    # namespace under which the registry mints agent credentials
+    # ({prefix}tenants/{straiker_id}); the pod's platform-sa must hold SM
+    # write there. Empty (default) disables issuance so ANY onboarding
+    # returns 502 (every mode mints a key) — set it per-env (values-<env>) to enable.
+    secrets:
+      prefix: ""
+
+    # Reconciler (R2.2, discovered write path): reads grid's landing layer in
+    # ClickHouse (read-only) and mints canonical resources/aliases for observed
+    # producer refs not already mapped (declared always wins). Disabled by
+    # default — enable per-env (values-<env>). The CH endpoint + credentials
+    # (REGISTRY_CLICKHOUSE_ADDR/USERNAME/PASSWORD/SECURE, reusing grid's
+    # read-only user) live in the {env}/platform blob; only the non-secret
+    # database name + loop knobs are set here.
+    #
+    # Horizontal scale: HTTP is stateless. Background loops (discovery,
+    # model-catalog heal, key retire) take a Postgres advisory lock so
+    # replicas > 1 are HA — extra pods do NOT add reconcile throughput (and
+    # would only repeat the same CH partition scan). Catch-up is chunked by
+    # maxWindowHours so a single leader can drain backlog without one giant
+    # scan: landing is PARTITION BY toYYYYMMDD(ts), 24h ≈ one daily partition
+    # per tick.
+    clickhouse:
+      database: grid
+      secure: true
+      dialTimeout: 10
+    defaultPolicies:
+      seed: false
+      intervalSeconds: 120
+    # Tenant allowlist (comma-separated straiker_ids) for user-level controls:
+    # employees policies naming users (who.users) are accepted and published as the
+    # agent's user_controls only for these tenants. Empty = off everywhere. Read at
+    # boot, so changing it needs a rollout.
+    userControls:
+      tenants: ""
+    reconcile:
+      enabled: false
+      intervalSeconds: 60
+      lagSeconds: 120
+      # 0 = unlimited (one-shot the whole backfill — avoid in deployed envs).
+      maxWindowHours: 24
+      initialBackfillHours: 8760
+    # Agent purge worker (leader-elected like the loops above). Runs only when the
+    # platform-secret carries REGISTRY_CLICKHOUSE_PURGE_USERNAME/PASSWORD.
+    agentPurge:
+      intervalSeconds: 60
+      batchSize: 20
+      mutationWaitSeconds: 300
+      maxAttempts: 5
+
+    # Outbound S2S to the detection engine THROUGH the api-gateway's internal tier:
+    # the registry fetches the read-only Argus Control Definition contract
+    # (GET {url}/internal/argus/v3/control-definitions) with the shared platform S2S
+    # bearer. `url` is the non-secret gateway base URL (ConfigMap); the bearer is the
+    # secret REGISTRY_GATEWAY_S2S_KEY (platform-secret, see below). Empty url disables
+    # the control-definitions surface (the service still boots; Argus stays autonomous).
+    gateway:
+      url: ""
+
+    # Endpoint detection and response has NO configuration here, deliberately.
+    #
+    # A kill taken in the console has to reach the laptop an endpoint-discovered agent
+    # runs on, which needs the EDR already on the device. Whose EDR is a per-TENANT
+    # question, so the Falcon API client is collected at onboarding (the `crowdstrike`
+    # connector) and stored in the secret store, then resolved per withdrawal.
+    #
+    # There was a `cloud` here beside REGISTRY_EDR_CROWDSTRIKE_CLIENT_ID / _CLIENT_SECRET
+    # in platform-secret. One process-wide client is not a multi-tenant control: every
+    # tenant's Block went to whichever Falcon tenancy the deployment was configured with,
+    # which succeeds against the wrong estate instead of failing. A tenant that has
+    # connected no EDR now has its withdrawal recorded with a reported reason, which is
+    # the same "off is a complete state" as before, decided per tenant.
+
+    # The secure web gateway (Zscaler Internet Access) has no configuration here either,
+    # and for a sharper version of the same reason.
+    #
+    # It is the proxy counterpart to edr: EDR reaches agents running on a laptop, this
+    # reaches services the traffic merely passes through. There was a `sase.zscaler`
+    # block here with cloud + vanityDomain beside REGISTRY_SASE_ZSCALER_CLIENT_ID /
+    # _CLIENT_SECRET in platform-secret, and it carried the shared-tenancy bug in its
+    # worst form: a misdirected kill needs a matching host to exist in the wrong tenancy
+    # before it does anything, while a misdirected denylist edit always lands, because a
+    # domain is a domain in every tenant. The Zscaler API client is now collected at
+    # onboarding (the `zscaler` connector) and resolved per block.
+    #
+    # Worth knowing before a tenant connects one: publishing a change in ZIA is
+    # tenant-global. It commits every pending edit in that tenant, including an
+    # administrator's unfinished work in the Zscaler console.
+
+    # Scan engines (MCP servers, models, skills). OFF by default, and off is a complete
+    # state rather than a broken one: with no url the engine client is nil, the
+    # orchestrator never starts, and nothing is dispatched — the API still answers and
+    # still records submissions, they simply stay `pending`. Enable per-env once that
+    # env has a reachable engine.
+    #
+    # Deliberately NOT routed through `gateway.url` above. Registry mints
+    # X-Straiker-Auth-Context itself for these calls because the engine authenticates a
+    # TENANT and partitions assessments by the straikerId inside that header; sending the
+    # shared S2S key instead would collapse every customer's scans into one bucket on the
+    # far side. It is the one outbound call in the platform that does this.
+    # DO NOT set url here without also setting orchestratorEnabled. A URL alone is worse
+    # than no URL: `Enabled()` becomes true, so a push submit is ACCEPTED and issues an
+    # upload directive, and then nothing ever polls it to a verdict. Empty url gives the
+    # honest answer instead — a 502 `scanning_unavailable`. The two move together per env.
+    # Salesforce Agentforce: each tenant's External Client App credential lives with the
+    # integration they onboarded, so nothing vendor-specific belongs here -- only how
+    # often we re-read their org's agent list.
+    agentforce:
+      sweepHours: 1
+    # Workforce directory refresh. Each tenant's pull credential lives on the directory
+    # source, so the chart only sets how often the elected replica reads the connected app.
+    directory:
+      refreshHours: 24
+    scan:
+      # The address is the same in every cluster —
+      # http://prism.surveyor.svc.cluster.local:8080, an in-cluster ClusterIP in the
+      # `surveyor` namespace with no ingress. It stays empty here so that "off" means
+      # genuinely off (see above); each env that is ON sets it alongside the orchestrator.
+      url: ""
+      # Bounds a single engine call: the SUBMIT and POLL budget, NOT the scan budget. A
+      # scan runs for minutes and is polled, so a generous value only delays noticing an
+      # unresponsive engine. 0 uses the client default.
+      timeoutMs: 0
+      # The leader-elected loop that claims due targets and drives them to a verdict.
+      # Separate from url so an env can hold the client for on-demand submits while
+      # leaving scheduled scanning off.
+      orchestratorEnabled: false
+      intervalSeconds: 60
+      # MUST be set to a positive number for anything to dispatch: 0 disables dispatch
+      # rather than meaning unlimited. The engines run real sandboxes, so this is a spend
+      # and capacity limit before it is a fairness one, and an unset cap on a queue that
+      # costs money is not a safe default.
+      maxInFlight: 0
+      # One tenant's outstanding runs, enforced at submit with 429 + Retry-After so a CI
+      # job gets a signal it can act on rather than being silently queued. NOTE the
+      # opposite zero-sense to maxInFlight: 0 here means NO per-tenant limit, which is
+      # safe because the fleet cap above is still the backstop.
+      maxPerTenantInFlight: 5
+
+    # Outbound event bus (Kafka API): the registry PUBLISHES each agent's
+    # agent_config document (control overrides + kill switch) to the compacted
+    # agent-config topic the detection engine consumes (the CDC leg of the two-plane
+    # model). Brokers + any SCRAM creds are secret (platform-secret:
+    # REGISTRY_BUS_BROKERS[/…_SASL_USERNAME/_PASSWORD]); tls/mechanism/region are
+    # non-secret (ConfigMap). Empty brokers disables the producer — writes still
+    # succeed, the config just isn't projected (Argus stays autonomous on its
+    # defaults). Mirrors databridge/connect.
+    bus:
+      tls: false
+      sasl:
+        # "" (none, local Redpanda) | aws_msk_iam | scram-sha-512 | scram-sha-256 | plain
+        mechanism: ""
+        region: ""
+
+    # Bus topic names the registry produces to (non-secret, ConfigMap).
+    topics:
+      # Compacted topic carrying each agent's agent_config document (key
+      # straiker_id:agent_id; tombstone when the agent has no config). Infra
+      # provisions it with cleanup.policy=compact.
+      agentConfig: "platform.agent_config"
+
+    # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
+    # {env}/platform Secrets Manager blob) consumed via envFrom; keys are namespaced
+    # by the REGISTRY_ prefix. REQUIRED key for Registry in the {env}/platform blob:
+    #   REGISTRY_DATABASE_CONNECTION_STRING   postgres DSN for the registry DB (RDS)
+    # The same DSN is consumed by the app pool and the Liquibase migrate Job.
+    # When reconcile.enabled, ALSO required (reuse grid's read-only CH user; SECURE
+    # is a ConfigMap value, not a blob key — mirrors grid):
+    #   REGISTRY_CLICKHOUSE_ADDR      host:port(,host:port) of the CH service (native)
+    #   REGISTRY_CLICKHOUSE_USERNAME  grid read-only user
+    #   REGISTRY_CLICKHOUSE_PASSWORD  its password
+    # To purge deleted agents' ClickHouse facts, ALSO (docs/INFRA.md §8a):
+    #   REGISTRY_CLICKHOUSE_PURGE_USERNAME  grid_purge (ALTER DELETE + SYSTEM VIEWS)
+    #   REGISTRY_CLICKHOUSE_PURGE_PASSWORD  its password
+    # When straiker.registry.gateway.url is set (control-definitions fetch), ALSO required:
+    #   REGISTRY_GATEWAY_S2S_KEY      shared api-gateway internal S2S bearer (must equal
+    #                                 the gateway's key and the bearer Argus accepts on
+    #                                 /internal/argus/v3/*)
+    # When the agent-config producer is enabled, ALSO required:
+    #   REGISTRY_BUS_BROKERS          seed broker list (host:port,host:port) of the MSK/
+    #                                 Redpanda cluster the engine consumes from
+    # And for SCRAM/PLAIN SASL only (NOT aws_msk_iam, which uses ambient IAM creds):
+    #   REGISTRY_BUS_SASL_USERNAME / REGISTRY_BUS_SASL_PASSWORD
+    secretName: platform-secret
+
+    observability:
+      sentry:
+        dsn: ""
+      otel:
+        enabled: true
+        # Shared OTel env bundle injected into app pods via envFrom.secretRef.
+        secretName: otel-secret
+        # Service identity used by OTEL_SERVICE_NAME.
+        serviceName: registry
+        # If true, otel-secret becomes required (optional=false) in envFrom.
+        requireSecret: true
+
+    # Estate PG migrations (Liquibase) run as a Helm pre-upgrade/pre-install hook Job
+    # (registry-migrations image; entrypoint derives the JDBC URL from
+    # REGISTRY_DATABASE_CONNECTION_STRING). Registry OWNS the unified estate schema
+    # under its own REGISTRY_DATABASECHANGELOG tracking table. Enabled by default so
+    # every env applies the changelog on deploy.
+    migrations:
+      enabled: true
+      image:
+        pullPolicy: IfNotPresent
+        registry: 108782090038.dkr.ecr.us-east-1.amazonaws.com/straiker
+        name: registry-migrations
+        version: latest
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+
+    # Catalog seed (registry `seed` command) runs as a Helm pre-upgrade/pre-install hook
+    # Job AFTER migrations (hook-weight -4 > migrate's -5), on the registry APP image
+    # (the versioned seed manifests are go:embed-ed into the binary). Idempotent +
+    # version/checksum-gated (catalog_seed_history), so re-running on every release is a
+    # no-op until a manifest version bumps. Enabled by default; needs the same DB DSN.
+    catalogSeed:
+      enabled: true
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      # Optional: restrict to specific catalogs (e.g. ["model"]); empty = all registered.
+      only: []
+      force: false
+
+    # Assume-role CloudFormation URLs for Bedrock and log-ingest setup.
+    # The assumer role ARN is the same deployment value agent-scanner uses.
+    # Empty ARN leaves the routes up; handlers return 503.
+    awsOnboard:
+      assumerRoleArn: ""
+      bedrockIamRoleTemplateUrl: "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-bedrock-iam.yaml"
+      bedrockIamUserTemplateUrl: "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-bedrock-iam-user.yaml"
+      logIngestTemplateUrl: "https://straiker-pac-dev.s3.us-east-1.amazonaws.com/cft/straiker-log-ingest-s3-reader.yaml"
+
+    # Customer-managed KMS keys for grid-artifacts transcripts (/settings/encryption).
+    # bucket is the grid-artifacts bucket Argus writes. roleArn is the CMEK
+    # transcripts role customers name in their key policy; registry assumes it to
+    # verify keys, as Argus and grid do for transcripts. The console renders the
+    # key policy from its own config, which must name the same bucket, region, and
+    # role. Any value empty, or no tenant_config delivery (bus brokers and
+    # topics.tenant_config, which carries the key to Argus), leaves the routes up;
+    # handlers return 503 encryption_unconfigured.
+    encryption:
+      bucket: ""
+      region: ""
+      roleArn: ""
+
+    # Copilot Studio onboarding (Azure app + v3 Graph/Studio URL templates).
+    # Client id/secret come from the platform-secret (REGISTRY_M365_CLIENT_ID /
+    # REGISTRY_M365_CLIENT_SECRET). Empty client id leaves the routes up; handlers
+    # return 503. Graph templates substitute {integration_key}.
+    m365:
+      redirectUri: ""
+      dataverseRedirectUri: ""
+      notificationUrl: ""
+      lifecycleUrl: ""
+      publicApiBase: ""
+      uiOrigins: ""
+      # Copilot Studio renew/reprovision sweep period. Below 60 falls back to 3h.
+      maintenanceIntervalSeconds: 10800
+
+    # HTTP scales freely. Background loops are single-leader (advisory lock);
+    # replicas > 1 is HA for the API, not extra CH reconcile throughput.
+    replicas: 1
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    affinity: {}
+    # Zone spread for the Deployment's pods. Off by default. minDomains: with eligible
+    # nodes in one zone only, a pod that would break the spread waits for a node in
+    # another zone instead of joining the first. matchLabelKeys: a rollout spreads the
+    # new ReplicaSet's pods among themselves.
+    topologySpread:
+      enabled: false
+      maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+    tolerations: []
+    annotations: {}

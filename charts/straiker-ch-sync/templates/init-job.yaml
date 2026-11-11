@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straiker-ch-sync-init
+  annotations:
+    # Create the replica tables and do a first full sync before the release is "ready", so
+    # grid (whose migration needs these tables) can be installed right after.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: init
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "chsync.env" . | nindent 12 }}
+          command: ["/bin/bash", "-c", "/config/init.sh && /config/sync.sh"]
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: config
+          configMap: { name: straiker-ch-sync, defaultMode: 0755 }

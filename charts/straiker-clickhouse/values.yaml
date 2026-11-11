@@ -1,0 +1,65 @@
+image:
+  # Set by the installer to <ecr>/clickhouse/clickhouse-server (mirrored by straiker-artifact).
+  repository: clickhouse/clickhouse-server
+  tag: "25.8"
+  pullPolicy: IfNotPresent
+
+# libpq TLS mode for the postgresql() table function (ch-sync -> Aurora). Aurora requires TLS; "require" does not
+# verify the certificate, so no CA bundle is needed.
+postgresSslMode: require
+
+# Native protocol (plain, in-cluster) is what grid/registry dial; no TLS inside the cluster.
+ports: { native: 9000, http: 8123 }
+
+# Topology: ONE shard with `replicas` replicas, coordinated by a ClickHouse Keeper ensemble.
+# The databases below are created as Replicated databases (one CREATE per replica), so the plain
+# MergeTree-family tables the grid migrations and ch-sync create are replicated automatically.
+# replicas: 1 runs without replication (keeper is then not needed: set keeper.enabled=false).
+replicas: 2
+
+persistence:
+  size: 500Gi
+  storageClass: ""   # "" = cluster default (gp3)
+
+# Per replica. Sized for an 8 vCPU / 64 GiB node (r6g/r7g.2xlarge, pool straiker-clickhouse).
+resources:
+  requests: { cpu: "7", memory: 56Gi }
+  limits: { memory: 56Gi }
+
+# Keeper runs in the same clickhouse-server image (it ships the clickhouse-keeper binary), so no
+# extra image has to be mirrored. 3 members = quorum survives one loss.
+keeper:
+  enabled: true
+  replicas: 3
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { memory: 1Gi }
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  # Small and general purpose: the shared pool (label purpose=general, no taint).
+  nodeSelector: { purpose: general }
+  tolerations: []
+
+# Application databases created at install, as Replicated databases when replicas > 1 (grid owns its
+# schema via its own migrations).
+databases: [grid]
+
+# Users (XML-defined; passwords generated once and kept across upgrades).
+credentialsSecret: clickhouse-credentials
+# User passwords: Secret with keys <user>_password, synced from Secrets Manager (<cluster>/clickhouse/credentials)
+# by the installer's ExternalSecret. Empty = generate in-cluster (legacy).
+passwordsSecret: clickhouse-passwords
+users:
+  # No <grants> for admin: a config user without grants has full rights, and an explicit
+  # "GRANT ALL ... WITH GRANT OPTION" makes clickhouse-server 25.8 exit (code 91) at startup.
+  admin:         { accessManagement: true }                                                  # DDL: grid migrations, bootstrap
+  grid_query_ro: { grants: ["GRANT SELECT ON *.*"], readonly: true }                         # grid + registry read path
+  grid_ingest:   { grants: ["GRANT INSERT ON grid.*"] }                                      # Kafka -> landing tables (chart straiker-ingest)
+  grid_purge:    { grants: ["GRANT ALTER DELETE, SYSTEM VIEWS, SELECT ON *.*"] }            # registry agent purge
+
+# Dedicated, tainted pool created by chart straiker-system (karpenter.clickhouse). Set both to {} / []
+# to run on any node instead.
+nodeSelector: { purpose: straiker-clickhouse }
+tolerations:
+  - { key: purpose, operator: Equal, value: straiker-clickhouse, effect: NoSchedule }

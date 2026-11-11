@@ -172,6 +172,8 @@ frontend:
   # Defaults to charts/straiker-system's own opensearch, in global.infraNamespace.
   opensearch:
     url: ""
+    # Secret with keys username/password for a managed (basic-auth) OpenSearch; empty = no credentials.
+    credentialsSecret: ""
 
   # Backed by the bundled dex stack above by default — every field left empty
   # falls back to dex's own issuer/staticClient (see frontend.oidcIssuer and
@@ -221,3 +223,7 @@ frontend:
   internalApiKey:
     secretName: ""
     secretKey: ""
+
+# SESSION_SIGNING_KEY source: a Secret with that key, synced from Secrets Manager by the installer's
+# ExternalSecret. Empty = generate in-cluster (legacy).
+sessionKeySecret: ""

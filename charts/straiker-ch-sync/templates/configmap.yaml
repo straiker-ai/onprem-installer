@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-ch-sync
+data:
+  cdc_targets.sql: |
+{{ .Files.Get "files/cdc_targets.sql" | indent 4 }}
+  init.sh: |
+{{ .Files.Get "files/init.sh" | indent 4 }}
+  sync.sh: |
+{{ .Files.Get "files/sync.sh" | indent 4 }}

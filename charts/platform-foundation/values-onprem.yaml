@@ -1,0 +1,16 @@
+# On-prem overlay for platform-foundation (hand-maintained; scripts/sync-platform-charts.sh never touches it).
+# Passed by 'install-straiker.sh' phase 'platform-services' together with --set for the
+# per-install values: image.registry/version, bus region, namespace-specific URLs.
+# Reads platform-secret / platform-sa created by chart straiker-data.
+straiker:
+  foundation:
+    environment: onprem
+    observability:
+      otel: { enabled: false }
+    serviceAccount: { create: false, name: platform-sa }
+    replicas: 1
+    hpa: { enabled: false }
+    bus: { tls: true, saslMechanism: aws_msk_iam }   # saslRegion set by the installer
+    authz:
+      operatorDomains: "*"
+      bootstrapOperators: ""        # set by the installer from the customer admin email

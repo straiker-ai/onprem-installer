@@ -1,0 +1,71 @@
+{{- $c := .Values.straiker.connect }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "straiker.name" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" . | nindent 4 }}
+data:
+  # Shared runtime (CONNECT_*). CONNECT_ROLE is set per-Deployment, not here.
+  CONNECT_PORT: {{ $c.port | int | quote }}
+  CONNECT_LOG_LEVEL: {{ $c.logLevel | quote }}
+  CONNECT_ENVIRONMENT: {{ $c.environment | quote }}
+  CONNECT_SERVER_READ_TIMEOUT: {{ $c.server.readTimeout | int | quote }}
+  CONNECT_SERVER_WRITE_TIMEOUT: {{ $c.server.writeTimeout | int | quote }}
+  CONNECT_SERVER_IDLE_TIMEOUT: {{ $c.server.idleTimeout | int | quote }}
+  # Provider-credential secret store (non-secret). connect stores provider
+  # credentials in a secret store (AWS Secrets Manager in cloud) and keeps only an
+  # opaque secret_ref handle in Postgres. CONNECT_SECRETS_PREFIX namespaces those
+  # secrets per env (e.g. dev/platform/connect/). connect reads/writes Secrets
+  # Manager via the pod's IAM role (ambient AWS creds), the same mechanism the SES
+  # connector uses (CONNECT_EMAIL_*); no AWS keys live in config. The connect
+  # role's IAM policy must therefore also allow
+  # secretsmanager:GetSecretValue|CreateSecret|PutSecretValue|DeleteSecret on
+  # <env>/platform/connect/* (dev|stage|prod). CONNECT_SECRETS_DEV, when set to a
+  # JSON blob, selects an in-memory store instead of AWS Secrets Manager; it is
+  # left unset in cloud so AWS Secrets Manager is used.
+  CONNECT_SECRETS_PREFIX: {{ $c.secrets.prefix | default "" | quote }}
+  {{- with $c.secrets.dev }}
+  CONNECT_SECRETS_DEV: {{ . | quote }}
+  {{- end }}
+  {{- with $c.oauth }}
+  # Connection-establishment OAuth (non-secret). The HMAC state secret + Slack
+  # client secret come from the platform-secret
+  # (CONNECT_OAUTH_STATE_SECRET / CONNECT_OAUTH_SLACK_CLIENT_SECRET).
+  # Empty redirect base URL disables OAuth.
+  CONNECT_OAUTH_REDIRECT_BASE_URL: {{ .redirectBaseURL | default "" | quote }}
+  CONNECT_OAUTH_RETURN_URL: {{ .returnURL | default "" | quote }}
+  {{- if .slackClientID }}
+  CONNECT_OAUTH_SLACK_CLIENT_ID: {{ .slackClientID | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with $c.email }}
+  # SES email delivery (non-secret). connect owns the SES connector, the
+  # sys_email system channel, and all delivery. AWS credentials are supplied via
+  # the pod's IAM role / platform-secret, never chart values.
+  CONNECT_EMAIL_REGION: {{ .region | default "" | quote }}
+  CONNECT_EMAIL_DEFAULT_FROM: {{ .defaultFrom | default "" | quote }}
+  {{- end }}
+  {{- with $c.notify.bus }}
+  # Event-bus auth (non-secret). Broker list + SASL credentials come from the
+  # platform-secret (NOTIFY_BUS_BROKERS / NOTIFY_BUS_SASL_USERNAME / _PASSWORD).
+  NOTIFY_BUS_TLS: {{ .tls | default false | quote }}
+  NOTIFY_BUS_SASL_MECHANISM: {{ .sasl.mechanism | default "" | quote }}
+  NOTIFY_BUS_SASL_REGION: {{ .sasl.region | default "" | quote }}
+  {{- end }}
+  {{- with $c.notify.topics }}
+  NOTIFY_TOPICS_REQUESTED: {{ .requested | quote }}
+  NOTIFY_TOPICS_DLQ: {{ .dlq | quote }}
+  NOTIFY_TOPICS_CONSUMER_GROUP: {{ .consumerGroup | quote }}
+  NOTIFY_TOPICS_PARTITIONS: {{ .partitions | int | quote }}
+  # int (not just quote) avoids Helm/Sprig rendering round numbers like
+  # 2592000 in Go's float scientific notation (e.g. "2.592e+06"), which
+  # strconv.ParseInt then rejects at app startup.
+  NOTIFY_TOPICS_RETENTION_SECONDS: {{ .retentionSeconds | int | quote }}
+  NOTIFY_TOPICS_DLQ_RETENTION_SECONDS: {{ .dlqRetentionSeconds | int | quote }}
+  {{- end }}
+  {{- with $c.notify.reconcile }}
+  NOTIFY_RECONCILE_INTERVAL_SECONDS: {{ .intervalSeconds | int | quote }}
+  NOTIFY_RECONCILE_STALE_SECONDS: {{ .staleSeconds | int | quote }}
+  {{- end }}

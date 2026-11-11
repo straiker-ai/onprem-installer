@@ -1,0 +1,28 @@
+image:
+  # Set by the installer to <ecr>/clickhouse/clickhouse-server (only clickhouse-client is used).
+  repository: clickhouse/clickhouse-server
+  tag: "25.8"
+  pullPolicy: IfNotPresent
+
+# CronJob period. The dims are small; a full copy per cycle keeps the lag near the cycle length.
+schedule: "* * * * *"
+
+clickhouse:
+  credentialsSecret: clickhouse-credentials   # from chart straiker-clickhouse (admin_* keys, ddlHost, nativePort)
+  # True when ClickHouse runs as replicas + Keeper (set by the installer): the CDC target tables are then
+  # created with Replicated* engines. All statements go to replica 0 (ddlHost), so an INSERT and the
+  # tombstone SELECT that follows it always see the same data.
+  replicated: false
+
+postgres:
+  host: ""                                    # Aurora writer endpoint, set by the installer
+  port: 5432
+  database: registry
+  schema: public
+  # Secret straiker-db-dsn (chart straiker-data) key holding the read-only grid_cdc password.
+  passwordSecret: straiker-db-dsn
+  passwordKey: PASSWORD_grid_cdc
+  username: grid_cdc
+
+# Also OPTIMIZE ... FINAL each table when the hour rolls over, to bound part growth.
+optimizeHourly: true
