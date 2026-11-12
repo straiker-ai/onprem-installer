@@ -111,6 +111,20 @@ ESO_NAMESPACE="external-secrets"
 ESO_SERVICE_ACCOUNT="external-secrets"
 ESO_VERSION="0.14.4"
 ESO_STORE_NAME="aws-sm"
+
+# --data-layer: Cognito is the frontend's only login. First admin = --admin-email (remembered in install state);
+# --reset-admin-password sets that user's Cognito password again from Secrets Manager (recovery).
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
+
+# --data-layer: the customer's own identity provider, federated into the Cognito pool ("Sign in with SSO").
+# SAML (--sso-saml-metadata-url) or OIDC (--sso-oidc-issuer/--sso-oidc-client-id + env SSO_OIDC_CLIENT_SECRET).
+# Remembered in install state (the OIDC secret in Secrets Manager), so later runs keep it.
+SSO_NAME="${SSO_NAME:-}"
+SSO_SAML_METADATA_URL="${SSO_SAML_METADATA_URL:-}"
+SSO_OIDC_ISSUER="${SSO_OIDC_ISSUER:-}"
+SSO_OIDC_CLIENT_ID="${SSO_OIDC_CLIENT_ID:-}"
+SSO_DOMAINS="${SSO_DOMAINS:-}"
 # Aurora roles whose passwords live in Secrets Manager "<cluster>/db/passwords" (charts/straiker-data databases + readers).
 DB_PASSWORD_ROLES="foundation registry databridge connect notify frontend iris bifrost grid_cdc"
 # ClickHouse users (chart straiker-clickhouse `users`) whose passwords live in "<cluster>/clickhouse/credentials".
@@ -633,6 +647,16 @@ Options:
                                    Required with --edge-type tailscale. Contact email for the
                                    Let's Encrypt ACME account charts/straiker-edge's
                                    ClusterIssuer registers. Not a secret.
+  --admin-email <address>          With --data-layer: the first admin. Login is Amazon Cognito (user pool from
+                                   phase 'aws-data'); the installer creates this user with a password kept in
+                                   Secrets Manager. Remembered in install state; required by phase 'straiker-core'.
+  --reset-admin-password           Set the first admin's Cognito password again from Secrets Manager (recovery).
+  --sso-name <name>                With --data-layer: the customer's own identity provider for "Sign in with SSO"
+                                   (federated into the Cognito pool). Needs --sso-domains and either
+                                   --sso-saml-metadata-url <url> (SAML) or --sso-oidc-issuer <url> +
+                                   --sso-oidc-client-id <id> with the secret in env SSO_OIDC_CLIENT_SECRET (OIDC).
+                                   Remembered in install state; re-run phases aws-data and straiker-core to apply.
+  --sso-domains <a.com,b.com>      Email domains allowed to sign in through SSO (new users are created as viewers).
   --custom-domain <domain>         Used when --edge-type none, alb, or tailscale is selected.
                                    Sets straiker-core's/straiker-ascend's
                                    OIDC-redirect-URI/CORS overrides to
@@ -1464,6 +1488,34 @@ parse_args() {
         ;;
       --values)
         VALUES_FILES+=("${2:-}")
+        shift 2
+        ;;
+      --admin-email)
+        ADMIN_EMAIL=${2:-}
+        shift 2
+        ;;
+      --reset-admin-password)
+        RESET_ADMIN_PASSWORD=true
+        shift
+        ;;
+      --sso-name)
+        SSO_NAME=${2:-}
+        shift 2
+        ;;
+      --sso-saml-metadata-url)
+        SSO_SAML_METADATA_URL=${2:-}
+        shift 2
+        ;;
+      --sso-oidc-issuer)
+        SSO_OIDC_ISSUER=${2:-}
+        shift 2
+        ;;
+      --sso-oidc-client-id)
+        SSO_OIDC_CLIENT_ID=${2:-}
+        shift 2
+        ;;
+      --sso-domains)
+        SSO_DOMAINS=${2:-}
         shift 2
         ;;
       --straiker-customer-name)
@@ -2730,6 +2782,10 @@ EOF
     set_metadata "opensearch_create_slr" "${os_slr}"
   fi
 
+  remember_sso_settings || return
+  TF_VAR_cognito_identity_providers="$(sso_identity_providers_json)"
+  export TF_VAR_cognito_identity_providers
+
   tofu -chdir="${DATA_DIR}" init -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${DATA_DIR}" apply -auto-approve -input=false \
     -var="region=${AWS_REGION}" \
@@ -2738,6 +2794,7 @@ EOF
     -var="private_subnet_ids=${subnet_ids}" \
     -var="provision_strategy=${PROVISION_STRATEGY}" \
     -var="create_opensearch_service_linked_role=${os_slr}" \
+    -var="cognito_callback_urls=[\"$(app_origin)/login/oidc/callback\"]" \
     -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
 
   out() { tofu -chdir="${DATA_DIR}" output -raw "$1" 2>/dev/null || true; }
@@ -2787,6 +2844,11 @@ EOF
   set_metadata "iris_redis_secret_name" "$(tofu -chdir="${DATA_DIR}" output -json redis_replication_groups 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("iris",{}).get("secret_name",""))' 2>/dev/null || true)"
   set_metadata "opensearch_endpoint" "$(tofu -chdir="${DATA_DIR}" output -json opensearch_domains 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("endpoint",""))' 2>/dev/null || true)"
   set_metadata "opensearch_secret_name" "$(tofu -chdir="${DATA_DIR}" output -json opensearch_domains 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("secret_name",""))' 2>/dev/null || true)"
+  local cognito_json
+  cognito_json="$(tofu -chdir="${DATA_DIR}" output -json cognito_pools 2>/dev/null || echo '{}')"
+  for cf in pool_id issuer client_id secret_name admin_secret_name saml_acs_url entity_id oidc_redirect_uri; do
+    set_metadata "cognito_${cf}" "$(printf '%s' "${cognito_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("'"${cf}"'",""))' 2>/dev/null || true)"
+  done
   set_metadata "msk_cluster_arn" "$(tofu -chdir="${DATA_DIR}" output -json msk_cluster_arns 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("bus") or next(iter(d.values()), ""))' 2>/dev/null || true)"
   set_metadata "efs_file_system_id" "$(tofu -chdir="${DATA_DIR}" output -json efs_file_system_ids 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("models") or next(iter(d.values()), ""))' 2>/dev/null || true)"
   set_metadata "grid_artifacts_bucket" "$(tofu -chdir="${DATA_DIR}" output -json s3_bucket_names 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("grid-artifacts",""))' 2>/dev/null || true)"
@@ -3899,6 +3961,142 @@ EOF
   fi
 }
 
+# Public https origin of the frontend (what the Cognito app client must allow as callback host): the custom
+# domain's "straiker" host for edge types that have one, else the bundled edge's hostname.
+app_origin() {
+  local d
+  d="$(get_metadata "custom_domain")"
+  if [[ -n "${d}" && ( "${EDGE_TYPE}" == "none" || "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" || "${EDGE_TYPE}" == "tailscale" ) ]]; then
+    printf 'https://%s' "$(custom_domain_hostname straiker)"
+  else
+    printf 'https://app.straiker.internal:8443'
+  fi
+}
+
+# K8s Secret "cognito-oidc" (the app client's secret, from Secrets Manager "<cluster>/cognito/main") via an ExternalSecret.
+ensure_cognito_oidc_secret() {
+  local secret_name="$1"
+  if ! kubectl get clustersecretstore "${ESO_STORE_NAME}" >/dev/null 2>&1; then
+    mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
+    return 1
+  fi
+  kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: cognito-oidc
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ${ESO_STORE_NAME}, kind: ClusterSecretStore}
+  target: {name: cognito-oidc, creationPolicy: Owner}
+  data:
+    - {secretKey: client_secret, remoteRef: {key: ${secret_name}, property: client_secret}}
+    - {secretKey: client_id, remoteRef: {key: ${secret_name}, property: client_id}}
+    - {secretKey: issuer, remoteRef: {key: ${secret_name}, property: issuer}}
+EOF
+  if ! kubectl wait externalsecret/cognito-oidc -n "${INFRA_NAMESPACE}" --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+    mark_phase_blocked "ExternalSecret cognito-oidc is not Ready (secret '${secret_name}'). Check: kubectl describe externalsecret cognito-oidc -n ${INFRA_NAMESPACE}"
+    return 1
+  fi
+}
+
+# Creates the first admin in the Cognito pool (no invitation email; permanent password from Secrets Manager
+# "<cluster>/cognito/main-admin") if missing. With --reset-admin-password the password is set again (recovery:
+# someone with IAM access to the pool can always get back in). The password goes through a 0600 temp file, not argv.
+ensure_cognito_admin_user() {
+  local email="$1" pool admin_secret tmp
+  pool="$(get_metadata "cognito_pool_id")"
+  admin_secret="$(get_metadata "cognito_admin_secret_name")"
+  require_command aws
+  require_command python3
+  if [[ -z "${pool}" || -z "${admin_secret}" ]]; then
+    mark_phase_blocked "No Cognito pool in install state. Run phase 'aws-data' first."
+    return 1
+  fi
+  local exists=false
+  aws cognito-idp admin-get-user --user-pool-id "${pool}" --username "${email}" --region "${AWS_REGION}" >/dev/null 2>&1 && exists=true
+  if [[ "${exists}" == "true" && "${RESET_ADMIN_PASSWORD}" != "true" ]]; then
+    return 0
+  fi
+  if [[ "${exists}" != "true" ]]; then
+    aws cognito-idp admin-create-user --user-pool-id "${pool}" --username "${email}" --region "${AWS_REGION}" \
+      --user-attributes "Name=email,Value=${email}" "Name=email_verified,Value=true" \
+      --message-action SUPPRESS >/dev/null \
+      || { mark_phase_blocked "Could not create Cognito user ${email} in pool ${pool}."; return 1; }
+    log "Created Cognito admin user ${email}."
+  fi
+  tmp="$(mktemp)"
+  chmod 600 "${tmp}"
+  aws secretsmanager get-secret-value --secret-id "${admin_secret}" --region "${AWS_REGION}" --query SecretString --output text \
+    | python3 -c 'import json,sys; print(json.dumps({"UserPoolId": sys.argv[1], "Username": sys.argv[2], "Password": json.load(sys.stdin)["password"], "Permanent": True}))' "${pool}" "${email}" > "${tmp}"
+  if ! aws cognito-idp admin-set-user-password --cli-input-json "file://${tmp}" --region "${AWS_REGION}" >/dev/null; then
+    rm -f "${tmp}"
+    mark_phase_blocked "Could not set the Cognito password for ${email}."
+    return 1
+  fi
+  rm -f "${tmp}"
+  log "Cognito password for ${email} set from Secrets Manager '${admin_secret}'."
+}
+
+# Validates and remembers the customer's SSO settings (flags -> install state); the OIDC client secret
+# (env SSO_OIDC_CLIENT_SECRET) goes to Secrets Manager. Run before the Cognito pool is applied.
+remember_sso_settings() {
+  [[ -n "${SSO_NAME}" ]] || return 0
+  if [[ -z "${SSO_DOMAINS}" ]]; then
+    mark_phase_blocked "--sso-name needs --sso-domains <a.com,b.com> (the email domains allowed to sign in through SSO)."
+    return 1
+  fi
+  local type=""
+  if [[ -n "${SSO_SAML_METADATA_URL}" ]]; then
+    type="SAML"
+  elif [[ -n "${SSO_OIDC_ISSUER}" && -n "${SSO_OIDC_CLIENT_ID}" ]]; then
+    type="OIDC"
+    if [[ -n "${SSO_OIDC_CLIENT_SECRET:-}" ]]; then
+      local sid="${CLUSTER_NAME}/cognito/sso-oidc-client-secret"
+      if aws secretsmanager describe-secret --secret-id "${sid}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+        aws secretsmanager put-secret-value --secret-id "${sid}" --region "${AWS_REGION}" --secret-string "${SSO_OIDC_CLIENT_SECRET}" >/dev/null
+      else
+        aws secretsmanager create-secret --name "${sid}" --region "${AWS_REGION}" --secret-string "${SSO_OIDC_CLIENT_SECRET}" >/dev/null
+      fi
+    fi
+  else
+    mark_phase_blocked "--sso-name needs --sso-saml-metadata-url <url>, or --sso-oidc-issuer <url> + --sso-oidc-client-id <id> (and env SSO_OIDC_CLIENT_SECRET)."
+    return 1
+  fi
+  set_metadata "sso_name" "${SSO_NAME}"
+  set_metadata "sso_type" "${type}"
+  set_metadata "sso_saml_metadata_url" "${SSO_SAML_METADATA_URL}"
+  set_metadata "sso_oidc_issuer" "${SSO_OIDC_ISSUER}"
+  set_metadata "sso_oidc_client_id" "${SSO_OIDC_CLIENT_ID}"
+  set_metadata "sso_domains" "${SSO_DOMAINS}"
+}
+
+# JSON for Terraform's cognito_identity_providers from the remembered settings ({} when none). OIDC client secret
+# is read from Secrets Manager; the result goes to tofu through TF_VAR (never argv or a file).
+sso_identity_providers_json() {
+  local name type
+  name="$(get_metadata "sso_name")"
+  if [[ -z "${name}" ]]; then
+    printf '{}'
+    return 0
+  fi
+  type="$(get_metadata "sso_type")"
+  local secret=""
+  if [[ "${type}" == "OIDC" ]]; then
+    secret="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/cognito/sso-oidc-client-secret" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  fi
+  NAME="${name}" TYPE="${type}" SAML="$(get_metadata "sso_saml_metadata_url")" ISSUER="$(get_metadata "sso_oidc_issuer")" \
+    CLIENT="$(get_metadata "sso_oidc_client_id")" SECRET="${secret}" DOMAINS="$(get_metadata "sso_domains")" python3 -c '
+import json, os
+e = os.environ
+p = {"type": e["TYPE"], "domains": [d.strip() for d in e["DOMAINS"].split(",") if d.strip()]}
+if e["TYPE"] == "SAML":
+    p["saml_metadata_url"] = e["SAML"]
+else:
+    p.update({"oidc_issuer": e["ISSUER"], "oidc_client_id": e["CLIENT"], "oidc_client_secret": e["SECRET"]})
+print(json.dumps({e["NAME"]: p}))'
+}
+
 # Chart reference for an installer-owned chart: the in-workspace copy (so local chart changes apply at once,
 # as for the artifact/infra/data charts), unless --chart-version pins the published one or the bundle has no charts/.
 chart_ref() {
@@ -4064,6 +4262,36 @@ phase_verify_data_layer() {
       log "PASS  OpenSearch (${os_host}) cluster health is green/yellow with the master login."
     else
       log "FAIL  OpenSearch (${os_host}) did not report green/yellow health: ${result}"
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 2b''. Cognito's OIDC discovery document is reachable from the cluster and names the expected issuer.
+  local cg_issuer
+  cg_issuer="$(get_metadata "cognito_issuer")"
+  if [[ -n "${cg_issuer}" ]]; then
+    kubectl delete pod verify-cognito -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    result="$(kubectl run verify-cognito -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
+      --restart=Never --rm -i --quiet \
+      --overrides='{"spec":{"containers":[{"name":"verify-cognito","image":"curlimages/curl:8.11.0","command":["curl","-s","--max-time","20","'"${cg_issuer}"'/.well-known/openid-configuration"],"stdin":true}]}}' \
+      </dev/null 2>&1 || true)"
+    if printf '%s' "${result}" | grep -q "\"issuer\":\"${cg_issuer}\""; then
+      log "PASS  Cognito OIDC discovery answers with issuer ${cg_issuer}."
+    else
+      log "FAIL  Cognito OIDC discovery did not return issuer ${cg_issuer}: ${result}"
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
+  # 2e. The frontend really logs in through Cognito: its OIDC issuer is Cognito's and it has no Dex endpoint override.
+  if [[ -n "${cg_issuer}" ]] && kubectl get deploy straiker-frontend -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    local fe_issuer fe_authz
+    fe_issuer="$(kubectl get deploy straiker-frontend -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OIDC_ISSUER")].value}' 2>/dev/null || true)"
+    fe_authz="$(kubectl get deploy straiker-frontend -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OIDC_AUTHORIZATION_ENDPOINT")].value}' 2>/dev/null || true)"
+    if [[ "${fe_issuer}" == "${cg_issuer}" && -z "${fe_authz}" ]]; then
+      log "PASS  Frontend OIDC issuer is Cognito and uses its discovery document."
+    else
+      log "FAIL  Frontend OIDC is not Cognito-only (issuer '${fe_issuer}', authorization endpoint override '${fe_authz}'); re-run phase 'straiker-core' (--rerun-phase)."
       fail_count=$((fail_count + 1))
     fi
   fi
@@ -4498,6 +4726,43 @@ phase_straiker_core() {
         --set-string "straiker-frontend.frontend.opensearch.url=https://${os_endpoint}"
         --set-string "straiker-frontend.frontend.opensearch.credentialsSecret=opensearch-credentials"
       )
+    fi
+    local cg_secret cg_email
+    cg_secret="$(get_metadata "cognito_secret_name")"
+    if [[ -n "${cg_secret}" ]]; then
+      cg_email="${ADMIN_EMAIL:-$(get_metadata "admin_email")}"
+      if [[ -z "${cg_email}" ]]; then
+        mark_phase_blocked "Cognito is the login: pass --admin-email <address> (the first admin; remembered in install state)."
+        return
+      fi
+      set_metadata "admin_email" "${cg_email}"
+      ensure_cognito_oidc_secret "${cg_secret}" || return
+      ensure_cognito_admin_user "${cg_email}" || return
+      cmd+=(
+        --set "straiker-frontend.dex.enabled=false"
+        --set-string "straiker-frontend.frontend.oidc.issuer=$(get_metadata "cognito_issuer")"
+        --set-string "straiker-frontend.frontend.oidc.clientId=$(get_metadata "cognito_client_id")"
+        --set-string "straiker-frontend.frontend.oidc.clientSecretSecret.name=cognito-oidc"
+        --set-string "straiker-frontend.frontend.oidc.displayName=Sign in"
+        --set-string "straiker-frontend.frontend.oidc.emailIdp=COGNITO"
+        --set-string "straiker-frontend.frontend.bootstrap.adminEmail=${cg_email}"
+        --set-string "straiker-frontend.frontend.bootstrap.disablePasswordLogin=true"
+      )
+      # "Sign in with SSO": the customer's provider (federated into the pool). Its users are created as viewers on
+      # first sign-in, limited to the allowed email domains plus the first admin's own domain.
+      local sso_name sso_domains
+      sso_name="$(get_metadata "sso_name")"
+      if [[ -n "${sso_name}" ]]; then
+        sso_domains="$(get_metadata "sso_domains"),${cg_email#*@}"
+        cmd+=(
+          --set-string "straiker-frontend.frontend.oidc.ssoIdp=${sso_name}"
+          --set "straiker-frontend.frontend.oidc.autoProvision=true"
+          --set-string "straiker-frontend.frontend.oidc.defaultRole=viewer"
+          --set-string "straiker-frontend.frontend.oidc.allowedDomains=${sso_domains//,/\\,}"
+        )
+      else
+        cmd+=(--set "straiker-frontend.frontend.oidc.autoProvision=false")
+      fi
     fi
     ensure_synced_secret frontend-session-source "${CLUSTER_NAME}/frontend/auth" straiker-frontend-auth "%s" \
       "SESSION_SIGNING_KEY" || return
@@ -5618,6 +5883,23 @@ show_access_info() {
 # material goes into terminal scrollback/log files that don't need it;
 # ops fetch it themselves when ready to log in.
 show_bootstrap_admin_reminder() {
+  if [[ -n "$(get_metadata "cognito_pool_id")" ]]; then
+    log ""
+    log "Login is Amazon Cognito (user pool $(get_metadata "cognito_pool_id")). First admin: $(get_metadata "admin_email")."
+    log "Its password is in Secrets Manager; retrieve it with:"
+    log "  aws secretsmanager get-secret-value --secret-id $(get_metadata "cognito_admin_secret_name") --region ${AWS_REGION} --query SecretString --output text"
+    if [[ -n "$(get_metadata "sso_name")" ]]; then
+      log "SSO provider '$(get_metadata "sso_name")' ($(get_metadata "sso_type")) is federated into the pool for: $(get_metadata "sso_domains")."
+    fi
+    log "To register this pool as an application in the customer's identity provider:"
+    log "  SAML  ACS URL: $(get_metadata "cognito_saml_acs_url")"
+    log "        Entity ID / audience: $(get_metadata "cognito_entity_id")   (attribute: email)"
+    log "  OIDC  redirect URI: $(get_metadata "cognito_oidc_redirect_uri")"
+    log "Add or change the SSO provider: re-run phases aws-data and straiker-core with the --sso-* flags."
+    log "Add more users by creating them in the pool (aws cognito-idp admin-create-user ...) and in Straiker's"
+    log "Users page. If you are ever locked out, re-run phase straiker-core with --reset-admin-password."
+    return
+  fi
   log ""
   log "Bootstrap admin login: admin@straiker.internal — a random password was"
   log "generated for this install. Retrieve it with:"
