@@ -85,6 +85,29 @@ output "cognito_pools" {
   }
 }
 
+output "ses_domains" {
+  description = "Per SES domain: identity ARN, sender address, configuration set, the name servers of a created zone (delegate them from the parent zone) and the DNS records SES needs."
+  value = {
+    for k, d in var.ses_domains : k => {
+      domain            = d.domain
+      identity_arn      = aws_sesv2_email_identity.this[k].arn
+      sender            = "${d.sender_local_part}@${d.domain}"
+      configuration_set = aws_sesv2_configuration_set.this[k].configuration_set_name
+      name_servers      = try(aws_route53_zone.ses[k].name_servers, [])
+      dns_records = concat(
+        [for t in aws_sesv2_email_identity.this[k].dkim_signing_attributes[0].tokens : {
+          name = "${t}._domainkey.${d.domain}", type = "CNAME", value = "${t}.dkim.amazonses.com"
+        }],
+        [
+          { name = "${d.mail_from_subdomain}.${d.domain}", type = "MX", value = "10 feedback-smtp.${var.region}.amazonses.com" },
+          { name = "${d.mail_from_subdomain}.${d.domain}", type = "TXT", value = "v=spf1 include:amazonses.com ~all" },
+          { name = "_dmarc.${d.domain}", type = "TXT", value = "v=DMARC1; p=none;" },
+        ],
+      )
+    }
+  }
+}
+
 output "msk_cluster_arns" {
   value = { for k, c in aws_msk_serverless_cluster.this : k => c.arn }
 }

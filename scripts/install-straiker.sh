@@ -125,6 +125,12 @@ SSO_SAML_METADATA_URL="${SSO_SAML_METADATA_URL:-}"
 SSO_OIDC_ISSUER="${SSO_OIDC_ISSUER:-}"
 SSO_OIDC_CLIENT_ID="${SSO_OIDC_CLIENT_ID:-}"
 SSO_DOMAINS="${SSO_DOMAINS:-}"
+
+# --data-layer: Amazon SES sending domain (Cognito mail from no-reply@, connect from notifications@).
+# DNS records go into a Route53 zone of this account (found automatically, or created for the domain; then its NS
+# records must be delegated from the parent zone). Remembered in install state.
+SES_DOMAIN="${SES_DOMAIN:-}"
+SES_ROUTE53_ZONE_ID="${SES_ROUTE53_ZONE_ID:-}"
 # Aurora roles whose passwords live in Secrets Manager "<cluster>/db/passwords" (charts/straiker-data databases + readers).
 DB_PASSWORD_ROLES="foundation registry databridge connect notify frontend iris bifrost grid_cdc"
 # ClickHouse users (chart straiker-clickhouse `users`) whose passwords live in "<cluster>/clickhouse/credentials".
@@ -657,6 +663,12 @@ Options:
                                    --sso-oidc-client-id <id> with the secret in env SSO_OIDC_CLIENT_SECRET (OIDC).
                                    Remembered in install state; re-run phases aws-data and straiker-core to apply.
   --sso-domains <a.com,b.com>      Email domains allowed to sign in through SSO (new users are created as viewers).
+  --ses-domain <domain>            With --data-layer: sending domain in Amazon SES. Cognito invitations / password
+                                   resets come from no-reply@<domain>, connect from notifications@<domain>. DNS
+                                   records are created in a Route53 zone of this account (found automatically,
+                                   or created for the domain: delegate its NS records from the parent zone).
+                                   New SES accounts are in the sandbox until AWS grants production access.
+  --ses-route53-zone-id <id>       Use this hosted zone for the SES DNS records instead of detecting one.
   --custom-domain <domain>         Used when --edge-type none, alb, or tailscale is selected.
                                    Sets straiker-core's/straiker-ascend's
                                    OIDC-redirect-URI/CORS overrides to
@@ -1516,6 +1528,14 @@ parse_args() {
         ;;
       --sso-domains)
         SSO_DOMAINS=${2:-}
+        shift 2
+        ;;
+      --ses-domain)
+        SES_DOMAIN=${2:-}
+        shift 2
+        ;;
+      --ses-route53-zone-id)
+        SES_ROUTE53_ZONE_ID=${2:-}
         shift 2
         ;;
       --straiker-customer-name)
@@ -2786,16 +2806,56 @@ EOF
   TF_VAR_cognito_identity_providers="$(sso_identity_providers_json)"
   export TF_VAR_cognito_identity_providers
 
+  remember_ses_settings || return
+  TF_VAR_ses_domains="$(ses_domains_json)"
+  export TF_VAR_ses_domains
+  # Cognito needs its service-linked role to send through SES; decided once and remembered (like OpenSearch's).
+  local cog_slr
+  cog_slr="$(get_metadata "cognito_create_email_slr")"
+  if [[ -z "${cog_slr}" ]]; then
+    if aws iam get-role --role-name AWSServiceRoleForAmazonCognitoIdp >/dev/null 2>&1; then cog_slr=false; else cog_slr=true; fi
+    set_metadata "cognito_create_email_slr" "${cog_slr}"
+  fi
+
+  # $1 = cognito_use_ses (true once the SES identity is verified).
+  data_apply() {
+    tofu -chdir="${DATA_DIR}" apply -auto-approve -input=false \
+      -var="region=${AWS_REGION}" \
+      -var="cluster_name=${CLUSTER_NAME}" \
+      -var="vpc_id=${vpc_id}" \
+      -var="private_subnet_ids=${subnet_ids}" \
+      -var="provision_strategy=${PROVISION_STRATEGY}" \
+      -var="create_opensearch_service_linked_role=${os_slr}" \
+      -var="create_cognito_email_service_linked_role=${cog_slr}" \
+      -var="cognito_use_ses=$1" \
+      -var="cognito_callback_urls=[\"$(app_origin)/login/oidc/callback\"]" \
+      -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
+  }
+
   tofu -chdir="${DATA_DIR}" init -upgrade -input=false -migrate-state -force-copy
-  tofu -chdir="${DATA_DIR}" apply -auto-approve -input=false \
-    -var="region=${AWS_REGION}" \
-    -var="cluster_name=${CLUSTER_NAME}" \
-    -var="vpc_id=${vpc_id}" \
-    -var="private_subnet_ids=${subnet_ids}" \
-    -var="provision_strategy=${PROVISION_STRATEGY}" \
-    -var="create_opensearch_service_linked_role=${os_slr}" \
-    -var="cognito_callback_urls=[\"$(app_origin)/login/oidc/callback\"]" \
-    -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
+  local use_ses=false
+  ses_identity_verified && use_ses=true
+  data_apply "${use_ses}"
+
+  # First run: SES was just created. Wait for its DNS records to verify (unless the zone still needs delegating),
+  # then switch Cognito's mail to it; otherwise a later run of this phase does the switch.
+  if [[ -n "$(get_metadata "ses_domain")" && "${use_ses}" != "true" ]]; then
+    if [[ "$(get_metadata "ses_zone_mode")" == "create" ]]; then
+      log "SES domain $(get_metadata "ses_domain") is not verified yet: delegate its Route53 name servers from the parent zone, then re-run phase aws-data to switch Cognito to SES."
+    else
+      log "Waiting for SES to verify $(get_metadata "ses_domain") (up to 10 minutes)..."
+      local ses_try
+      for ses_try in $(seq 1 40); do
+        ses_identity_verified && break
+        sleep 15
+      done
+      if ses_identity_verified; then
+        data_apply true
+      else
+        log "SES has not verified $(get_metadata "ses_domain") yet; re-run phase aws-data later to switch Cognito to SES."
+      fi
+    fi
+  fi
 
   out() { tofu -chdir="${DATA_DIR}" output -raw "$1" 2>/dev/null || true; }
   set_metadata "aurora_endpoint" "$(out aurora_endpoint)"
@@ -2849,6 +2909,10 @@ EOF
   for cf in pool_id issuer client_id secret_name admin_secret_name saml_acs_url entity_id oidc_redirect_uri; do
     set_metadata "cognito_${cf}" "$(printf '%s' "${cognito_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("'"${cf}"'",""))' 2>/dev/null || true)"
   done
+  local ses_json
+  ses_json="$(tofu -chdir="${DATA_DIR}" output -json ses_domains 2>/dev/null || echo '{}')"
+  set_metadata "ses_sender" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("sender",""))' 2>/dev/null || true)"
+  set_metadata "ses_name_servers" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("main",{}).get("name_servers",[])))' 2>/dev/null || true)"
   set_metadata "msk_cluster_arn" "$(tofu -chdir="${DATA_DIR}" output -json msk_cluster_arns 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("bus") or next(iter(d.values()), ""))' 2>/dev/null || true)"
   set_metadata "efs_file_system_id" "$(tofu -chdir="${DATA_DIR}" output -json efs_file_system_ids 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("models") or next(iter(d.values()), ""))' 2>/dev/null || true)"
   set_metadata "grid_artifacts_bucket" "$(tofu -chdir="${DATA_DIR}" output -json s3_bucket_names 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("grid-artifacts",""))' 2>/dev/null || true)"
@@ -4097,6 +4161,70 @@ else:
 print(json.dumps({e["NAME"]: p}))'
 }
 
+# Validates and remembers the SES domain, and decides once how its DNS is handled: an existing public Route53 zone of
+# this account (the longest zone name the domain falls under), else a zone created for the domain. The choice is
+# remembered: a zone created by Terraform must never be reclassified as "existing" (Terraform would destroy it).
+remember_ses_settings() {
+  [[ -n "${SES_DOMAIN}" ]] || return 0
+  set_metadata "ses_domain" "${SES_DOMAIN}"
+  if [[ -n "$(get_metadata "ses_zone_mode")" && -z "${SES_ROUTE53_ZONE_ID}" ]]; then
+    return 0
+  fi
+  local zone_id="${SES_ROUTE53_ZONE_ID}"
+  if [[ -z "${zone_id}" ]]; then
+    zone_id="$(aws route53 list-hosted-zones --output json | DOMAIN="${SES_DOMAIN}" python3 -c '
+import json, os, sys
+d = os.environ["DOMAIN"].rstrip(".").lower()
+best = None
+for z in json.load(sys.stdin)["HostedZones"]:
+    if z["Config"].get("PrivateZone"):
+        continue
+    n = z["Name"].rstrip(".").lower()
+    if (d == n or d.endswith("." + n)) and (best is None or len(n) > len(best[0])):
+        best = (n, z["Id"].split("/")[-1])
+print(best[1] if best else "")')"
+  fi
+  if [[ -n "${zone_id}" ]]; then
+    set_metadata "ses_zone_mode" "existing"
+    set_metadata "ses_zone_id" "${zone_id}"
+    log "SES DNS records go into the existing Route53 zone ${zone_id}."
+  else
+    set_metadata "ses_zone_mode" "create"
+    set_metadata "ses_zone_id" ""
+    log "No public Route53 zone covers ${SES_DOMAIN}: one will be created; delegate its name servers from the parent zone."
+  fi
+}
+
+# JSON for Terraform's ses_domains from the remembered settings ({} when none).
+ses_domains_json() {
+  local domain mode zone
+  domain="$(get_metadata "ses_domain")"
+  if [[ -z "${domain}" ]]; then
+    printf '{}'
+    return 0
+  fi
+  mode="$(get_metadata "ses_zone_mode")"
+  zone="$(get_metadata "ses_zone_id")"
+  DOMAIN="${domain}" MODE="${mode}" ZONE="${zone}" python3 -c '
+import json, os
+e = os.environ
+d = {"domain": e["DOMAIN"]}
+if e["MODE"] == "create":
+    d["create_route53_zone"] = True
+elif e["ZONE"]:
+    d["route53_zone_id"] = e["ZONE"]
+print(json.dumps({"main": d}))'
+}
+
+# True when SES reports the SES domain verified for sending (its DNS records resolve).
+ses_identity_verified() {
+  local domain status
+  domain="$(get_metadata "ses_domain")"
+  [[ -n "${domain}" ]] || return 1
+  status="$(aws sesv2 get-email-identity --email-identity "${domain}" --region "${AWS_REGION}" --query VerifiedForSendingStatus --output text 2>/dev/null || true)"
+  [[ "${status}" == "True" ]]
+}
+
 # Chart reference for an installer-owned chart: the in-workspace copy (so local chart changes apply at once,
 # as for the artifact/infra/data charts), unless --chart-version pins the published one or the bundle has no charts/.
 chart_ref() {
@@ -4296,6 +4424,22 @@ phase_verify_data_layer() {
     fi
   fi
 
+  # 2f. SES sending domain: verification and DKIM, plus the sandbox state (warnings only: DNS delegation and AWS's
+  # production-access approval are outside the install).
+  local ses_dom ses_info
+  ses_dom="$(get_metadata "ses_domain")"
+  if [[ -n "${ses_dom}" ]]; then
+    ses_info="$(aws sesv2 get-email-identity --email-identity "${ses_dom}" --region "${AWS_REGION}" --query '[VerifiedForSendingStatus,DkimAttributes.Status]' --output text 2>/dev/null || true)"
+    if [[ "${ses_info}" == "True"$'\t'"SUCCESS" ]]; then
+      log "PASS  SES domain ${ses_dom} is verified (DKIM SUCCESS)."
+    else
+      log "WARN  SES domain ${ses_dom} is not verified yet (status: ${ses_info:-unknown}); check its DNS records / delegation."
+    fi
+    if [[ "$(aws sesv2 get-account --region "${AWS_REGION}" --query ProductionAccessEnabled --output text 2>/dev/null || true)" != "True" ]]; then
+      log "WARN  SES is still in the sandbox in ${AWS_REGION}: mail only reaches verified addresses until AWS grants production access."
+    fi
+  fi
+
   # 2c. Ascend really uses the iris cache secret (not a default in-cluster Redis), once Ascend is installed.
   if [[ -n "${iris_redis_host}" ]] && kubectl get deploy straiker-ascend-control-plane -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
     local ascend_redis_secret
@@ -4436,7 +4580,12 @@ phase_platform_services() {
       foundation) extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}") ;;
       registry) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/") ;;
       databridge) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/databridge/") ;;
-      connect) extra+=(--set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/connect/" --set-string "${key}.email.region=${AWS_REGION}" --set-string "${key}.notify.bus.sasl.region=${AWS_REGION}") ;;
+      connect)
+        extra+=(--set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/connect/" --set-string "${key}.email.region=${AWS_REGION}" --set-string "${key}.notify.bus.sasl.region=${AWS_REGION}")
+        if [[ -n "$(get_metadata "ses_domain")" ]]; then
+          extra+=(--set-string "${key}.email.defaultFrom=notifications@$(get_metadata "ses_domain")")
+        fi
+        ;;
       portico) extra+=(--set-string "${key}.internalApi.url=http://straiker-frontend-service.${INFRA_NAMESPACE}.svc.cluster.local") ;;
       grid)
         extra+=(--set-string "${key}.registryBaseURL=http://registry.${INFRA_NAMESPACE}.svc.cluster.local:80")
@@ -5896,6 +6045,13 @@ show_bootstrap_admin_reminder() {
     log "        Entity ID / audience: $(get_metadata "cognito_entity_id")   (attribute: email)"
     log "  OIDC  redirect URI: $(get_metadata "cognito_oidc_redirect_uri")"
     log "Add or change the SSO provider: re-run phases aws-data and straiker-core with the --sso-* flags."
+    if [[ -n "$(get_metadata "ses_domain")" ]]; then
+      log "Email: SES domain $(get_metadata "ses_domain") (sender $(get_metadata "ses_sender"))."
+      if [[ -n "$(get_metadata "ses_name_servers")" ]]; then
+        log "  A Route53 zone was created for it: add these NS records for $(get_metadata "ses_domain") in the parent zone: $(get_metadata "ses_name_servers")"
+      fi
+      log "  SES starts in the sandbox: request production access in the SES console to mail unverified recipients."
+    fi
     log "Add more users by creating them in the pool (aws cognito-idp admin-create-user ...) and in Straiker's"
     log "Users page. If you are ever locked out, re-run phase straiker-core with --reset-admin-password."
     return

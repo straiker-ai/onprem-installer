@@ -262,6 +262,40 @@ variable "cognito_identity_providers" {
   }
 }
 
+variable "ses_domains" {
+  description = <<-EOT
+    Amazon SES sending domains, keyed by stable name ("main" = the one Cognito and connect use). SaaS shape:
+    a verified domain identity with DKIM (RSA 2048), a custom MAIL FROM domain and a configuration set that
+    requires TLS; no dedicated IP pool. Senders: no-reply@<domain> (Cognito), notifications@<domain> (connect).
+      route53_zone_id      public hosted zone (this account) to create the DKIM / MAIL FROM / DMARC records in
+      create_route53_zone  create that public zone for the domain; its NS records must then be added to the
+                           parent zone (SES verifies the domain only once DNS resolves)
+    Neither set: the DNS records are only printed (output ses_domains.*.dns_records). SES accounts start in
+    the sandbox (mail only to verified addresses): request production access with AWS.
+  EOT
+  type = map(object({
+    domain              = string
+    route53_zone_id     = optional(string)
+    create_route53_zone = optional(bool, false)
+    mail_from_subdomain = optional(string, "bounce")
+    sender_local_part   = optional(string, "no-reply")
+    tags                = optional(map(string), {})
+  }))
+  default = {}
+}
+
+variable "cognito_use_ses" {
+  description = "Cognito sends invitation and password-reset mail through the \"main\" SES domain instead of its default sender (50 mails a day). Set by the installer once the SES identity is verified."
+  type        = bool
+  default     = false
+}
+
+variable "create_cognito_email_service_linked_role" {
+  description = "Create AWSServiceRoleForAmazonCognitoIdp (Cognito needs it to send through SES). The installer sets this from a one-time check and remembers it."
+  type        = bool
+  default     = false
+}
+
 variable "cognito_callback_urls" {
   description = "OIDC callback URLs of the frontend (https://<app host>/login/oidc/callback) allowed on the Cognito app client; the installer derives them from the edge hostname."
   type        = list(string)

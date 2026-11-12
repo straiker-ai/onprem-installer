@@ -2,6 +2,7 @@
 # without its Lambda triggers (multi-tenant claims, PAT token exchange) and Google/customer SSO federation.
 
 locals {
+  cognito_ses  = var.cognito_use_ses && contains(keys(var.ses_domains), "main")
   cognito_name = { for k, _ in var.cognito_pools : k => k == "main" ? "${local.name}-pool" : "${local.name}-${k}-pool" }
 }
 
@@ -33,8 +34,21 @@ resource "aws_cognito_user_pool" "this" {
     attributes_require_verification_before_update = ["email"]
   }
 
-  email_configuration {
-    email_sending_account = "COGNITO_DEFAULT"
+  # Through the verified SES domain once it is ready (installer: cognito_use_ses); else Cognito's default sender.
+  dynamic "email_configuration" {
+    for_each = each.key == "main" && local.cognito_ses ? [1] : []
+    content {
+      email_sending_account = "DEVELOPER"
+      from_email_address    = "Straiker <${var.ses_domains["main"].sender_local_part}@${var.ses_domains["main"].domain}>"
+      source_arn            = aws_sesv2_email_identity.this["main"].arn
+      configuration_set     = aws_sesv2_configuration_set.this["main"].configuration_set_name
+    }
+  }
+  dynamic "email_configuration" {
+    for_each = each.key == "main" && local.cognito_ses ? [] : [1]
+    content {
+      email_sending_account = "COGNITO_DEFAULT"
+    }
   }
 
   password_policy {
@@ -58,6 +72,8 @@ resource "aws_cognito_user_pool" "this" {
   }
 
   tags = merge(local.common_tags, each.value.tags, { Name = local.cognito_name[each.key] })
+
+  depends_on = [aws_iam_service_linked_role.cognito_email]
 
   lifecycle {
     # Cognito rejects changes to an existing attribute's schema; the provider would otherwise plan a replacement.
