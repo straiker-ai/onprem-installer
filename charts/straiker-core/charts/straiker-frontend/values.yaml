@@ -153,6 +153,9 @@ frontend:
   bootstrap:
     enabled: true
     adminEmail: ""
+    # "true"/"false": set customers.disable_password_login on every bootstrap run (true hides the bundled Dex
+    # login and makes the UI add users without Dex accounts). "" leaves the stored value alone.
+    disablePasswordLogin: ""
     customerName: "My Company"
     image:
       repository: library/postgres
@@ -188,6 +191,15 @@ frontend:
     issuer: ""
     clientId: ""
     clientSecret: ""
+    # Read the client secret from an existing Secret (e.g. synced from Secrets Manager) instead of clientSecret.
+    clientSecretSecret:
+      name: ""
+      key: client_secret
+    # Split the login into "Sign in with email" / "Sign in with SSO" buttons through the same OIDC provider
+    # (Cognito's identity_provider parameter). emailIdp: COGNITO = the user pool's own form. ssoIdp: the customer's
+    # federated provider's name; unset = no SSO button. Both empty = one generic button.
+    emailIdp: ""
+    ssoIdp: ""
     authorizationEndpoint: ""
     tokenEndpoint: ""
     jwksUri: ""

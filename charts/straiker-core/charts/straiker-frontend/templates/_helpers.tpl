@@ -170,15 +170,28 @@ them together to point at a customer's own external IdP instead. */}}
 {{- .Values.frontend.oidc.clientSecret | default .Values.dex.staticClient.secret -}}
 {{- end }}
 
+{{/* The endpoints default to the bundled dex only while no external issuer is set; with frontend.oidc.issuer set
+(e.g. Cognito) they stay empty so the frontend uses the issuer's own OIDC discovery document. */}}
 {{- define "frontend.oidcAuthorizationEndpoint" -}}
-{{- .Values.frontend.oidc.authorizationEndpoint | default (printf "%s/dex/auth" (include "frontend.origin" .)) -}}
+{{- if .Values.frontend.oidc.authorizationEndpoint -}}
+{{- .Values.frontend.oidc.authorizationEndpoint -}}
+{{- else if not .Values.frontend.oidc.issuer -}}
+{{- printf "%s/dex/auth" (include "frontend.origin" .) -}}
+{{- end -}}
 {{- end }}
 
 {{- define "frontend.oidcTokenEndpoint" -}}
-{{- .Values.frontend.oidc.tokenEndpoint | default (printf "%s/dex/token" (include "dex.internalUrl" .)) -}}
+{{- if .Values.frontend.oidc.tokenEndpoint -}}
+{{- .Values.frontend.oidc.tokenEndpoint -}}
+{{- else if not .Values.frontend.oidc.issuer -}}
+{{- printf "%s/dex/token" (include "dex.internalUrl" .) -}}
+{{- end -}}
 {{- end }}
 
 {{- define "frontend.oidcJwksUri" -}}
-{{- .Values.frontend.oidc.jwksUri | default (printf "%s/dex/keys" (include "dex.internalUrl" .)) -}}
+{{- if .Values.frontend.oidc.jwksUri -}}
+{{- .Values.frontend.oidc.jwksUri -}}
+{{- else if not .Values.frontend.oidc.issuer -}}
+{{- printf "%s/dex/keys" (include "dex.internalUrl" .) -}}
+{{- end -}}
 {{- end }}
-

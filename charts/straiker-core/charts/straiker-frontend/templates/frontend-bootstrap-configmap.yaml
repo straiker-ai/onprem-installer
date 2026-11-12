@@ -35,8 +35,12 @@ data:
     -- the default self-hosted tenant always gets a seeded admin account.
 
     INSERT INTO customers (name, disable_password_login)
-    SELECT COALESCE(NULLIF(:'customer_name', ''), 'My Company'), false
+    SELECT COALESCE(NULLIF(:'customer_name', ''), 'My Company'), COALESCE(NULLIF(:'disable_password_login', ''), 'false')::boolean
     WHERE NOT EXISTS (SELECT 1 FROM customers);
+
+    -- Chart value frontend.bootstrap.disablePasswordLogin ("" = leave the stored value alone).
+    UPDATE customers SET disable_password_login = NULLIF(:'disable_password_login', '')::boolean
+    WHERE NULLIF(:'disable_password_login', '') IS NOT NULL;
 
     INSERT INTO onprem_users (email, straiker_id, role)
     SELECT

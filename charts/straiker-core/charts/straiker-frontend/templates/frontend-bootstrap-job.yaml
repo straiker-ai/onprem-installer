@@ -41,6 +41,7 @@ spec:
                 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
                 -v "admin_email=$ADMIN_EMAIL" \
                 -v "customer_name=$CUSTOMER_NAME" \
+                -v "disable_password_login=$DISABLE_PASSWORD_LOGIN" \
                 -f /bootstrap.sql
           env:
             - name: DB_HOST
@@ -60,6 +61,8 @@ spec:
               value: {{ include "frontend.bootstrapAdminEmail" . | quote }}
             - name: CUSTOMER_NAME
               value: {{ .Values.frontend.bootstrap.customerName | quote }}
+            - name: DISABLE_PASSWORD_LOGIN
+              value: {{ .Values.frontend.bootstrap.disablePasswordLogin | toString | quote }}
           volumeMounts:
             - name: bootstrap-sql
               mountPath: /bootstrap.sql

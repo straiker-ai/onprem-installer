@@ -123,7 +123,14 @@ spec:
             - name: OIDC_CLIENT_ID
               value: {{ include "frontend.oidcClientId" . | quote }}
             - name: OIDC_CLIENT_SECRET
+              {{- if .Values.frontend.oidc.clientSecretSecret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frontend.oidc.clientSecretSecret.name | quote }}
+                  key: {{ .Values.frontend.oidc.clientSecretSecret.key | quote }}
+              {{- else }}
               value: {{ include "frontend.oidcClientSecret" . | quote }}
+              {{- end }}
             - name: OIDC_AUTHORIZATION_ENDPOINT
               value: {{ include "frontend.oidcAuthorizationEndpoint" . | quote }}
             - name: OIDC_TOKEN_ENDPOINT
@@ -135,11 +142,19 @@ spec:
             - name: OIDC_SCOPES
               value: {{ .Values.frontend.oidc.scopes | default "openid email profile" | quote }}
             - name: OIDC_AUTO_PROVISION
-              value: {{ .Values.frontend.oidc.autoProvision | default true | quote }}
+              value: {{ .Values.frontend.oidc.autoProvision | quote }}
             - name: OIDC_DEFAULT_ROLE
               value: {{ .Values.frontend.oidc.defaultRole | default "viewer" | quote }}
             - name: OIDC_ALLOWED_DOMAINS
               value: {{ .Values.frontend.oidc.allowedDomains | default "" | quote }}
+            {{- if .Values.frontend.oidc.emailIdp }}
+            - name: OIDC_EMAIL_IDP
+              value: {{ .Values.frontend.oidc.emailIdp | quote }}
+            {{- end }}
+            {{- if .Values.frontend.oidc.ssoIdp }}
+            - name: OIDC_SSO_IDP
+              value: {{ .Values.frontend.oidc.ssoIdp | quote }}
+            {{- end }}
             {{- end }}
             # Internal services — optional, omitted entirely if unset (argus/
             # iris/scout aren't built in this chart family yet).
