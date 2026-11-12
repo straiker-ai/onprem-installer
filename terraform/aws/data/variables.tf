@@ -214,6 +214,60 @@ variable "create_opensearch_service_linked_role" {
   default     = false
 }
 
+# ---------------------------------------------------------------- Cognito
+
+variable "cognito_pools" {
+  description = <<-EOT
+    Amazon Cognito user pools (pool "<cluster>-pool" for key "main"), keyed by stable name: the frontend's login
+    (OIDC, authorization code flow). SaaS settings: sign-in by email, admin-created users only, same password
+    policy; no Lambda triggers (SaaS multi-tenancy). One confidential app client "<cluster>-frontend". The client
+    secret and issuer are published in Secrets Manager "<cluster>/cognito/<key>"; a generated first-admin password
+    in "<cluster>/cognito/<key>-admin". Deletion protection follows provision_strategy (off for min).
+  EOT
+  type = map(object({
+    tags = optional(map(string), {})
+  }))
+  default = { main = {} }
+}
+
+variable "cognito_identity_providers" {
+  description = <<-EOT
+    The customer's own identity providers, federated into the "main" Cognito pool (name = Cognito provider name).
+      type                SAML (needs saml_metadata_url) or OIDC (oidc_issuer, oidc_client_id, oidc_client_secret)
+      email_claim         the provider's claim/attribute carrying the user's email (default: SAML
+                          http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress, OIDC email)
+      domains             email domains that may use this provider (Cognito idp_identifiers)
+    Register the pool as the provider's relying party using outputs cognito_pools.main.saml_acs_url / entity_id
+    (SAML) or oidc_redirect_uri (OIDC). Sensitive (OIDC client secret); the installer passes it via TF_VAR.
+  EOT
+  type = map(object({
+    type               = string
+    saml_metadata_url  = optional(string)
+    oidc_issuer        = optional(string)
+    oidc_client_id     = optional(string)
+    oidc_client_secret = optional(string)
+    email_claim        = optional(string)
+    domains            = optional(list(string), [])
+  }))
+  default   = {}
+  sensitive = true
+
+  validation {
+    condition = alltrue([
+      for p in values(var.cognito_identity_providers) :
+      (p.type == "SAML" && p.saml_metadata_url != null) ||
+      (p.type == "OIDC" && p.oidc_issuer != null && p.oidc_client_id != null && p.oidc_client_secret != null)
+    ])
+    error_message = "Each identity provider needs type SAML + saml_metadata_url, or type OIDC + oidc_issuer, oidc_client_id and oidc_client_secret."
+  }
+}
+
+variable "cognito_callback_urls" {
+  description = "OIDC callback URLs of the frontend (https://<app host>/login/oidc/callback) allowed on the Cognito app client; the installer derives them from the edge hostname."
+  type        = list(string)
+  default     = ["https://app.straiker.internal:8443/login/oidc/callback"]
+}
+
 # ---------------------------------------------------------------- MSK
 
 variable "msk_clusters" {

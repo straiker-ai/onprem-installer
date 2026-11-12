@@ -68,6 +68,23 @@ output "opensearch_domains" {
   }
 }
 
+output "cognito_pools" {
+  description = "Per Cognito pool: id, OIDC issuer, app client id, hosted-UI domain and the Secrets Manager secrets (client secret; first-admin password)."
+  value = {
+    for k, p in aws_cognito_user_pool.this : k => {
+      pool_id           = p.id
+      issuer            = "https://cognito-idp.${var.region}.amazonaws.com/${p.id}"
+      client_id         = aws_cognito_user_pool_client.frontend[k].id
+      domain            = "https://${aws_cognito_user_pool_domain.this[k].domain}.auth.${var.region}.amazoncognito.com"
+      saml_acs_url      = "https://${aws_cognito_user_pool_domain.this[k].domain}.auth.${var.region}.amazoncognito.com/saml2/idpresponse"
+      entity_id         = "urn:amazon:cognito:sp:${p.id}"
+      oidc_redirect_uri = "https://${aws_cognito_user_pool_domain.this[k].domain}.auth.${var.region}.amazoncognito.com/oauth2/idpresponse"
+      secret_name       = aws_secretsmanager_secret.cognito[k].name
+      admin_secret_name = aws_secretsmanager_secret.cognito_admin[k].name
+    }
+  }
+}
+
 output "msk_cluster_arns" {
   value = { for k, c in aws_msk_serverless_cluster.this : k => c.arn }
 }
