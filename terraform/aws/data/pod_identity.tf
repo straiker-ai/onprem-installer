@@ -111,7 +111,10 @@ data "aws_iam_policy_document" "pod" {
     content {
       sid       = "SesSend"
       actions   = ["ses:SendEmail", "ses:SendRawEmail"]
-      resources = ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/*"]
+      resources = concat(
+        ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/*"],
+        var.ses_existing == null ? [] : [var.ses_existing.identity_arn],
+      )
     }
   }
 

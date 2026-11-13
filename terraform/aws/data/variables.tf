@@ -349,8 +349,39 @@ variable "ses_domains" {
   default = {}
 }
 
+variable "ses_existing" {
+  description = <<-EOT
+    The customer's own, already verified SES identity (domain or address), used instead of creating one (ses_domains).
+    Nothing is created for it: Cognito sends through it, connect's IAM may send from it.
+      identity_arn       arn:aws:ses:<region>:<account>:identity/<name>; another account's identity needs a sending
+                         authorization policy that allows this account's Cognito / connect role to use it
+      from_address       the From address Cognito uses (must belong to that identity)
+      configuration_set  optional configuration set name (this account and region) for Cognito's mail
+    Mutually exclusive with ses_domains.
+  EOT
+  type = object({
+    identity_arn      = string
+    from_address      = string
+    configuration_set = optional(string)
+  })
+  default = null
+
+  validation {
+    condition     = var.ses_existing == null || can(regex("^arn:aws[a-z-]*:ses:[a-z0-9-]+:[0-9]{12}:identity/.+$", var.ses_existing.identity_arn))
+    error_message = "ses_existing.identity_arn must be an SES identity ARN (arn:aws:ses:<region>:<account>:identity/<name>)."
+  }
+  validation {
+    condition     = var.ses_existing == null || can(regex("^[^@\\s<>]+@[^@\\s<>]+\\.[^@\\s<>]+$", var.ses_existing.from_address))
+    error_message = "ses_existing.from_address must be an email address."
+  }
+  validation {
+    condition     = var.ses_existing == null || length(var.ses_domains) == 0
+    error_message = "ses_existing and ses_domains are mutually exclusive: use the customer's SES or create one, not both."
+  }
+}
+
 variable "cognito_use_ses" {
-  description = "Cognito sends invitation and password-reset mail through the \"main\" SES domain instead of its default sender (50 mails a day). Set by the installer once the SES identity is verified."
+  description = "Cognito sends invitation and password-reset mail through the \"main\" SES domain instead of its default sender (50 mails a day). Set by the installer once the SES identity (the installer-created domain or ses_existing) is verified."
   type        = bool
   default     = false
 }

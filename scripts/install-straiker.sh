@@ -141,6 +141,10 @@ ROTATE_ADMIN_PASSWORD="${ROTATE_ADMIN_PASSWORD:-false}"
 # records must be delegated from the parent zone). Remembered in install state.
 SES_DOMAIN="${SES_DOMAIN:-}"
 SES_ROUTE53_ZONE_ID="${SES_ROUTE53_ZONE_ID:-}"
+# Alternative: the customer's own SES identity (nothing is created): --ses-identity-arn + --ses-from.
+SES_IDENTITY_ARN="${SES_IDENTITY_ARN:-}"
+SES_FROM="${SES_FROM:-}"
+SES_CONFIGURATION_SET="${SES_CONFIGURATION_SET:-}"
 # Aurora roles whose passwords live in Secrets Manager "<cluster>/db/passwords" (charts/straiker-data databases + readers).
 DB_PASSWORD_ROLES="foundation registry databridge connect notify frontend iris bifrost grid_cdc"
 # ClickHouse users (chart straiker-clickhouse `users`) whose passwords live in "<cluster>/clickhouse/credentials".
@@ -694,6 +698,12 @@ Options:
                                    or created for the domain: delegate its NS records from the parent zone).
                                    New SES accounts are in the sandbox until AWS grants production access.
   --ses-route53-zone-id <id>       Use this hosted zone for the SES DNS records instead of detecting one.
+  --ses-identity-arn <arn>         With --data-layer: use the customer's own, already verified SES identity instead of
+                                   creating one (excludes --ses-domain; needs --ses-from). Nothing is created for it.
+                                   An identity in another account needs a sending authorization policy that allows
+                                   this account's Cognito and connect to use it.
+  --ses-from <address>             The From address on that identity (Cognito mail; connect uses it too).
+  --ses-configuration-set <name>   Optional SES configuration set (this account and region) for Cognito's mail.
   --custom-domain <domain>         Used when --edge-type none, alb, or tailscale is selected.
                                    Sets straiker-core's/straiker-ascend's
                                    OIDC-redirect-URI/CORS overrides to
@@ -1598,6 +1608,18 @@ parse_args() {
         ;;
       --ses-route53-zone-id)
         SES_ROUTE53_ZONE_ID=${2:-}
+        shift 2
+        ;;
+      --ses-identity-arn)
+        SES_IDENTITY_ARN=${2:-}
+        shift 2
+        ;;
+      --ses-from)
+        SES_FROM=${2:-}
+        shift 2
+        ;;
+      --ses-configuration-set)
+        SES_CONFIGURATION_SET=${2:-}
         shift 2
         ;;
       --straiker-customer-name)
@@ -2870,7 +2892,8 @@ EOF
 
   remember_ses_settings || return
   TF_VAR_ses_domains="$(ses_domains_json)"
-  export TF_VAR_ses_domains
+  TF_VAR_ses_existing="$(ses_existing_json)"
+  export TF_VAR_ses_domains TF_VAR_ses_existing
   # Cognito needs its service-linked role to send through SES; decided once and remembered (like OpenSearch's).
   local cog_slr
   cog_slr="$(get_metadata "cognito_create_email_slr")"
@@ -2898,6 +2921,9 @@ EOF
   local use_ses=false
   ses_identity_verified && use_ses=true
   data_apply "${use_ses}"
+  if [[ -n "$(get_metadata "ses_existing_arn")" && "${use_ses}" != "true" ]]; then
+    log "The customer's SES identity $(get_metadata "ses_existing_arn") is not verified for sending: Cognito keeps its default sender; fix the identity, then re-run phase aws-data."
+  fi
 
   # First run: SES was just created. Wait for its DNS records to verify (unless the zone still needs delegating),
   # then switch Cognito's mail to it; otherwise a later run of this phase does the switch.
@@ -2975,6 +3001,9 @@ EOF
   local ses_json
   ses_json="$(tofu -chdir="${DATA_DIR}" output -json ses_domains 2>/dev/null || echo '{}')"
   set_metadata "ses_sender" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("sender",""))' 2>/dev/null || true)"
+  if [[ -n "$(get_metadata "ses_existing_arn")" ]]; then
+    set_metadata "ses_sender" "$(get_metadata "ses_from")"
+  fi
   set_metadata "ses_name_servers" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("main",{}).get("name_servers",[])))' 2>/dev/null || true)"
   set_metadata "msk_cluster_arn" "$(tofu -chdir="${DATA_DIR}" output -json msk_cluster_arns 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("bus") or next(iter(d.values()), ""))' 2>/dev/null || true)"
   set_metadata "efs_file_system_id" "$(tofu -chdir="${DATA_DIR}" output -json efs_file_system_ids 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("models") or next(iter(d.values()), ""))' 2>/dev/null || true)"
@@ -4551,6 +4580,36 @@ write_sso_handoff() {
 # this account (the longest zone name the domain falls under), else a zone created for the domain. The choice is
 # remembered: a zone created by Terraform must never be reclassified as "existing" (Terraform would destroy it).
 remember_ses_settings() {
+  if [[ -n "${SES_IDENTITY_ARN}" || -n "${SES_FROM}" || -n "${SES_CONFIGURATION_SET}" ]]; then
+    if [[ -n "${SES_DOMAIN}" || -n "$(get_metadata "ses_domain")" ]]; then
+      mark_phase_blocked "--ses-identity-arn (the customer's own SES) cannot be combined with --ses-domain (an SES domain created by this installer, now or earlier)."
+      return 1
+    fi
+    if [[ -z "${SES_IDENTITY_ARN}" || -z "${SES_FROM}" ]]; then
+      mark_phase_blocked "The customer's own SES needs both --ses-identity-arn <arn> and --ses-from <address>."
+      return 1
+    fi
+    if [[ ! "${SES_IDENTITY_ARN}" =~ ^arn:aws[a-z-]*:ses:[a-z0-9-]+:[0-9]{12}:identity/.+$ ]]; then
+      mark_phase_blocked "--ses-identity-arn must look like arn:aws:ses:<region>:<account>:identity/<domain-or-address>."
+      return 1
+    fi
+    if [[ ! "${SES_FROM}" =~ ^[^@[:space:]\<\>]+@[^@[:space:]\<\>]+\.[^@[:space:]\<\>]+$ ]]; then
+      mark_phase_blocked "--ses-from must be an email address."
+      return 1
+    fi
+    local ses_id_name="${SES_IDENTITY_ARN##*identity/}"
+    if [[ "${SES_FROM}" != *"@${ses_id_name}" && "${SES_FROM}" != "${ses_id_name}" && "${SES_FROM}" != *"@${ses_id_name#*@}" ]]; then
+      log "WARN  ${SES_FROM} does not look like it belongs to the SES identity ${ses_id_name}: SES rejects mail from addresses outside the identity."
+    fi
+    set_metadata "ses_existing_arn" "${SES_IDENTITY_ARN}"
+    set_metadata "ses_from" "${SES_FROM}"
+    set_metadata "ses_configuration_set" "${SES_CONFIGURATION_SET}"
+    return 0
+  fi
+  if [[ -n "${SES_DOMAIN}" && -n "$(get_metadata "ses_existing_arn")" ]]; then
+    mark_phase_blocked "--ses-domain cannot be combined with the customer's own SES identity already set up (${SES_DOMAIN} vs $(get_metadata "ses_existing_arn"))."
+    return 1
+  fi
   [[ -n "${SES_DOMAIN}" ]] || return 0
   set_metadata "ses_domain" "${SES_DOMAIN}"
   if [[ -n "$(get_metadata "ses_zone_mode")" && -z "${SES_ROUTE53_ZONE_ID}" ]]; then
@@ -4602,9 +4661,41 @@ elif e["ZONE"]:
 print(json.dumps({"main": d}))'
 }
 
-# True when SES reports the SES domain verified for sending (its DNS records resolve).
+# JSON for Terraform's ses_existing from the remembered settings ("null" when none).
+ses_existing_json() {
+  local arn
+  arn="$(get_metadata "ses_existing_arn")"
+  if [[ -z "${arn}" ]]; then
+    printf 'null'
+    return 0
+  fi
+  ARN="${arn}" FROM="$(get_metadata "ses_from")" CS="$(get_metadata "ses_configuration_set")" python3 -c '
+import json, os
+e = os.environ
+d = {"identity_arn": e["ARN"], "from_address": e["FROM"]}
+if e["CS"]:
+    d["configuration_set"] = e["CS"]
+print(json.dumps(d))'
+}
+
+# True when SES reports the SES identity verified for sending (the installer-created domain or the customer's own).
+# An identity of another account cannot be queried from here: it is assumed usable (the sending authorization is the
+# customer's step) and Cognito reports a failure if not.
 ses_identity_verified() {
-  local domain status
+  local domain status arn name acct region caller
+  arn="$(get_metadata "ses_existing_arn")"
+  if [[ -n "${arn}" ]]; then
+    name="${arn##*identity/}"
+    region="$(printf '%s' "${arn}" | cut -d: -f4)"
+    acct="$(printf '%s' "${arn}" | cut -d: -f5)"
+    caller="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+    if [[ "${acct}" != "${caller}" ]]; then
+      return 0
+    fi
+    status="$(aws sesv2 get-email-identity --email-identity "${name}" --region "${region}" --query VerifiedForSendingStatus --output text 2>/dev/null || true)"
+    [[ "${status}" == "True" ]]
+    return
+  fi
   domain="$(get_metadata "ses_domain")"
   [[ -n "${domain}" ]] || return 1
   status="$(aws sesv2 get-email-identity --email-identity "${domain}" --region "${AWS_REGION}" --query VerifiedForSendingStatus --output text 2>/dev/null || true)"
@@ -4826,6 +4917,30 @@ phase_verify_data_layer() {
     fi
   fi
 
+  # 2f'. The customer's own SES identity (same account: verified?; another account: cannot be queried from here).
+  local ses_arn ses_acct ses_reg ses_name ses_caller
+  ses_arn="$(get_metadata "ses_existing_arn")"
+  if [[ -n "${ses_arn}" ]]; then
+    ses_name="${ses_arn##*identity/}"
+    ses_reg="$(printf '%s' "${ses_arn}" | cut -d: -f4)"
+    ses_acct="$(printf '%s' "${ses_arn}" | cut -d: -f5)"
+    ses_caller="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+    if [[ "${ses_acct}" == "${ses_caller}" ]]; then
+      ses_info="$(aws sesv2 get-email-identity --email-identity "${ses_name}" --region "${ses_reg}" --query 'VerifiedForSendingStatus' --output text 2>/dev/null || true)"
+      if [[ "${ses_info}" == "True" ]]; then
+        log "PASS  Customer SES identity ${ses_name} is verified for sending."
+      else
+        log "FAIL  Customer SES identity ${ses_name} is not verified for sending (status: ${ses_info:-unknown}); Cognito cannot mail through it."
+        fail_count=$((fail_count + 1))
+      fi
+      if [[ "$(aws sesv2 get-account --region "${ses_reg}" --query ProductionAccessEnabled --output text 2>/dev/null || true)" != "True" ]]; then
+        log "WARN  SES is in the sandbox in ${ses_reg}: mail only reaches verified addresses until production access is granted."
+      fi
+    else
+      log "WARN  Customer SES identity is in account ${ses_acct}: cannot be checked from here; confirm its sending authorization allows this account (Cognito, connect) and that it is out of the sandbox."
+    fi
+  fi
+
   # 2g. SSO: the provider is in the pool, the sign-in really redirects to it (no password needed), and a SAML
   # certificate is not about to expire.
   local sso_n sso_t
@@ -5032,6 +5147,8 @@ phase_platform_services() {
         extra+=(--set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/connect/" --set-string "${key}.email.region=${AWS_REGION}" --set-string "${key}.notify.bus.sasl.region=${AWS_REGION}")
         if [[ -n "$(get_metadata "ses_domain")" ]]; then
           extra+=(--set-string "${key}.email.defaultFrom=notifications@$(get_metadata "ses_domain")")
+        elif [[ -n "$(get_metadata "ses_existing_arn")" ]]; then
+          extra+=(--set-string "${key}.email.defaultFrom=$(get_metadata "ses_from")" --set-string "${key}.email.region=$(get_metadata "ses_existing_arn" | cut -d: -f4)")
         fi
         ;;
       portico) extra+=(--set-string "${key}.internalApi.url=http://straiker-frontend-service.${INFRA_NAMESPACE}.svc.cluster.local") ;;
@@ -6498,6 +6615,10 @@ show_bootstrap_admin_reminder() {
         log "  A Route53 zone was created for it: add these NS records for $(get_metadata "ses_domain") in the parent zone: $(get_metadata "ses_name_servers")"
       fi
       log "  SES starts in the sandbox: request production access in the SES console to mail unverified recipients."
+    fi
+    if [[ -n "$(get_metadata "ses_existing_arn")" ]]; then
+      log "Email: the customer's SES identity $(get_metadata "ses_existing_arn") (From $(get_metadata "ses_from"))."
+      log "  Its account must have SES production access (out of the sandbox) to mail unverified recipients."
     fi
     log "Add more users by creating them in the pool (aws cognito-idp admin-create-user ...) and in Straiker's"
     log "Users page. If you are ever locked out, re-run phase straiker-core with --reset-admin-password."

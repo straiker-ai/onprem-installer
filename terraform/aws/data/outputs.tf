@@ -114,6 +114,15 @@ output "ses_domains" {
   }
 }
 
+output "ses_existing" {
+  description = "The customer's own SES identity in use (null when the installer created one: see ses_domains)."
+  value = var.ses_existing == null ? null : {
+    identity_arn      = var.ses_existing.identity_arn
+    sender            = var.ses_existing.from_address
+    configuration_set = var.ses_existing.configuration_set
+  }
+}
+
 output "msk_cluster_arns" {
   value = { for k, c in aws_msk_serverless_cluster.this : k => c.arn }
 }

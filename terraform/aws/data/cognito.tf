@@ -3,7 +3,9 @@
 # Google, Facebook, Login with Amazon or Sign in with Apple) is federated in below instead of SaaS's fixed Google.
 
 locals {
-  cognito_ses  = var.cognito_use_ses && contains(keys(var.ses_domains), "main")
+  cognito_ses_own      = contains(keys(var.ses_domains), "main")
+  cognito_ses_existing = var.ses_existing != null
+  cognito_ses          = var.cognito_use_ses && (local.cognito_ses_own || local.cognito_ses_existing)
   cognito_name = { for k, _ in var.cognito_pools : k => k == "main" ? "${local.name}-pool" : "${local.name}-${k}-pool" }
 }
 
@@ -44,12 +46,22 @@ resource "aws_cognito_user_pool" "this" {
 
   # Through the verified SES domain once it is ready (installer: cognito_use_ses); else Cognito's default sender.
   dynamic "email_configuration" {
-    for_each = each.key == "main" && local.cognito_ses ? [1] : []
+    for_each = each.key == "main" && local.cognito_ses && local.cognito_ses_own ? [1] : []
     content {
       email_sending_account = "DEVELOPER"
       from_email_address    = "Straiker <${var.ses_domains["main"].sender_local_part}@${var.ses_domains["main"].domain}>"
       source_arn            = aws_sesv2_email_identity.this["main"].arn
       configuration_set     = aws_sesv2_configuration_set.this["main"].configuration_set_name
+    }
+  }
+  # The customer's own SES identity (nothing created for it).
+  dynamic "email_configuration" {
+    for_each = each.key == "main" && local.cognito_ses && local.cognito_ses_existing ? [1] : []
+    content {
+      email_sending_account = "DEVELOPER"
+      from_email_address    = "Straiker <${var.ses_existing.from_address}>"
+      source_arn            = var.ses_existing.identity_arn
+      configuration_set     = var.ses_existing.configuration_set
     }
   }
   dynamic "email_configuration" {
