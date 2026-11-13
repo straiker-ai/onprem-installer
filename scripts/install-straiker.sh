@@ -117,6 +117,16 @@ ESO_STORE_NAME="aws-sm"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
+# --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
+# frontend IAM via Pod Identity). Remembered in install state; once on it stays on (--saas-frontend is a one-way switch).
+SAAS_FRONTEND="${SAAS_FRONTEND:-false}"
+
+# Platform api-gateway exposure: internal (default; internal NLB), public (internet-facing NLB with TLS), none (ClusterIP).
+# Remembered in install state. public needs --gateway-cert-arn (ACM certificate in the cluster's region).
+GATEWAY_EXPOSURE="${GATEWAY_EXPOSURE:-}"
+GATEWAY_CERT_ARN="${GATEWAY_CERT_ARN:-}"
+GATEWAY_ALLOWED_CIDRS="${GATEWAY_ALLOWED_CIDRS:-}"
+
 # --data-layer: the customer's identity provider, federated into the Cognito pool ("Sign in with SSO"). One per install.
 #   --sso-type google|facebook|amazon|apple|saml|oidc, plus the values that type needs (see --help).
 # Secrets (client secret, Apple private key) come from the environment or a hidden prompt, never argv, and are kept in
@@ -672,6 +682,15 @@ Options:
                                    Secrets Manager. Remembered in install state; required by phase 'straiker-core'.
   --reset-admin-password           Set the first admin's Cognito password again from Secrets Manager (recovery).
   --rotate-admin-password          Generate a new password for the first admin (kept in Secrets Manager) and set it.
+  --saas-frontend                  With --data-layer: also create the AWS backends of the SaaS frontend (DynamoDB
+                                   environment + guardrail tables, Kinesis audit stream) and a Pod Identity role for
+                                   the frontend. Remembered in install state; needs a SaaS-style frontend image.
+  --gateway-exposure <mode>        Who can reach the platform api-gateway (the API behind the console and SDK calls):
+                                   internal (default): internal load balancer, VPC / private network only.
+                                   public: internet-facing, TLS required (--gateway-cert-arn), optionally limited
+                                   with --gateway-allowed-cidrs. none: in-cluster only (ClusterIP). Remembered.
+  --gateway-cert-arn <arn>         ACM certificate for the gateway's TLS listener (required for --gateway-exposure public).
+  --gateway-allowed-cidrs <list>   Comma-separated source CIDRs allowed to reach a public gateway (default: any).
   --sso-type <type>                With --data-layer: the customer's identity provider for "Sign in with SSO",
                                    federated into the Cognito pool (one per install; all need --sso-domains):
                                      google | facebook | amazon | apple   built-in providers
@@ -1544,6 +1563,22 @@ parse_args() {
       --reset-admin-password)
         RESET_ADMIN_PASSWORD=true
         shift
+        ;;
+      --saas-frontend)
+        SAAS_FRONTEND=true
+        shift
+        ;;
+      --gateway-exposure)
+        GATEWAY_EXPOSURE=${2:-}
+        shift 2
+        ;;
+      --gateway-cert-arn)
+        GATEWAY_CERT_ARN=${2:-}
+        shift 2
+        ;;
+      --gateway-allowed-cidrs)
+        GATEWAY_ALLOWED_CIDRS=${2:-}
+        shift 2
         ;;
       --sso-type)
         SSO_TYPE=${2:-}
@@ -2804,10 +2839,23 @@ phase_aws_data() {
   [[ " ${PLATFORM_SERVICES} " == *" databridge "* ]] && platform_assume_roles=true
   [[ " ${PLATFORM_SERVICES} " == *" connect "* ]] && platform_ses_send=true
 
+  # SaaS frontend backends: remembered, one-way (a later run without the flag must not make Terraform destroy them).
+  [[ "${SAAS_FRONTEND}" == "true" ]] && set_metadata "saas_frontend" "true"
+  local saas_frontend_on=false saas_frontend_identity=""
+  if [[ "$(get_metadata "saas_frontend")" == "true" ]]; then
+    saas_frontend_on=true
+    saas_frontend_identity='"frontend": {
+      "namespace": "'"${INFRA_NAMESPACE}"'",
+      "service_account": "straiker-frontend",
+      "saas_frontend_data": true
+    },'
+  fi
+
   # Pod Identity role for the data-bootstrap Jobs (chart straiker-data's ServiceAccount).
   cat > "${DATA_DIR}/terraform.auto.tfvars.json" <<EOF
 {
   "pod_identities": {
+    ${saas_frontend_identity}
     "data-bootstrap": {
       "namespace": "${INFRA_NAMESPACE}",
       "service_account": "straiker-data",
@@ -2894,6 +2942,8 @@ EOF
   TF_VAR_ses_domains="$(ses_domains_json)"
   TF_VAR_ses_existing="$(ses_existing_json)"
   export TF_VAR_ses_domains TF_VAR_ses_existing
+  if [[ "${saas_frontend_on}" == "true" ]]; then TF_VAR_saas_frontend='{}'; else TF_VAR_saas_frontend='null'; fi
+  export TF_VAR_saas_frontend
   # Cognito needs its service-linked role to send through SES; decided once and remembered (like OpenSearch's).
   local cog_slr
   cog_slr="$(get_metadata "cognito_create_email_slr")"
@@ -2998,6 +3048,13 @@ EOF
     set_metadata "cognito_${cf}" "$(printf '%s' "${cognito_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("'"${cf}"'",""))' 2>/dev/null || true)"
   done
   write_sso_handoff
+  if [[ "${saas_frontend_on}" == "true" ]]; then
+    local saas_json
+    saas_json="$(tofu -chdir="${DATA_DIR}" output -json saas_frontend 2>/dev/null || echo '{}')"
+    for cf in dynamodb_table_name dynamodb_guardrails_table_name audit_logs_stream; do
+      set_metadata "saas_${cf}" "$(printf '%s' "${saas_json}" | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("'"${cf}"'",""))' 2>/dev/null || true)"
+    done
+  fi
   local ses_json
   ses_json="$(tofu -chdir="${DATA_DIR}" output -json ses_domains 2>/dev/null || echo '{}')"
   set_metadata "ses_sender" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("sender",""))' 2>/dev/null || true)"
@@ -3957,9 +4014,36 @@ phase_ingest() {
 # environment ConfigMap, no AWS services). OAuth and PAT stay in-memory in both (Cognito is not part of the
 # on-prem stack yet). Generated once and kept in K8s Secrets: OAuth signing key + client ('api-gateway-oauth')
 # and the first environment's API key ('api-gateway-env').
+# Gateway exposure: flag > remembered > internal. public needs a certificate: the gateway is never put on the
+# internet without TLS.
+remember_gateway_settings() {
+  local mode="${GATEWAY_EXPOSURE:-$(get_metadata "gateway_exposure")}"
+  mode="${mode:-internal}"
+  case "${mode}" in internal | public | none) ;; *)
+    mark_phase_blocked "--gateway-exposure must be internal, public or none (got '${mode}')."
+    return 1
+    ;;
+  esac
+  local cert="${GATEWAY_CERT_ARN:-$(get_metadata "gateway_cert_arn")}"
+  local cidrs="${GATEWAY_ALLOWED_CIDRS:-$(get_metadata "gateway_allowed_cidrs")}"
+  if [[ "${mode}" == "public" ]]; then
+    if [[ ! "${cert}" =~ ^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$ ]]; then
+      mark_phase_blocked "--gateway-exposure public needs --gateway-cert-arn <ACM certificate ARN> (the gateway is never exposed without TLS)."
+      return 1
+    fi
+    if [[ -z "${cidrs}" ]]; then
+      log "WARNING: --gateway-exposure public without --gateway-allowed-cidrs: the gateway accepts connections from any address."
+    fi
+  fi
+  set_metadata "gateway_exposure" "${mode}"
+  set_metadata "gateway_cert_arn" "${cert}"
+  set_metadata "gateway_allowed_cidrs" "${cidrs}"
+}
+
 install_api_gateway() {
   local ecr_registry=$1 chart="${REPO_ROOT}/charts/platform-api-gateway" tag tmp table
   require_command openssl
+  remember_gateway_settings || return 1
   tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${chart}/Chart.yaml")"
   table="$(get_metadata "dynamodb_environment_table")"
 
@@ -4024,12 +4108,23 @@ install_api_gateway() {
   client_id="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-id}' | base64 -d)"
   client_secret="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-secret}' | base64 -d)"
 
-  log "Installing platform service 'api-gateway' (${tag})..."
+  # Allowed source CIDRs -> straiker.apiGateway.service.sourceRanges[i] (public only; empty = none).
+  local gateway_cidr_args=() cidr_i=0 cidr_item
+  if [[ "$(get_metadata "gateway_exposure")" == "public" && -n "$(get_metadata "gateway_allowed_cidrs")" ]]; then
+    for cidr_item in $(printf '%s' "$(get_metadata "gateway_allowed_cidrs")" | tr ',' ' '); do
+      gateway_cidr_args+=(--set-string "straiker.apiGateway.service.sourceRanges[${cidr_i}]=${cidr_item}")
+      cidr_i=$((cidr_i + 1))
+    done
+  fi
+  log "Installing platform service 'api-gateway' (${tag}, exposure $(get_metadata "gateway_exposure"))..."
   helm upgrade --install api-gateway "${chart}" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
     -f "${chart}/values-onprem.yaml" \
     --set-string straiker.apiGateway.image.registry="$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
     --set-string straiker.apiGateway.image.version="${tag}" \
+    --set-string straiker.apiGateway.service.exposure="$(get_metadata "gateway_exposure")" \
+    --set-string straiker.apiGateway.service.certificateArn="$(get_metadata "gateway_cert_arn")" \
+    ${gateway_cidr_args[@]+"${gateway_cidr_args[@]}"} \
     --set-file straiker.apiGateway.oauth.inmemory.signingKey="${key_file}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-id=${client_id}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-secret=${client_secret}" \
@@ -5421,6 +5516,18 @@ phase_straiker_core() {
   # Unconditional — straiker-defend is always installed now (see
   # phase_straiker_defend), regardless of product selection.
   cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
+  # The platform API gateway (phase platform-services) and the flags that switch the console to it. Frontends older than
+  # the FEATURE_FLAG_OVERRIDES change ignore the flags; PUBLIC_API_GATEWAY is read by every build.
+  if [[ " ${PLATFORM_SERVICES} " == *" api-gateway "* ]]; then
+    cmd+=(--set-string "straiker-frontend.frontend.apiGatewayUrl=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443")
+    cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
+    # ascend-only hides Defend: on only when Ascend is the sole product.
+    if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.ascend-only=false")
+    else
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.ascend-only=true")
+    fi
+  fi
 
   # --data-layer: frontend's platform DB is Aurora (not straiker-system's postgres). Password
   # comes from straiker-data's DSN Secret; Aurora requires TLS (the DSNs use sslmode=require).
@@ -5439,6 +5546,15 @@ phase_straiker_core() {
       cmd+=(
         --set-string "straiker-frontend.frontend.opensearch.url=https://${os_endpoint}"
         --set-string "straiker-frontend.frontend.opensearch.credentialsSecret=opensearch-credentials"
+      )
+    fi
+    if [[ "$(get_metadata "saas_frontend")" == "true" ]]; then
+      cmd+=(
+        --set "straiker-frontend.frontend.serviceAccount.create=true"
+        --set-string "straiker-frontend.frontend.saasBackends.region=${AWS_REGION}"
+        --set-string "straiker-frontend.frontend.saasBackends.dynamodbTable=$(get_metadata "saas_dynamodb_table_name")"
+        --set-string "straiker-frontend.frontend.saasBackends.dynamodbGuardrailsTable=$(get_metadata "saas_dynamodb_guardrails_table_name")"
+        --set-string "straiker-frontend.frontend.saasBackends.auditLogsStream=$(get_metadata "saas_audit_logs_stream")"
       )
     fi
     local cg_secret cg_email
@@ -5485,6 +5601,7 @@ phase_straiker_core() {
       --set-string "straiker-frontend.frontend.db.host=${aurora_host}"
       --set "straiker-frontend.frontend.db.port=$(get_metadata "aurora_port")"
       --set "straiker-frontend.frontend.db.sslMode=require"
+      --set "straiker-frontend.frontend.db.rdsCaBundle=true"
       --set "straiker-frontend.frontend.db.passwordSecret.name=straiker-db-dsn"
       --set "straiker-frontend.frontend.db.name=frontend"
       --set "straiker-frontend.frontend.db.user=frontend"

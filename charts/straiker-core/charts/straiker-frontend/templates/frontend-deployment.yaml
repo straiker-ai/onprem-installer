@@ -16,6 +16,9 @@ spec:
       labels:
         app: straiker-frontend
     spec:
+      {{- if or .Values.frontend.serviceAccount.create (ne .Values.frontend.serviceAccount.name "straiker-frontend") }}
+      serviceAccountName: {{ .Values.frontend.serviceAccount.name }}
+      {{- end }}
       terminationGracePeriodSeconds: 60
       {{- with .Values.frontend.imagePullSecrets }}
       imagePullSecrets:
@@ -49,6 +52,12 @@ spec:
             - secretRef:
                 name: {{ include "frontend.secretName" . }}
                 optional: true
+          {{- if .Values.frontend.db.rdsCaBundle }}
+          volumeMounts:
+            - name: rds-ca
+              mountPath: /etc/straiker/rds-ca
+              readOnly: true
+          {{- end }}
           env:
             - name: PORT
               value: {{ .Values.frontend.service.targetPort | quote }}
@@ -58,6 +67,36 @@ spec:
               value: "onprem"
             - name: ORIGIN
               value: {{ include "frontend.origin" . | quote }}
+            {{- with .Values.frontend.featureFlags }}
+            {{- $flags := list }}
+            {{- range $k := keys . | sortAlpha }}
+            {{- $flags = append $flags (printf "%s=%v" $k (get $.Values.frontend.featureFlags $k)) }}
+            {{- end }}
+            - name: FEATURE_FLAG_OVERRIDES
+              value: {{ join "," $flags | quote }}
+            {{- end }}
+            {{- if .Values.frontend.apiGatewayUrl }}
+            - name: PUBLIC_API_GATEWAY
+              value: {{ .Values.frontend.apiGatewayUrl | quote }}
+            {{- end }}
+            {{- with .Values.frontend.saasBackends }}
+            {{- if .dynamodbTable }}
+            - name: DYNAMODB_TABLE_NAME
+              value: {{ .dynamodbTable | quote }}
+            {{- end }}
+            {{- if .dynamodbGuardrailsTable }}
+            - name: DYNAMODB_GUARDRAILS_TABLE_NAME
+              value: {{ .dynamodbGuardrailsTable | quote }}
+            {{- end }}
+            {{- if .auditLogsStream }}
+            - name: AUDIT_LOGS_STREAM
+              value: {{ .auditLogsStream | quote }}
+            {{- end }}
+            {{- if .region }}
+            - name: AWS_REGION
+              value: {{ .region | quote }}
+            {{- end }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.frontend.logLevel | default "info" | quote }}
             # DB_USER and DB_PASSWORD must precede POSTGRES_URL so Kubernetes
@@ -106,12 +145,12 @@ spec:
               value: {{ .Values.dex.staticClient.id | quote }}
             - name: DEX_OIDC_CLIENT_SECRET
               value: {{ .Values.dex.staticClient.secret | quote }}
-            # Dex's issuer is now the public https origin (proxied through
-            # Caddy's self-signed cert, see dex-configmap.yaml), so this app's
-            # own OIDC-discovery fetch against that issuer needs to accept it -
-            # same reason the docker-compose reference sets this.
-            - name: NODE_TLS_REJECT_UNAUTHORIZED
-              value: "0"
+            # Certificate verification is never disabled: Aurora's CA comes from the bundled RDS CA file (below),
+            # the bundled Dex is called over in-cluster HTTP, and managed OpenSearch uses a publicly trusted certificate.
+            {{- if .Values.frontend.db.rdsCaBundle }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/straiker/rds-ca/rds-global-bundle.pem
+            {{- end }}
             # OIDC SSO — backed by the bundled dex stack by default (see
             # frontend.oidcIssuer and friends in _helpers.tpl), or a customer's
             # own IdP if frontend.oidc.issuer etc. are overridden.
@@ -191,6 +230,12 @@ spec:
                   name: {{ .Values.frontend.internalApiKey.secretName | default (include "frontend.secretName" .) }}
                   key: {{ .Values.frontend.internalApiKey.secretKey }}
             {{- end }}
+      {{- if .Values.frontend.db.rdsCaBundle }}
+      volumes:
+        - name: rds-ca
+          configMap:
+            name: straiker-frontend-rds-ca
+      {{- end }}
       nodeSelector:
         {{- include "frontend.nodeSelector" . | nindent 8 }}
       {{- with .Values.frontend.tolerations }}

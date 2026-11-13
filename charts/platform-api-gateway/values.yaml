@@ -119,6 +119,11 @@ straiker:
 
     # Service Configuration
     service:
+      # internal (default): internal NLB, reachable from the VPC/private network only. public: internet-facing NLB
+      # with TLS (certificateArn required) and optional sourceRanges. none: ClusterIP (in-cluster only).
+      exposure: internal
+      certificateArn: ""
+      sourceRanges: []
       annotations: {}
       labels: {}
 

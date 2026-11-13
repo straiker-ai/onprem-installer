@@ -69,7 +69,7 @@ frontend:
     # onprem-base mirror (see cloudbuild.yaml: onprem-base/straiker/frontend),
     # since it's Straiker's own component, not third-party.
     repository: straiker/frontend
-    tag: onprem-v2026.8.3
+    tag: onprem-v2026.11.8-rc2
     pullPolicy: IfNotPresent
 
   imagePullSecrets: []
@@ -114,6 +114,9 @@ frontend:
     name: platform
     user: platform
     sslMode: disable
+    # Trust AWS's RDS CA bundle (files/rds-global-bundle.pem) so sslMode=require against Aurora verifies the
+    # server certificate. The installer turns this on with its Aurora settings.
+    rdsCaBundle: false
     # Matches charts/straiker-system's postgres.yaml Secret exactly
     # (postgres-secret / POSTGRES_PASSWORD_PLATFORM) — not a
     # separate operator-supplied secret.
@@ -130,7 +133,7 @@ frontend:
     enabled: true
     image:
       repository: straiker/frontend-migrate
-      tag: onprem-v2026.8.3
+      tag: onprem-v2026.11.8-rc2
     backoffLimit: 2
     activeDeadlineSeconds: 300
     ttlSecondsAfterFinished: 3600
@@ -235,6 +238,27 @@ frontend:
   internalApiKey:
     secretName: ""
     secretKey: ""
+
+  # Feature flags (no PostHog on-prem): rendered as FEATURE_FLAG_OVERRIDES="key=true,key=false", sorted by key.
+  # Empty = the variable is not set. Needs a frontend image that reads it (newer than onprem-v2026.8.3).
+  featureFlags: {}
+
+  # The platform API gateway the frontend calls for /api/v3/* (and the legacy /api/scout, /api/policy ...), e.g.
+  # http://api-gateway.<namespace>.svc.cluster.local:443. Sets PUBLIC_API_GATEWAY; empty = not set.
+  apiGatewayUrl: ""
+
+  # Optional ServiceAccount for the frontend pod, so Pod Identity can give it AWS access (SaaS-style backends).
+  serviceAccount:
+    create: false
+    name: straiker-frontend
+
+  # AWS backends of the SaaS frontend (DynamoDB tables, Kinesis audit stream), created by the installer's aws-data
+  # phase with --saas-frontend. Empty names are omitted. Credentials come from the pod's Pod Identity role.
+  saasBackends:
+    region: ""
+    dynamodbTable: ""
+    dynamodbGuardrailsTable: ""
+    auditLogsStream: ""
 
 # SESSION_SIGNING_KEY source: a Secret with that key, synced from Secrets Manager by the installer's
 # ExternalSecret. Empty = generate in-cluster (legacy).

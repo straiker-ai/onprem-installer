@@ -1,3 +1,11 @@
+{{- $svc := .Values.straiker.apiGateway.service }}
+{{- $exposure := $svc.exposure | default "internal" }}
+{{- if not (has $exposure (list "internal" "public" "none")) }}
+{{- fail (printf "straiker.apiGateway.service.exposure must be internal, public or none (got %q)" $exposure) }}
+{{- end }}
+{{- if and (eq $exposure "public") (not $svc.certificateArn) }}
+{{- fail "straiker.apiGateway.service.certificateArn (an ACM certificate) is required when exposure is public: the gateway is never exposed to the internet without TLS" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -6,7 +14,18 @@ metadata:
   labels:
     {{- include "straiker.labels" . | nindent 4 }}
   annotations:
-    {{- with .Values.straiker.apiGateway.service.annotations }}
+    {{- if ne $exposure "none" }}
+    # AWS Load Balancer Controller: an NLB, internal unless exposure is public. TLS ends at the NLB (backend is HTTP :8080).
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: {{ ternary "internet-facing" "internal" (eq $exposure "public") }}
+    {{- end }}
+    {{- if eq $exposure "public" }}
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: {{ $svc.certificateArn | quote }}
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    {{- end }}
+    {{- with $svc.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
@@ -18,4 +37,8 @@ spec:
       protocol: TCP
       port: 443
       targetPort: 8080
-  type: LoadBalancer
+  type: {{ ternary "ClusterIP" "LoadBalancer" (eq $exposure "none") }}
+  {{- if and (eq $exposure "public") $svc.sourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $svc.sourceRanges | nindent 4 }}
+  {{- end }}

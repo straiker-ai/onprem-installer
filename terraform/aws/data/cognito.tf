@@ -195,8 +195,9 @@ resource "aws_cognito_user_pool_client" "frontend" {
   name         = "${local.cognito_name[each.key]}-frontend"
   user_pool_id = aws_cognito_user_pool.this[each.key].id
 
-  generate_secret                      = true
-  explicit_auth_flows                  = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+  generate_secret = true
+  # USER_PASSWORD_AUTH: the frontend's own email sign-in page (/login/password) calls Cognito directly, with the client secret.
+  explicit_auth_flows                  = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "email", "profile"]

@@ -1,0 +1,14 @@
+{{- if .Values.frontend.db.rdsCaBundle }}
+# AWS's RDS CA bundle (files/rds-global-bundle.pem; refresh with scripts/update-rds-ca.sh). The database URL uses
+# sslmode=require, which the driver verifies fully, so the pod must trust Aurora's certificate authority.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-frontend-rds-ca
+  namespace: {{ include "frontend.namespace" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+data:
+  rds-global-bundle.pem: |
+{{ .Files.Get "files/rds-global-bundle.pem" | indent 4 }}
+{{- end }}
