@@ -6,7 +6,7 @@ locals {
   cognito_ses_own      = contains(keys(var.ses_domains), "main")
   cognito_ses_existing = var.ses_existing != null
   cognito_ses          = var.cognito_use_ses && (local.cognito_ses_own || local.cognito_ses_existing)
-  cognito_name = { for k, _ in var.cognito_pools : k => k == "main" ? "${local.name}-pool" : "${local.name}-${k}-pool" }
+  cognito_name         = { for k, _ in var.cognito_pools : k => k == "main" ? "${local.name}-pool" : "${local.name}-${k}-pool" }
 }
 
 resource "aws_cognito_user_pool" "this" {

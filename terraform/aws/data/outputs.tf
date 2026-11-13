@@ -154,3 +154,12 @@ output "secret_names" {
   description = "Secrets Manager key => secret name."
   value       = { for k, v in aws_secretsmanager_secret.this : k => v.name }
 }
+
+output "saas_frontend" {
+  description = "SaaS frontend backends (null when var.saas_frontend is null): DYNAMODB_TABLE_NAME, DYNAMODB_GUARDRAILS_TABLE_NAME, AUDIT_LOGS_STREAM."
+  value = local.saas_frontend ? {
+    dynamodb_table_name            = aws_dynamodb_table.saas_environment[0].name
+    dynamodb_guardrails_table_name = aws_dynamodb_table.saas_guardrail[0].name
+    audit_logs_stream              = aws_kinesis_stream.saas_audit[0].name
+  } : null
+}

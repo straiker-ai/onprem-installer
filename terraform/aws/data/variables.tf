@@ -477,6 +477,21 @@ variable "dynamodb_tables" {
   default = { environment = {} }
 }
 
+# ---------------------------------------------------------------- SaaS frontend backends
+
+variable "saas_frontend" {
+  description = <<-EOT
+    Backends of the SaaS frontend for new AWS-hosted customers: the full environment + guardrail DynamoDB tables
+    (SaaS schema and GSIs) and the Kinesis audit stream. null (default) = none. null deletion_protection = by
+    provision_strategy. Login triggers, the OpenSearch proxy Lambda, uploads and audit delivery come in later slices.
+  EOT
+  type = object({
+    deletion_protection   = optional(bool)
+    audit_retention_hours = optional(number, 24)
+  })
+  default = null
+}
+
 # ---------------------------------------------------------------- Pod Identity
 
 variable "pod_identities" {
@@ -491,6 +506,7 @@ variable "pod_identities" {
                              e.g. "<cluster>/platform/" (databridge sinks, connect and integration credentials)
       secret_prefixes_read   Secrets Manager name prefixes this role may read (get/describe)
       dynamodb_query         keys of dynamodb_tables whose apiKey-index this role may query
+      saas_frontend_data     read/write the SaaS environment + guardrail tables (and their indexes) and put audit records
       ses_send               allow ses:SendEmail/SendRawEmail on identities in this account (connect email)
       assume_roles           allow sts:AssumeRole on any role (databridge sink probes/delivery into customer accounts)
       policy_json            extra inline policy document (JSON)
@@ -508,6 +524,7 @@ variable "pod_identities" {
     secret_prefixes_rw   = optional(list(string), [])
     secret_prefixes_read = optional(list(string), [])
     dynamodb_query       = optional(list(string), [])
+    saas_frontend_data   = optional(bool, false)
     ses_send             = optional(bool, false)
     assume_roles         = optional(bool, false)
     policy_json          = optional(string)

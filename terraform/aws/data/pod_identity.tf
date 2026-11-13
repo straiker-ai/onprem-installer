@@ -107,10 +107,35 @@ data "aws_iam_policy_document" "pod" {
   }
 
   dynamic "statement" {
+    for_each = each.value.saas_frontend_data && local.saas_frontend ? [1] : []
+    content {
+      sid = "SaasFrontendDynamo"
+      actions = [
+        "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:PutItem",
+        "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:DescribeTable",
+        "dynamodb:TransactGetItems", "dynamodb:TransactWriteItems",
+      ]
+      resources = [
+        aws_dynamodb_table.saas_environment[0].arn, "${aws_dynamodb_table.saas_environment[0].arn}/index/*",
+        aws_dynamodb_table.saas_guardrail[0].arn, "${aws_dynamodb_table.saas_guardrail[0].arn}/index/*",
+      ]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = each.value.saas_frontend_data && local.saas_frontend ? [1] : []
+    content {
+      sid       = "SaasFrontendAudit"
+      actions   = ["kinesis:PutRecord", "kinesis:PutRecords", "kinesis:DescribeStreamSummary"]
+      resources = [aws_kinesis_stream.saas_audit[0].arn]
+    }
+  }
+
+  dynamic "statement" {
     for_each = each.value.ses_send ? [1] : []
     content {
-      sid       = "SesSend"
-      actions   = ["ses:SendEmail", "ses:SendRawEmail"]
+      sid     = "SesSend"
+      actions = ["ses:SendEmail", "ses:SendRawEmail"]
       resources = concat(
         ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/*"],
         var.ses_existing == null ? [] : [var.ses_existing.identity_arn],
