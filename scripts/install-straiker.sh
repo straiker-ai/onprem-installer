@@ -5520,7 +5520,9 @@ phase_straiker_core() {
   # the FEATURE_FLAG_OVERRIDES change ignore the flags; PUBLIC_API_GATEWAY is read by every build.
   if [[ " ${PLATFORM_SERVICES} " == *" api-gateway "* ]]; then
     cmd+=(--set-string "straiker-frontend.frontend.apiGatewayUrl=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443")
-    cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
+    # OFF on-prem for now: with it on, the console sends the session cookie to the platform API as a bearer token, and
+    # the gateway only accepts a Cognito ID token, not the signed on-prem session (sign-in then ends in a 401).
+    cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=false")
     # ascend-only hides Defend: on only when Ascend is the sole product.
     if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
       cmd+=(--set "straiker-frontend.frontend.featureFlags.ascend-only=false")

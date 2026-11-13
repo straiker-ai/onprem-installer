@@ -52,3 +52,12 @@ The login triggers have a **legacy DynamoDB-only path**: with no `platform_authz
 
 - Which pages break without `PUBLIC_API_GATEWAY` and `TURNS_ENDPOINT` (trace the call sites).
 - `waitUntil` behavior off Vercel; value for `$sso-origin`.
+
+## Finding: platform-API flag vs the on-prem session (2026-11-13, dl-test, rc3)
+
+With `defend-platform-api-overview=true` sign-in (email and SSO) ends in a 401; with it `false` it works. The console then
+calls the platform API through the gateway with the session cookie as the bearer token. The gateway/Foundation validate a
+Cognito ID token (claims from the pre-token-generation trigger), while the on-prem session is our own signed token.
+Using the platform API therefore needs: the cookie to be the Cognito ID token (verified locally via JWKS), the Cognito
+triggers (or Foundation-side user resolution) so the claims exist, and users seeded in Foundation. Installer default is
+flag OFF until that is done; legacy Defend pages still need scout (not in the charts) or Argus v3 + the platform services.
