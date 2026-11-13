@@ -32,9 +32,23 @@ The login triggers have a **legacy DynamoDB-only path**: with no `platform_authz
 4. **Frontend build**: ship SaaS tags as container images (ECR, ARM) alongside Vercel; confirm which SaaS-only pieces (Vercel OIDC, `$sso-origin`) need a Kubernetes path.
 5. **Verify + docs**: installer verify checks (Dynamo reachable, triggers invoke, login end-to-end, audit record lands).
 
-## Open questions (need answers before phase 1 is sized)
+## Answers so far
 
-- Is `lambda.zip` (foundation `dist/lambda`) buildable/publishable for customers, and who owns that pipeline?
-- Which of `PUBLIC_API_GATEWAY`, `TURNS_ENDPOINT`, `ARGUS_ENDPOINT`, `IRIS_CONTROL_PLANE_*` do the ascend/defend/iris on-prem charts already provide?
-- Does the SaaS frontend run on Kubernetes today (root `Dockerfile` exists), or only on Vercel? Vercel-only pieces: OIDC token for AWS credentials, `$sso-origin`.
-- Who seeds customers in SaaS (`infra/platform/seed-users`)? Reuse for on-prem first-admin creation.
+- **lambda.zip**: the customer builds and publishes it (Straiker provides the zip/source and instructions). For testing, the tester acts as the customer. The installer takes a bucket+key (`lambda_code`) as input.
+- **Frontend on Kubernetes**: yes (SaaS uses Vercel; on-prem cannot). Vercel-specific code and its status:
+  - `lib/server/aws/credentials.ts`: skipped when `NODE_DEPLOY` is set, so the AWS default chain (Pod Identity) is used. OK.
+  - `waitUntil` from `@vercel/functions` (posthog.ts, workflow.remote.ts): needs a check that it is a harmless no-op off Vercel.
+  - `$sso-origin` alias (svelte.config.js): needs a Kubernetes value.
+- **Backend endpoints** (frontend env var -> what it is -> on-prem chart status):
+  - `ARGUS_ENDPOINT` -> Defend/argus backend -> wired (`frontend.argusEndpoint`).
+  - `IRIS_CONTROL_PLANE_ADMIN_ENDPOINT` / `_PUBLIC_ENDPOINT` / `_ADMIN_API_KEY` -> Ascend control plane (in-cluster, and browser-facing for live SSE) -> wired.
+  - `INTERNAL_API_KEY` -> service-to-service key -> wired.
+  - `PUBLIC_API_GATEWAY` -> API gateway used by the scout, agent-config, policy and api-sdk clients -> `platform-api-gateway` chart exists, frontend env NOT wired.
+  - `TURNS_ENDPOINT` / `TURNS_APP_API_KEY` -> turns export API -> NOT wired (on-prem build downloads turns from OpenSearch directly).
+  - `PRISM_BLOB_BASE_URL` -> S3 origin for Defend scan uploads (CSP only) -> optional.
+  - `SCOUT_ENDPOINT` -> wired, but scout is not built in the chart family yet.
+
+## Still open
+
+- Which pages break without `PUBLIC_API_GATEWAY` and `TURNS_ENDPOINT` (trace the call sites).
+- `waitUntil` behavior off Vercel; value for `$sso-origin`.
