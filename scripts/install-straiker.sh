@@ -117,14 +117,24 @@ ESO_STORE_NAME="aws-sm"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
-# --data-layer: the customer's own identity provider, federated into the Cognito pool ("Sign in with SSO").
-# SAML (--sso-saml-metadata-url) or OIDC (--sso-oidc-issuer/--sso-oidc-client-id + env SSO_OIDC_CLIENT_SECRET).
-# Remembered in install state (the OIDC secret in Secrets Manager), so later runs keep it.
+# --data-layer: the customer's identity provider, federated into the Cognito pool ("Sign in with SSO"). One per install.
+#   --sso-type google|facebook|amazon|apple|saml|oidc, plus the values that type needs (see --help).
+# Secrets (client secret, Apple private key) come from the environment or a hidden prompt, never argv, and are kept in
+# Secrets Manager (<cluster>/cognito/sso-credentials). Everything else is remembered in install state.
+SSO_TYPE="${SSO_TYPE:-}"
 SSO_NAME="${SSO_NAME:-}"
 SSO_SAML_METADATA_URL="${SSO_SAML_METADATA_URL:-}"
+SSO_SAML_METADATA_FILE="${SSO_SAML_METADATA_FILE:-}"
 SSO_OIDC_ISSUER="${SSO_OIDC_ISSUER:-}"
-SSO_OIDC_CLIENT_ID="${SSO_OIDC_CLIENT_ID:-}"
+SSO_CLIENT_ID="${SSO_CLIENT_ID:-${SSO_OIDC_CLIENT_ID:-}}"
+SSO_EMAIL_CLAIM="${SSO_EMAIL_CLAIM:-}"
 SSO_DOMAINS="${SSO_DOMAINS:-}"
+SSO_APPLE_TEAM_ID="${SSO_APPLE_TEAM_ID:-}"
+SSO_APPLE_KEY_ID="${SSO_APPLE_KEY_ID:-}"
+SSO_APPLE_PRIVATE_KEY_FILE="${SSO_APPLE_PRIVATE_KEY_FILE:-}"
+ALLOW_SSO_CHANGE="${ALLOW_SSO_CHANGE:-false}"
+SKIP_SSO_PREFLIGHT="${SKIP_SSO_PREFLIGHT:-false}"
+ROTATE_ADMIN_PASSWORD="${ROTATE_ADMIN_PASSWORD:-false}"
 
 # --data-layer: Amazon SES sending domain (Cognito mail from no-reply@, connect from notifications@).
 # DNS records go into a Route53 zone of this account (found automatically, or created for the domain; then its NS
@@ -657,12 +667,27 @@ Options:
                                    phase 'aws-data'); the installer creates this user with a password kept in
                                    Secrets Manager. Remembered in install state; required by phase 'straiker-core'.
   --reset-admin-password           Set the first admin's Cognito password again from Secrets Manager (recovery).
-  --sso-name <name>                With --data-layer: the customer's own identity provider for "Sign in with SSO"
-                                   (federated into the Cognito pool). Needs --sso-domains and either
-                                   --sso-saml-metadata-url <url> (SAML) or --sso-oidc-issuer <url> +
-                                   --sso-oidc-client-id <id> with the secret in env SSO_OIDC_CLIENT_SECRET (OIDC).
+  --rotate-admin-password          Generate a new password for the first admin (kept in Secrets Manager) and set it.
+  --sso-type <type>                With --data-layer: the customer's identity provider for "Sign in with SSO",
+                                   federated into the Cognito pool (one per install; all need --sso-domains):
+                                     google | facebook | amazon | apple   built-in providers
+                                     saml | oidc                          any other provider (needs --sso-name)
+                                   Values per type (secrets from the environment, or a hidden prompt on a terminal):
+                                     google/facebook/amazon  --sso-client-id <id>, env SSO_CLIENT_SECRET
+                                     apple   --sso-client-id <Services ID> --sso-apple-team-id <id>
+                                             --sso-apple-key-id <id> --sso-apple-private-key-file <p8 file>
+                                     saml    --sso-saml-metadata-url <https url> or --sso-saml-metadata-file <xml>
+                                     oidc    --sso-oidc-issuer <https url> --sso-client-id <id>, env SSO_CLIENT_SECRET
                                    Remembered in install state; re-run phases aws-data and straiker-core to apply.
+                                   A hand-over sheet for the customer's IT is written to ~/.straiker/.
+  --sso-name <name>                saml/oidc only: the provider's name in Cognito (3-32 letters, digits, hyphens).
   --sso-domains <a.com,b.com>      Email domains allowed to sign in through SSO (new users are created as viewers).
+  --sso-email-claim <claim>        The provider's claim/attribute carrying the user's email, when not the standard one
+                                   (e.g. Entra OIDC without an email claim: preferred_username).
+  --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
+                                   the old one are orphaned).
+  --skip-sso-preflight             Skip the reachability / certificate checks of the SAML metadata or OIDC issuer
+                                   (use when this machine cannot reach a provider that AWS can).
   --ses-domain <domain>            With --data-layer: sending domain in Amazon SES. Cognito invitations / password
                                    resets come from no-reply@<domain>, connect from notifications@<domain>. DNS
                                    records are created in a Route53 zone of this account (found automatically,
@@ -1510,6 +1535,10 @@ parse_args() {
         RESET_ADMIN_PASSWORD=true
         shift
         ;;
+      --sso-type)
+        SSO_TYPE=${2:-}
+        shift 2
+        ;;
       --sso-name)
         SSO_NAME=${2:-}
         shift 2
@@ -1518,17 +1547,50 @@ parse_args() {
         SSO_SAML_METADATA_URL=${2:-}
         shift 2
         ;;
+      --sso-saml-metadata-file)
+        SSO_SAML_METADATA_FILE=${2:-}
+        shift 2
+        ;;
       --sso-oidc-issuer)
         SSO_OIDC_ISSUER=${2:-}
         shift 2
         ;;
-      --sso-oidc-client-id)
-        SSO_OIDC_CLIENT_ID=${2:-}
+      --sso-client-id | --sso-oidc-client-id)
+        SSO_CLIENT_ID=${2:-}
+        shift 2
+        ;;
+      --sso-email-claim)
+        SSO_EMAIL_CLAIM=${2:-}
         shift 2
         ;;
       --sso-domains)
         SSO_DOMAINS=${2:-}
         shift 2
+        ;;
+      --sso-apple-team-id)
+        SSO_APPLE_TEAM_ID=${2:-}
+        shift 2
+        ;;
+      --sso-apple-key-id)
+        SSO_APPLE_KEY_ID=${2:-}
+        shift 2
+        ;;
+      --sso-apple-private-key-file)
+        SSO_APPLE_PRIVATE_KEY_FILE=${2:-}
+        shift 2
+        ;;
+      --allow-sso-change)
+        ALLOW_SSO_CHANGE=true
+        shift
+        ;;
+      --skip-sso-preflight)
+        SKIP_SSO_PREFLIGHT=true
+        shift
+        ;;
+      --rotate-admin-password)
+        ROTATE_ADMIN_PASSWORD=true
+        RESET_ADMIN_PASSWORD=true
+        shift
         ;;
       --ses-domain)
         SES_DOMAIN=${2:-}
@@ -2909,6 +2971,7 @@ EOF
   for cf in pool_id issuer client_id secret_name admin_secret_name saml_acs_url entity_id oidc_redirect_uri; do
     set_metadata "cognito_${cf}" "$(printf '%s' "${cognito_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("'"${cf}"'",""))' 2>/dev/null || true)"
   done
+  write_sso_handoff
   local ses_json
   ses_json="$(tofu -chdir="${DATA_DIR}" output -json ses_domains 2>/dev/null || echo '{}')"
   set_metadata "ses_sender" "$(printf '%s' "${ses_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("sender",""))' 2>/dev/null || true)"
@@ -4089,6 +4152,24 @@ ensure_cognito_admin_user() {
       || { mark_phase_blocked "Could not create Cognito user ${email} in pool ${pool}."; return 1; }
     log "Created Cognito admin user ${email}."
   fi
+  if [[ "${ROTATE_ADMIN_PASSWORD}" == "true" ]]; then
+    tmp="$(mktemp)"
+    chmod 600 "${tmp}"
+    python3 -c 'import json, secrets, string
+sym = "!#%*-_="
+while True:
+    p = "".join(secrets.choice(string.ascii_letters + string.digits + sym) for _ in range(24))
+    if any(c.islower() for c in p) and any(c.isupper() for c in p) and any(c.isdigit() for c in p) and any(c in sym for c in p):
+        break
+print(json.dumps({"password": p}))' > "${tmp}"
+    if ! aws secretsmanager put-secret-value --secret-id "${admin_secret}" --region "${AWS_REGION}" --secret-string "file://${tmp}" >/dev/null; then
+      rm -f "${tmp}"
+      mark_phase_blocked "Could not store the new admin password in Secrets Manager."
+      return 1
+    fi
+    rm -f "${tmp}"
+    log "Generated a new password for ${email} in Secrets Manager."
+  fi
   tmp="$(mktemp)"
   chmod 600 "${tmp}"
   aws secretsmanager get-secret-value --secret-id "${admin_secret}" --region "${AWS_REGION}" --query SecretString --output text \
@@ -4102,41 +4183,249 @@ ensure_cognito_admin_user() {
   log "Cognito password for ${email} set from Secrets Manager '${admin_secret}'."
 }
 
-# Validates and remembers the customer's SSO settings (flags -> install state); the OIDC client secret
-# (env SSO_OIDC_CLIENT_SECRET) goes to Secrets Manager. Run before the Cognito pool is applied.
-remember_sso_settings() {
-  [[ -n "${SSO_NAME}" ]] || return 0
-  if [[ -z "${SSO_DOMAINS}" ]]; then
-    mark_phase_blocked "--sso-name needs --sso-domains <a.com,b.com> (the email domains allowed to sign in through SSO)."
-    return 1
-  fi
-  local type=""
-  if [[ -n "${SSO_SAML_METADATA_URL}" ]]; then
-    type="SAML"
-  elif [[ -n "${SSO_OIDC_ISSUER}" && -n "${SSO_OIDC_CLIENT_ID}" ]]; then
-    type="OIDC"
-    if [[ -n "${SSO_OIDC_CLIENT_SECRET:-}" ]]; then
-      local sid="${CLUSTER_NAME}/cognito/sso-oidc-client-secret"
-      if aws secretsmanager describe-secret --secret-id "${sid}" --region "${AWS_REGION}" >/dev/null 2>&1; then
-        aws secretsmanager put-secret-value --secret-id "${sid}" --region "${AWS_REGION}" --secret-string "${SSO_OIDC_CLIENT_SECRET}" >/dev/null
-      else
-        aws secretsmanager create-secret --name "${sid}" --region "${AWS_REGION}" --secret-string "${SSO_OIDC_CLIENT_SECRET}" >/dev/null
-      fi
-    fi
+# Creates or updates a Secrets Manager secret from a file (the value never goes through argv).
+sm_put_secret_file() {
+  local id="$1" file="$2"
+  if aws secretsmanager describe-secret --secret-id "${id}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    aws secretsmanager put-secret-value --secret-id "${id}" --region "${AWS_REGION}" --secret-string "file://${file}" >/dev/null
   else
-    mark_phase_blocked "--sso-name needs --sso-saml-metadata-url <url>, or --sso-oidc-issuer <url> + --sso-oidc-client-id <id> (and env SSO_OIDC_CLIENT_SECRET)."
-    return 1
+    aws secretsmanager create-secret --name "${id}" --region "${AWS_REGION}" --secret-string "file://${file}" >/dev/null
   fi
-  set_metadata "sso_name" "${SSO_NAME}"
-  set_metadata "sso_type" "${type}"
-  set_metadata "sso_saml_metadata_url" "${SSO_SAML_METADATA_URL}"
-  set_metadata "sso_oidc_issuer" "${SSO_OIDC_ISSUER}"
-  set_metadata "sso_oidc_client_id" "${SSO_OIDC_CLIENT_ID}"
-  set_metadata "sso_domains" "${SSO_DOMAINS}"
 }
 
-# JSON for Terraform's cognito_identity_providers from the remembered settings ({} when none). OIDC client secret
-# is read from Secrets Manager; the result goes to tofu through TF_VAR (never argv or a file).
+# Checks the provider is reachable and sane before anything is applied. SAML: the metadata (URL or file) is valid XML
+# with an IdP SSO endpoint and a signing certificate that is not expired (warns under 60 days). OIDC: the discovery
+# document is https, names the issuer and has the endpoints. Remembers the certificate's end date for the verify phase.
+# $1 = Cognito type, $2 = metadata URL, $3 = metadata file, $4 = issuer.
+sso_preflight() {
+  local ctype="$1" url="$2" file="$3" issuer="$4" tmp out
+  require_command curl
+  require_command openssl
+  require_command python3
+  tmp="$(mktemp)"
+  chmod 600 "${tmp}"
+  case "${ctype}" in
+    SAML)
+      if [[ -n "${url}" ]]; then
+        if ! curl -fsS --max-time 20 --proto '=https' -o "${tmp}" "${url}" 2>/dev/null; then
+          rm -f "${tmp}"
+          mark_phase_blocked "The SAML metadata URL is not reachable from here (${url}). Cognito fetches it from AWS, so it must be public: use --sso-saml-metadata-file for a private provider, or --skip-sso-preflight if only this machine cannot reach it."
+          return 1
+        fi
+      else
+        cp "${file}" "${tmp}"
+      fi
+      if ! out="$(python3 -W ignore -c '
+import datetime, re, subprocess, sys
+import xml.etree.ElementTree as ET
+x = open(sys.argv[1], encoding="utf-8").read()
+try:
+    root = ET.fromstring(x)
+except ET.ParseError as e:
+    print("the SAML metadata is not valid XML (%s)" % e); sys.exit(1)
+if "IDPSSODescriptor" not in x or "SingleSignOnService" not in x:
+    print("the SAML metadata has no IDPSSODescriptor / SingleSignOnService (is it the identity provider metadata?)"); sys.exit(1)
+ends = []
+for c in re.findall(r"<(?:\w+:)?X509Certificate>\s*([^<]+?)\s*</", x):
+    pem = "-----BEGIN CERTIFICATE-----\n" + "\n".join(re.findall(".{1,64}", re.sub(r"\s+", "", c))) + "\n-----END CERTIFICATE-----\n"
+    r = subprocess.run(["openssl", "x509", "-noout", "-enddate"], input=pem, capture_output=True, text=True)
+    if r.returncode == 0:
+        ends.append(datetime.datetime.strptime(r.stdout.strip().split("=")[1], "%b %d %H:%M:%S %Y %Z"))
+if not ends:
+    print("the SAML metadata has no readable signing certificate"); sys.exit(1)
+last = max(ends)
+days = (last - datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)).days
+if days < 0:
+    print("every signing certificate in the SAML metadata has expired (%s)" % last.date()); sys.exit(1)
+print("%d %s" % (days, last.date()))
+' "${tmp}" 2>&1)"; then
+        rm -f "${tmp}"
+        mark_phase_blocked "SAML metadata check failed: ${out}"
+        return 1
+      fi
+      set_metadata "sso_cert_not_after" "${out#* }"
+      if [[ "${out%% *}" -lt 60 ]]; then
+        log "WARN  The SAML signing certificate expires in ${out%% *} days (${out#* }); ask the customer to rotate it and re-run phase aws-data with the new metadata."
+      else
+        log "SAML metadata OK; signing certificate valid until ${out#* }."
+      fi
+      ;;
+    OIDC)
+      if ! curl -fsS --max-time 20 --proto '=https' -o "${tmp}" "${issuer%/}/.well-known/openid-configuration" 2>/dev/null; then
+        rm -f "${tmp}"
+        mark_phase_blocked "The OIDC discovery document is not reachable (${issuer%/}/.well-known/openid-configuration). Cognito fetches it from AWS, so the issuer must be public; use --skip-sso-preflight if only this machine cannot reach it."
+        return 1
+      fi
+      if ! out="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+iss = sys.argv[2].rstrip("/")
+if str(d.get("issuer", "")).rstrip("/") != iss:
+    print("the discovery document names issuer %r, not %r" % (d.get("issuer"), iss)); sys.exit(1)
+for k in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+    if not str(d.get(k, "")).startswith("https://"):
+        print("the discovery document has no https %s" % k); sys.exit(1)
+print("ok")
+' "${tmp}" "${issuer}" 2>&1)"; then
+        rm -f "${tmp}"
+        mark_phase_blocked "OIDC discovery check failed: ${out}"
+        return 1
+      fi
+      log "OIDC discovery OK for ${issuer}."
+      ;;
+  esac
+  rm -f "${tmp}"
+}
+
+# Validates and remembers the customer's SSO settings (flags -> install state); secrets go to Secrets Manager
+# (<cluster>/cognito/sso-credentials). Run before the Cognito pool is applied.
+remember_sso_settings() {
+  [[ -n "${SSO_TYPE}${SSO_NAME}${SSO_SAML_METADATA_URL}${SSO_SAML_METADATA_FILE}${SSO_OIDC_ISSUER}" ]] || return 0
+  local type ctype name
+  type="$(printf '%s' "${SSO_TYPE}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${type}" ]]; then
+    if [[ -n "${SSO_SAML_METADATA_URL}${SSO_SAML_METADATA_FILE}" ]]; then type=saml; elif [[ -n "${SSO_OIDC_ISSUER}" ]]; then type=oidc; fi
+  fi
+  case "${type}" in
+    google) ctype=Google; name=Google ;;
+    facebook) ctype=Facebook; name=Facebook ;;
+    amazon) ctype=LoginWithAmazon; name=LoginWithAmazon ;;
+    apple) ctype=SignInWithApple; name=SignInWithApple ;;
+    saml) ctype=SAML; name="${SSO_NAME}" ;;
+    oidc) ctype=OIDC; name="${SSO_NAME}" ;;
+    *)
+      mark_phase_blocked "--sso-type must be one of google, facebook, amazon, apple, saml, oidc."
+      return 1
+      ;;
+  esac
+  if [[ "${ctype}" == "SAML" || "${ctype}" == "OIDC" ]]; then
+    if [[ ! "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{1,30}[A-Za-z0-9]$ ]] || [[ "${name}" =~ ^(COGNITO|Google|Facebook|LoginWithAmazon|SignInWithApple)$ ]]; then
+      mark_phase_blocked "--sso-name is required for saml/oidc: 3-32 letters, digits or hyphens (no underscore), not a built-in provider name."
+      return 1
+    fi
+  fi
+  if [[ -z "${SSO_DOMAINS}" ]]; then
+    mark_phase_blocked "SSO needs --sso-domains <a.com,b.com> (the email domains allowed to sign in through SSO)."
+    return 1
+  fi
+  local d
+  for d in ${SSO_DOMAINS//,/ }; do
+    if [[ ! "${d}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+      mark_phase_blocked "--sso-domains: '${d}' is not a valid domain."
+      return 1
+    fi
+  done
+
+  # A different provider than the one already set up orphans the users who signed in through it.
+  local prev_name prev_type
+  prev_name="$(get_metadata "sso_name")"
+  prev_type="$(get_metadata "sso_type")"
+  if [[ -n "${prev_name}" && ( "${prev_name}" != "${name}" || "${prev_type}" != "${ctype}" ) && "${ALLOW_SSO_CHANGE}" != "true" ]]; then
+    mark_phase_blocked "SSO provider '${prev_name}' (${prev_type}) is already set up; switching to '${name}' (${ctype}) orphans the users who signed in through it. Re-run with --allow-sso-change to do it anyway."
+    return 1
+  fi
+
+  # Per-type inputs.
+  local meta_file="" cs="${SSO_CLIENT_SECRET:-${SSO_OIDC_CLIENT_SECRET:-}}" apple_key="${SSO_APPLE_PRIVATE_KEY:-}"
+  case "${ctype}" in
+    SAML)
+      if [[ -n "${SSO_SAML_METADATA_URL}" && ! "${SSO_SAML_METADATA_URL}" =~ ^https:// ]]; then
+        mark_phase_blocked "--sso-saml-metadata-url must be https."
+        return 1
+      fi
+      if [[ -z "${SSO_SAML_METADATA_URL}" && -z "${SSO_SAML_METADATA_FILE}" ]]; then
+        mark_phase_blocked "SAML needs --sso-saml-metadata-url <https url> or --sso-saml-metadata-file <xml>."
+        return 1
+      fi
+      if [[ -n "${SSO_SAML_METADATA_FILE}" && ! -r "${SSO_SAML_METADATA_FILE}" ]]; then
+        mark_phase_blocked "Cannot read --sso-saml-metadata-file ${SSO_SAML_METADATA_FILE}."
+        return 1
+      fi
+      meta_file="${SSO_SAML_METADATA_FILE}"
+      ;;
+    OIDC)
+      if [[ ! "${SSO_OIDC_ISSUER}" =~ ^https:// || -z "${SSO_CLIENT_ID}" ]]; then
+        mark_phase_blocked "OIDC needs --sso-oidc-issuer <https url> and --sso-client-id <id> (secret in env SSO_CLIENT_SECRET)."
+        return 1
+      fi
+      ;;
+    SignInWithApple)
+      if [[ -n "${SSO_APPLE_PRIVATE_KEY_FILE}" ]]; then
+        [[ -r "${SSO_APPLE_PRIVATE_KEY_FILE}" ]] || { mark_phase_blocked "Cannot read --sso-apple-private-key-file."; return 1; }
+        apple_key="$(cat "${SSO_APPLE_PRIVATE_KEY_FILE}")"
+      fi
+      if [[ -z "${SSO_CLIENT_ID}" || -z "${SSO_APPLE_TEAM_ID}" || -z "${SSO_APPLE_KEY_ID}" ]]; then
+        mark_phase_blocked "Sign in with Apple needs --sso-client-id (Services ID), --sso-apple-team-id, --sso-apple-key-id and the private key (--sso-apple-private-key-file or env SSO_APPLE_PRIVATE_KEY)."
+        return 1
+      fi
+      if [[ -n "${apple_key}" && "${apple_key}" != *"BEGIN PRIVATE KEY"* ]]; then
+        mark_phase_blocked "The Apple private key is not a PEM (.p8) key."
+        return 1
+      fi
+      ;;
+    *)
+      if [[ -z "${SSO_CLIENT_ID}" ]]; then
+        mark_phase_blocked "${ctype} needs --sso-client-id (secret in env SSO_CLIENT_SECRET)."
+        return 1
+      fi
+      ;;
+  esac
+
+  # Secrets: new values go to Secrets Manager; otherwise the stored ones must exist (prompt on a terminal).
+  local sid="${CLUSTER_NAME}/cognito/sso-credentials"
+  if [[ "${ctype}" != "SAML" ]]; then
+    local stored=false
+    aws secretsmanager describe-secret --secret-id "${sid}" --region "${AWS_REGION}" >/dev/null 2>&1 && stored=true
+    if [[ -z "${cs}" && -z "${apple_key}" && "${stored}" != "true" ]]; then
+      if [[ -t 0 && "${ctype}" != "SignInWithApple" ]]; then
+        read -rsp "Client secret for ${name}: " cs || true
+        echo
+      fi
+      if [[ -z "${cs}" ]]; then
+        mark_phase_blocked "${ctype} needs its secret: env SSO_CLIENT_SECRET (or SSO_APPLE_PRIVATE_KEY / --sso-apple-private-key-file for Apple)."
+        return 1
+      fi
+    fi
+    if [[ -n "${cs}" || -n "${apple_key}" ]]; then
+      local stmp
+      stmp="$(mktemp)"
+      chmod 600 "${stmp}"
+      CS="${cs}" AK="${apple_key}" python3 -c 'import json, os; print(json.dumps({"client_secret": os.environ["CS"], "apple_private_key": os.environ["AK"]}))' > "${stmp}"
+      if ! sm_put_secret_file "${sid}" "${stmp}"; then
+        rm -f "${stmp}"
+        mark_phase_blocked "Could not store the SSO credentials in Secrets Manager (${sid})."
+        return 1
+      fi
+      rm -f "${stmp}"
+    fi
+  fi
+
+  if [[ "${ctype}" == "SAML" && -n "${meta_file}" ]]; then
+    mkdir -p "${HOME}/.straiker"
+    cp "${meta_file}" "${HOME}/.straiker/sso-metadata-${CLUSTER_NAME}.xml"
+    chmod 600 "${HOME}/.straiker/sso-metadata-${CLUSTER_NAME}.xml"
+    set_metadata "sso_saml_metadata_file" "${HOME}/.straiker/sso-metadata-${CLUSTER_NAME}.xml"
+  elif [[ "${ctype}" == "SAML" ]]; then
+    set_metadata "sso_saml_metadata_file" ""
+  fi
+
+  if [[ "${SKIP_SSO_PREFLIGHT}" != "true" && ( "${ctype}" == "SAML" || "${ctype}" == "OIDC" ) ]]; then
+    sso_preflight "${ctype}" "${SSO_SAML_METADATA_URL}" "${meta_file}" "${SSO_OIDC_ISSUER}" || return 1
+  fi
+
+  set_metadata "sso_name" "${name}"
+  set_metadata "sso_type" "${ctype}"
+  set_metadata "sso_saml_metadata_url" "${SSO_SAML_METADATA_URL}"
+  set_metadata "sso_oidc_issuer" "${SSO_OIDC_ISSUER}"
+  set_metadata "sso_client_id" "${SSO_CLIENT_ID}"
+  set_metadata "sso_email_claim" "${SSO_EMAIL_CLAIM}"
+  set_metadata "sso_domains" "${SSO_DOMAINS}"
+  set_metadata "sso_apple_team_id" "${SSO_APPLE_TEAM_ID}"
+  set_metadata "sso_apple_key_id" "${SSO_APPLE_KEY_ID}"
+}
+
+# JSON for Terraform's cognito_identity_providers from the remembered settings ({} when none). Secrets are read from
+# Secrets Manager; the result goes to tofu through TF_VAR (never argv or a file).
 sso_identity_providers_json() {
   local name type
   name="$(get_metadata "sso_name")"
@@ -4145,20 +4434,117 @@ sso_identity_providers_json() {
     return 0
   fi
   type="$(get_metadata "sso_type")"
-  local secret=""
-  if [[ "${type}" == "OIDC" ]]; then
-    secret="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/cognito/sso-oidc-client-secret" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  local creds="{}" meta_xml=""
+  if [[ "${type}" != "SAML" ]]; then
+    creds="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/cognito/sso-credentials" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || echo '{}')"
+  elif [[ -n "$(get_metadata "sso_saml_metadata_file")" && -r "$(get_metadata "sso_saml_metadata_file")" ]]; then
+    meta_xml="$(cat "$(get_metadata "sso_saml_metadata_file")")"
   fi
-  NAME="${name}" TYPE="${type}" SAML="$(get_metadata "sso_saml_metadata_url")" ISSUER="$(get_metadata "sso_oidc_issuer")" \
-    CLIENT="$(get_metadata "sso_oidc_client_id")" SECRET="${secret}" DOMAINS="$(get_metadata "sso_domains")" python3 -c '
+  NAME="${name}" TYPE="${type}" SAML="$(get_metadata "sso_saml_metadata_url")" META_XML="${meta_xml}" \
+    ISSUER="$(get_metadata "sso_oidc_issuer")" CLIENT="$(get_metadata "sso_client_id")" CREDS="${creds}" \
+    CLAIM="$(get_metadata "sso_email_claim")" DOMAINS="$(get_metadata "sso_domains")" \
+    TEAM="$(get_metadata "sso_apple_team_id")" KEY="$(get_metadata "sso_apple_key_id")" python3 -c '
 import json, os
 e = os.environ
+c = json.loads(e["CREDS"] or "{}")
 p = {"type": e["TYPE"], "domains": [d.strip() for d in e["DOMAINS"].split(",") if d.strip()]}
+if e["CLAIM"]:
+    p["email_claim"] = e["CLAIM"]
 if e["TYPE"] == "SAML":
-    p["saml_metadata_url"] = e["SAML"]
+    if e["SAML"]:
+        p["saml_metadata_url"] = e["SAML"]
+    else:
+        p["saml_metadata_file"] = e["META_XML"]
 else:
-    p.update({"oidc_issuer": e["ISSUER"], "oidc_client_id": e["CLIENT"], "oidc_client_secret": e["SECRET"]})
+    p["client_id"] = e["CLIENT"]
+    if e["TYPE"] == "OIDC":
+        p["oidc_issuer"] = e["ISSUER"]
+    if e["TYPE"] == "SignInWithApple":
+        p.update({"apple_team_id": e["TEAM"], "apple_key_id": e["KEY"], "apple_private_key": c.get("apple_private_key", "")})
+    else:
+        p["client_secret"] = c.get("client_secret", "")
 print(json.dumps({e["NAME"]: p}))'
+}
+
+# Writes the hand-over sheet for the customer's IT (no secrets): what to register in their provider, and what to send
+# back. Per provider type; the values come from the Cognito outputs in install state.
+write_sso_handoff() {
+  local name type file acs eid redir domains
+  name="$(get_metadata "sso_name")"
+  [[ -n "${name}" ]] || return 0
+  type="$(get_metadata "sso_type")"
+  acs="$(get_metadata "cognito_saml_acs_url")"
+  eid="$(get_metadata "cognito_entity_id")"
+  redir="$(get_metadata "cognito_oidc_redirect_uri")"
+  domains="$(get_metadata "sso_domains")"
+  mkdir -p "${HOME}/.straiker"
+  file="${HOME}/.straiker/sso-handoff-${CLUSTER_NAME}.md"
+  {
+    echo "# Straiker single sign-on: setup for your identity provider (${type})"
+    echo
+    echo "Users with an email in these domains can sign in: ${domains}. New users get the read-only viewer role."
+    echo
+    case "${type}" in
+      SAML)
+        echo "Register Straiker as a SAML application (service provider) in your identity provider:"
+        echo
+        echo "- Single sign-on URL / ACS URL: ${acs}"
+        echo "- Audience URI / Entity ID: ${eid}"
+        echo "- Name ID format: EmailAddress"
+        echo "- Send the user's email as the attribute \`$(get_metadata "sso_email_claim")\` (default: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress)"
+        echo "- Sign the assertion (Okta, Entra, ADFS and OneLogin do by default)"
+        echo
+        echo "Then send us the identity provider's metadata (URL, or the XML file if it is not public)."
+        echo "Cognito fetches a metadata URL from the internet, so it must be publicly reachable."
+        ;;
+      OIDC)
+        echo "Register Straiker as an OpenID Connect web application (confidential client, authorization code flow):"
+        echo
+        echo "- Redirect (callback) URI: ${redir}"
+        echo "- Scopes: openid email profile"
+        echo "- Make sure ID tokens carry the user's email (claim \`$(get_metadata "sso_email_claim")\` if not the standard \`email\`)"
+        echo
+        echo "Then send us the issuer URL, client ID and client secret. The issuer must be publicly reachable."
+        ;;
+      Google)
+        echo "In Google Cloud Console > APIs & Services > Credentials, create an OAuth client ID (Web application):"
+        echo
+        echo "- Authorized redirect URI: ${redir}"
+        echo "- Scopes: openid, email, profile (OAuth consent screen: Internal for a Workspace-only audience)"
+        echo
+        echo "Then send us the client ID and client secret."
+        ;;
+      Facebook)
+        echo "In Meta for Developers, create an app with the Facebook Login product:"
+        echo
+        echo "- Valid OAuth redirect URI: ${redir}"
+        echo "- Permissions: public_profile, email"
+        echo
+        echo "Then send us the App ID and App secret."
+        ;;
+      LoginWithAmazon)
+        echo "In the Login with Amazon console, create a security profile and a web application:"
+        echo
+        echo "- Allowed return URL: ${redir}"
+        echo "- Scope: profile"
+        echo
+        echo "Then send us the Client ID and Client secret."
+        ;;
+      SignInWithApple)
+        echo "In the Apple Developer account, create a Services ID with Sign in with Apple and a key:"
+        echo
+        echo "- Return URL: ${redir}"
+        echo "- Domain: the host of that URL"
+        echo "- Scopes: email, name"
+        echo
+        echo "Then send us the Services ID, Team ID, Key ID and the .p8 private key."
+        ;;
+    esac
+    echo
+    echo "Do not email the client secret or private key: share them through your password manager or secure channel."
+  } > "${file}"
+  chmod 600 "${file}"
+  set_metadata "sso_handoff_file" "${file}"
 }
 
 # Validates and remembers the SES domain, and decides once how its DNS is handled: an existing public Route53 zone of
@@ -4437,6 +4823,68 @@ phase_verify_data_layer() {
     fi
     if [[ "$(aws sesv2 get-account --region "${AWS_REGION}" --query ProductionAccessEnabled --output text 2>/dev/null || true)" != "True" ]]; then
       log "WARN  SES is still in the sandbox in ${AWS_REGION}: mail only reaches verified addresses until AWS grants production access."
+    fi
+  fi
+
+  # 2g. SSO: the provider is in the pool, the sign-in really redirects to it (no password needed), and a SAML
+  # certificate is not about to expire.
+  local sso_n sso_t
+  sso_n="$(get_metadata "sso_name")"
+  sso_t="$(get_metadata "sso_type")"
+  if [[ -n "${sso_n}" && -n "$(get_metadata "cognito_pool_id")" ]]; then
+    if aws cognito-idp describe-identity-provider --user-pool-id "$(get_metadata "cognito_pool_id")" --provider-name "${sso_n}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+      log "PASS  SSO provider ${sso_n} (${sso_t}) exists in the Cognito pool."
+      local cg_dom cb enc_cb hdrs loc_host
+      cg_dom="$(get_metadata "cognito_oidc_redirect_uri")"
+      cg_dom="${cg_dom%/oauth2/idpresponse}"
+      cb="$(app_origin)/login/oidc/callback"
+      enc_cb="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${cb}")"
+      hdrs="$(curl -s -o /dev/null -D - --max-time 20 "${cg_dom}/oauth2/authorize?client_id=$(get_metadata "cognito_client_id")&response_type=code&scope=openid+email&redirect_uri=${enc_cb}&identity_provider=${sso_n}" 2>/dev/null || true)"
+      loc_host="$(printf '%s' "${hdrs}" | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | sed -E 's#^https?://([^/]+).*#\1#' | head -1)"
+      if printf '%s' "${hdrs}" | head -1 | grep -q ' 302' && [[ -n "${loc_host}" && "${cg_dom}" != *"${loc_host}"* ]]; then
+        log "PASS  SSO sign-in redirects to the provider (${loc_host})."
+      else
+        log "FAIL  SSO sign-in does not redirect to the provider (response: $(printf '%s' "${hdrs}" | head -1 | tr -d '\r'), location host: ${loc_host:-none}); check the provider settings and the app client."
+        fail_count=$((fail_count + 1))
+      fi
+    else
+      log "FAIL  SSO provider ${sso_n} is not in the Cognito pool; re-run phase 'aws-data'."
+      fail_count=$((fail_count + 1))
+    fi
+    local cert_end
+    cert_end="$(get_metadata "sso_cert_not_after")"
+    if [[ "${sso_t}" == "SAML" && -n "${cert_end}" ]]; then
+      local cert_days
+      cert_days="$(python3 -c 'import datetime, sys; print((datetime.date.fromisoformat(sys.argv[1]) - datetime.date.today()).days)' "${cert_end}" 2>/dev/null || echo 999)"
+      if [[ "${cert_days}" -lt 0 ]]; then
+        log "FAIL  The SAML signing certificate expired on ${cert_end}: SSO logins fail until the customer's new metadata is applied (phase aws-data)."
+        fail_count=$((fail_count + 1))
+      elif [[ "${cert_days}" -lt 60 ]]; then
+        log "WARN  The SAML signing certificate expires in ${cert_days} days (${cert_end}); get the new metadata and re-run phase aws-data."
+      else
+        log "PASS  SAML signing certificate valid for ${cert_days} more days."
+      fi
+    fi
+  fi
+
+  # 2h. The Terraform state holds the Cognito client secrets and any SSO secret: its bucket must be private,
+  # encrypted and versioned.
+  if [[ -n "$(get_metadata "cognito_pool_id")" ]]; then
+    local sb sb_enc sb_pab sb_ver
+    sb="$(resolve_bucket_name 2>/dev/null || true)"
+    if [[ -n "${sb}" ]]; then
+      sb_enc="$(aws s3api get-bucket-encryption --bucket "${sb}" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text 2>/dev/null || true)"
+      sb_pab="$(aws s3api get-public-access-block --bucket "${sb}" --query 'PublicAccessBlockConfiguration.[BlockPublicAcls,IgnorePublicAcls,BlockPublicPolicy,RestrictPublicBuckets]' --output text 2>/dev/null || true)"
+      sb_ver="$(aws s3api get-bucket-versioning --bucket "${sb}" --query Status --output text 2>/dev/null || true)"
+      if [[ "${sb_pab}" == "True"$'\t'"True"$'\t'"True"$'\t'"True" && -n "${sb_enc}" && "${sb_enc}" != "None" ]]; then
+        log "PASS  Terraform state bucket ${sb} is private and encrypted (${sb_enc})."
+      else
+        log "FAIL  Terraform state bucket ${sb} must block public access and be encrypted (public access block: ${sb_pab:-unknown}; encryption: ${sb_enc:-none})."
+        fail_count=$((fail_count + 1))
+      fi
+      if [[ "${sb_ver}" != "Enabled" ]]; then
+        log "WARN  Terraform state bucket ${sb} is not versioned; enable versioning so a bad apply can be rolled back."
+      fi
     fi
   fi
 
@@ -6040,10 +6488,9 @@ show_bootstrap_admin_reminder() {
     if [[ -n "$(get_metadata "sso_name")" ]]; then
       log "SSO provider '$(get_metadata "sso_name")' ($(get_metadata "sso_type")) is federated into the pool for: $(get_metadata "sso_domains")."
     fi
-    log "To register this pool as an application in the customer's identity provider:"
-    log "  SAML  ACS URL: $(get_metadata "cognito_saml_acs_url")"
-    log "        Entity ID / audience: $(get_metadata "cognito_entity_id")   (attribute: email)"
-    log "  OIDC  redirect URI: $(get_metadata "cognito_oidc_redirect_uri")"
+    if [[ -n "$(get_metadata "sso_handoff_file")" ]]; then
+      log "Setup sheet for the customer's identity provider admin (no secrets): $(get_metadata "sso_handoff_file")"
+    fi
     log "Add or change the SSO provider: re-run phases aws-data and straiker-core with the --sso-* flags."
     if [[ -n "$(get_metadata "ses_domain")" ]]; then
       log "Email: SES domain $(get_metadata "ses_domain") (sender $(get_metadata "ses_sender"))."

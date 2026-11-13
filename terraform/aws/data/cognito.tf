@@ -1,5 +1,6 @@
 # Amazon Cognito user pool for the frontend's login (OIDC). SaaS: platform/cognito-environment-api/tf/cognito.tf,
-# without its Lambda triggers (multi-tenant claims, PAT token exchange) and Google/customer SSO federation.
+# without its Lambda triggers (multi-tenant claims, PAT token exchange); the customer's identity provider (SAML, OIDC,
+# Google, Facebook, Login with Amazon or Sign in with Apple) is federated in below instead of SaaS's fixed Google.
 
 locals {
   cognito_ses  = var.cognito_use_ses && contains(keys(var.ses_domains), "main")
@@ -11,7 +12,7 @@ resource "aws_cognito_user_pool" "this" {
 
   name                     = local.cognito_name[each.key]
   deletion_protection      = local.ha ? "ACTIVE" : "INACTIVE"
-  mfa_configuration        = "OFF"
+  mfa_configuration        = var.cognito_mfa
   username_attributes      = ["email"]
   auto_verified_attributes = ["email"]
 
@@ -28,6 +29,13 @@ resource "aws_cognito_user_pool" "this" {
 
   admin_create_user_config {
     allow_admin_create_user_only = true
+  }
+
+  dynamic "software_token_mfa_configuration" {
+    for_each = var.cognito_mfa == "OFF" ? [] : [1]
+    content {
+      enabled = true
+    }
   }
 
   user_attribute_update_settings {
@@ -81,9 +89,59 @@ resource "aws_cognito_user_pool" "this" {
   }
 }
 
-# The customer's own identity providers (SAML / OIDC) federated into the "main" pool.
+# The customer's identity provider, federated into the "main" pool (one per customer; type decides the details).
 locals {
   sso_names = nonsensitive(toset(keys(var.cognito_identity_providers)))
+  sso       = var.cognito_identity_providers
+
+  sso_details = {
+    for k in local.sso_names : k => (
+      local.sso[k].type == "SAML" ? tomap({ for dk, dv in {
+        MetadataURL  = local.sso[k].saml_metadata_url
+        MetadataFile = local.sso[k].saml_metadata_url == null ? local.sso[k].saml_metadata_file : null
+        IDPSignout   = "false"
+      } : dk => dv if dv != null }) :
+      local.sso[k].type == "OIDC" ? tomap({
+        client_id                 = local.sso[k].client_id
+        client_secret             = local.sso[k].client_secret
+        attributes_request_method = "GET"
+        oidc_issuer               = local.sso[k].oidc_issuer
+        authorize_scopes          = "openid email profile"
+      }) :
+      local.sso[k].type == "Google" ? tomap({
+        client_id        = local.sso[k].client_id
+        client_secret    = local.sso[k].client_secret
+        authorize_scopes = "openid email profile"
+      }) :
+      local.sso[k].type == "Facebook" ? tomap({
+        client_id        = local.sso[k].client_id
+        client_secret    = local.sso[k].client_secret
+        authorize_scopes = "public_profile,email"
+        api_version      = "v19.0"
+      }) :
+      local.sso[k].type == "LoginWithAmazon" ? tomap({
+        client_id        = local.sso[k].client_id
+        client_secret    = local.sso[k].client_secret
+        authorize_scopes = "profile"
+      }) :
+      tomap({
+        client_id        = local.sso[k].client_id
+        team_id          = local.sso[k].apple_team_id
+        key_id           = local.sso[k].apple_key_id
+        private_key      = local.sso[k].apple_private_key
+        authorize_scopes = "email name"
+      })
+    )
+  }
+
+  # Cognito needs a username mapping for everything but SAML (the provider's stable subject); email carries the login.
+  sso_username_claim = {
+    OIDC            = "sub"
+    Google          = "sub"
+    Facebook        = "id"
+    LoginWithAmazon = "user_id"
+    SignInWithApple = "sub"
+  }
 }
 
 resource "aws_cognito_identity_provider" "sso" {
@@ -91,27 +149,24 @@ resource "aws_cognito_identity_provider" "sso" {
 
   user_pool_id  = aws_cognito_user_pool.this["main"].id
   provider_name = each.key
-  provider_type = var.cognito_identity_providers[each.key].type
+  provider_type = local.sso[each.key].type
 
-  provider_details = var.cognito_identity_providers[each.key].type == "SAML" ? {
-    MetadataURL = var.cognito_identity_providers[each.key].saml_metadata_url
-    IDPSignout  = "false"
-    } : {
-    client_id                 = var.cognito_identity_providers[each.key].oidc_client_id
-    client_secret             = var.cognito_identity_providers[each.key].oidc_client_secret
-    attributes_request_method = "GET"
-    oidc_issuer               = var.cognito_identity_providers[each.key].oidc_issuer
-    authorize_scopes          = "openid email profile"
-  }
+  provider_details = local.sso_details[each.key]
 
-  attribute_mapping = {
-    email = coalesce(
-      var.cognito_identity_providers[each.key].email_claim,
-      var.cognito_identity_providers[each.key].type == "SAML" ? "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress" : "email",
-    )
-  }
+  attribute_mapping = merge(
+    {
+      email = coalesce(
+        local.sso[each.key].email_claim,
+        local.sso[each.key].type == "SAML" ? "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress" : "email",
+      )
+    },
+    local.sso[each.key].type == "SAML" ? {} : { username = local.sso_username_claim[local.sso[each.key].type] },
+    local.sso[each.key].type == "Google" ? { email_verified = "email_verified" } : {},
+  )
 
-  idp_identifiers = var.cognito_identity_providers[each.key].domains
+  # Domain routing identifiers are for SAML / OIDC; the social providers are restricted by the frontend allow-list.
+  idp_identifiers = contains(["SAML", "OIDC"], local.sso[each.key].type) ? local.sso[each.key].domains : []
+
 }
 
 resource "aws_cognito_user_pool_domain" "this" {
@@ -137,6 +192,17 @@ resource "aws_cognito_user_pool_client" "frontend" {
   callback_urls                        = var.cognito_callback_urls
   logout_urls                          = [for u in var.cognito_callback_urls : replace(u, "/login/oidc/callback", "/login")]
   prevent_user_existence_errors        = "ENABLED"
+  enable_token_revocation              = true
+  auth_session_validity                = 3
+  id_token_validity                    = var.cognito_token_validity.id_minutes
+  access_token_validity                = var.cognito_token_validity.access_minutes
+  refresh_token_validity               = var.cognito_token_validity.refresh_hours
+
+  token_validity_units {
+    id_token      = "minutes"
+    access_token  = "minutes"
+    refresh_token = "hours"
+  }
 
   depends_on = [aws_cognito_identity_provider.sso]
 }
@@ -195,4 +261,9 @@ resource "aws_secretsmanager_secret_version" "cognito_admin" {
 
   secret_id     = aws_secretsmanager_secret.cognito_admin[each.key].id
   secret_string = jsonencode({ password = random_password.cognito_admin[each.key].result })
+
+  lifecycle {
+    # The installer rotates this password (--rotate-admin-password); Terraform only seeds the first value.
+    ignore_changes = [secret_string]
+  }
 }

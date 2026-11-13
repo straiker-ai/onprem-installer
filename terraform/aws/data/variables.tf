@@ -232,20 +232,32 @@ variable "cognito_pools" {
 
 variable "cognito_identity_providers" {
   description = <<-EOT
-    The customer's own identity providers, federated into the "main" Cognito pool (name = Cognito provider name).
-      type                SAML (needs saml_metadata_url) or OIDC (oidc_issuer, oidc_client_id, oidc_client_secret)
-      email_claim         the provider's claim/attribute carrying the user's email (default: SAML
-                          http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress, OIDC email)
-      domains             email domains that may use this provider (Cognito idp_identifiers)
+    The customer's identity provider, federated into the "main" Cognito pool (key = Cognito provider name).
+    One provider per customer pool is the supported shape (the login page has one "Sign in with SSO" button).
+      type  SAML             saml_metadata_url (public https) or saml_metadata_file (the metadata XML, for a private IdP)
+            OIDC             oidc_issuer, client_id, client_secret
+            Google           client_id, client_secret            (key must be "Google")
+            Facebook         client_id, client_secret            (key must be "Facebook")
+            LoginWithAmazon  client_id, client_secret            (key must be "LoginWithAmazon")
+            SignInWithApple  client_id (Services ID), apple_team_id, apple_key_id, apple_private_key
+                                                                 (key must be "SignInWithApple")
+      email_claim  the provider's claim/attribute carrying the email (default: SAML
+                   http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress, otherwise email)
+      domains      email domains that may use this provider (SAML / OIDC: Cognito idp_identifiers; every type:
+                   enforced by the frontend allow-list)
     Register the pool as the provider's relying party using outputs cognito_pools.main.saml_acs_url / entity_id
-    (SAML) or oidc_redirect_uri (OIDC). Sensitive (OIDC client secret); the installer passes it via TF_VAR.
+    (SAML) or oidc_redirect_uri (OIDC and the social providers). Sensitive; the installer passes it via TF_VAR.
   EOT
   type = map(object({
     type               = string
     saml_metadata_url  = optional(string)
+    saml_metadata_file = optional(string)
     oidc_issuer        = optional(string)
-    oidc_client_id     = optional(string)
-    oidc_client_secret = optional(string)
+    client_id          = optional(string)
+    client_secret      = optional(string)
+    apple_team_id      = optional(string)
+    apple_key_id       = optional(string)
+    apple_private_key  = optional(string)
     email_claim        = optional(string)
     domains            = optional(list(string), [])
   }))
@@ -253,13 +265,66 @@ variable "cognito_identity_providers" {
   sensitive = true
 
   validation {
-    condition = alltrue([
-      for p in values(var.cognito_identity_providers) :
-      (p.type == "SAML" && p.saml_metadata_url != null) ||
-      (p.type == "OIDC" && p.oidc_issuer != null && p.oidc_client_id != null && p.oidc_client_secret != null)
-    ])
-    error_message = "Each identity provider needs type SAML + saml_metadata_url, or type OIDC + oidc_issuer, oidc_client_id and oidc_client_secret."
+    condition     = length(var.cognito_identity_providers) <= 1
+    error_message = "One identity provider per customer pool."
   }
+
+  validation {
+    condition = alltrue([
+      for k, p in var.cognito_identity_providers : contains(["SAML", "OIDC", "Google", "Facebook", "LoginWithAmazon", "SignInWithApple"], p.type)
+    ])
+    error_message = "type must be one of SAML, OIDC, Google, Facebook, LoginWithAmazon, SignInWithApple."
+  }
+
+  validation {
+    condition = alltrue([
+      for k, p in var.cognito_identity_providers :
+      contains(["SAML", "OIDC"], p.type) ? can(regex("^[A-Za-z0-9][A-Za-z0-9-]{1,30}[A-Za-z0-9]$", k)) && !contains(["COGNITO", "Google", "Facebook", "LoginWithAmazon", "SignInWithApple"], k) : k == p.type
+    ])
+    error_message = "A SAML/OIDC provider name is 3-32 characters (letters, digits, hyphens; no underscore) and not a built-in name; a built-in provider's name must equal its type."
+  }
+
+  validation {
+    condition = alltrue([
+      for k, p in var.cognito_identity_providers : (
+        p.type == "SAML" ? (p.saml_metadata_url != null || p.saml_metadata_file != null) :
+        p.type == "OIDC" ? (p.oidc_issuer != null && p.client_id != null && p.client_secret != null) :
+        p.type == "SignInWithApple" ? (p.client_id != null && p.apple_team_id != null && p.apple_key_id != null && p.apple_private_key != null) :
+        (p.client_id != null && p.client_secret != null)
+      )
+    ])
+    error_message = "A required value for the provider type is missing (see the variable description)."
+  }
+
+  validation {
+    condition = alltrue([
+      for k, p in var.cognito_identity_providers :
+      (p.saml_metadata_url == null || startswith(p.saml_metadata_url, "https://")) &&
+      (p.oidc_issuer == null || startswith(p.oidc_issuer, "https://"))
+    ])
+    error_message = "Metadata URLs and OIDC issuers must be https."
+  }
+}
+
+variable "cognito_mfa" {
+  description = "Cognito MFA for the pool's own (email/password) users: OFF, OPTIONAL (users may enrol an authenticator app) or ON. Federated users get MFA from their provider."
+  type        = string
+  default     = "OPTIONAL"
+
+  validation {
+    condition     = contains(["OFF", "OPTIONAL", "ON"], var.cognito_mfa)
+    error_message = "cognito_mfa must be OFF, OPTIONAL or ON."
+  }
+}
+
+variable "cognito_token_validity" {
+  description = "Cognito token lifetimes for the frontend client. The frontend session lasts as long as the ID token; the refresh token is the longest a hosted-UI session can be renewed."
+  type = object({
+    id_minutes     = optional(number, 60)
+    access_minutes = optional(number, 60)
+    refresh_hours  = optional(number, 24)
+  })
+  default = {}
 }
 
 variable "ses_domains" {

@@ -85,6 +85,12 @@ output "cognito_pools" {
   }
 }
 
+output "sso_providers" {
+  description = "The customer's identity provider federated into the main pool: name => type (SAML, OIDC, Google, Facebook, LoginWithAmazon, SignInWithApple)."
+  value       = { for k in local.sso_names : k => nonsensitive(local.sso[k].type) }
+  depends_on  = [aws_cognito_identity_provider.sso]
+}
+
 output "ses_domains" {
   description = "Per SES domain: identity ARN, sender address, configuration set, the name servers of a created zone (delegate them from the parent zone) and the DNS records SES needs."
   value = {
