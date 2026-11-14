@@ -211,8 +211,10 @@ DEFEND_RELEASE="straiker-defend"
 DEFEND_CHART_NAME="straiker-defend"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
-# Argus v3's context reviewer model on Bedrock (the engine's own default); an inference profile, so a cross-region grant.
-ARGUS_V3_BEDROCK_PROFILE="${ARGUS_V3_BEDROCK_PROFILE:-global.openai.gpt-5.6-sol}"
+# Bedrock inference profiles Argus v3 may invoke (space-separated), as SaaS grants its argus pods: sol is the engine's context
+# reviewer default (infra PR #198), terra sits alongside it. Each is an inference profile, so the grant covers the profile
+# and the foundation model behind it (any region).
+ARGUS_V3_BEDROCK_PROFILES="${ARGUS_V3_BEDROCK_PROFILES:-global.openai.gpt-5.6-sol global.openai.gpt-5.6-terra}"
 ARGUS_V3_RELEASE="argus-v3"
 ARGUS_V3_SECRET="argus/v3"
 
@@ -2859,10 +2861,12 @@ phase_aws_data() {
   # Argus v3 engine role (chart straiker-argus-v3's ServiceAccount): Bedrock for its context reviewer. Same grant as the SaaS
   # argus pods: the inference profile, the foundation model behind it, and the account's default Bedrock project (the
   # OpenAI-compatible Responses path authorizes against the project).
-  local aws_account_id argus_v3_profile argus_v3_model
+  local aws_account_id argus_v3_arns="" bedrock_profile
   aws_account_id="$(aws sts get-caller-identity --query Account --output text)"
-  argus_v3_profile="${ARGUS_V3_BEDROCK_PROFILE}"
-  argus_v3_model="${argus_v3_profile#global.}"
+  for bedrock_profile in ${ARGUS_V3_BEDROCK_PROFILES}; do
+    argus_v3_arns+="\"arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:inference-profile/${bedrock_profile}\", \"arn:aws:bedrock:*::foundation-model/${bedrock_profile#*.}\", "
+  done
+  argus_v3_arns+="\"arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:project/default\""
 
   # Pod Identity role for the data-bootstrap Jobs (chart straiker-data's ServiceAccount).
   cat > "${DATA_DIR}/terraform.auto.tfvars.json" <<EOF
@@ -2908,11 +2912,7 @@ phase_aws_data() {
       "secret_keys": ["argus/v3"],
       "s3_read": ["grid-artifacts"],
       "s3_write": ["grid-artifacts"],
-      "bedrock_invoke": [
-        "arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:inference-profile/${argus_v3_profile}",
-        "arn:aws:bedrock:*::foundation-model/${argus_v3_model}",
-        "arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:project/default"
-      ]
+      "bedrock_invoke": [${argus_v3_arns}]
     }
   },
   "secrets": {
