@@ -5898,7 +5898,7 @@ preflight_argus_v3_bedrock() {
   for profile in ${ARGUS_V3_BEDROCK_PROFILES}; do
     rc=0
     out="$(aws bedrock-runtime converse --region "${region}" --model-id "${profile}" \
-      --messages '[{"role":"user","content":[{"text":"hi"}]}]' --inference-config '{"maxTokens":1}' 2>&1)" || rc=$?
+      --messages '[{"role":"user","content":[{"text":"hi"}]}]' --inference-config '{"maxTokens":16}' 2>&1)" || rc=$?
     if [[ ${rc} -eq 0 || "${out}" == *ThrottlingException* ]]; then
       log "Bedrock preflight OK: '${profile}' answers in ${region}."
     elif [[ "${out}" == *"not authorized to perform: bedrock:"* ]]; then
