@@ -508,6 +508,7 @@ variable "pod_identities" {
       dynamodb_query         keys of dynamodb_tables whose apiKey-index this role may query
       saas_frontend_data     read/write the SaaS environment + guardrail tables (and their indexes) and put audit records
       ses_send               allow ses:SendEmail/SendRawEmail on identities in this account (connect email)
+      bedrock_invoke         Bedrock model / inference-profile / project ARNs this role may bedrock:InvokeModel on (argus-v3 context review)
       assume_roles           allow sts:AssumeRole on any role (databridge sink probes/delivery into customer accounts)
       policy_json            extra inline policy document (JSON)
     The EKS cluster must already exist (aws_eks_pod_identity_association needs it).
@@ -525,6 +526,7 @@ variable "pod_identities" {
     secret_prefixes_read = optional(list(string), [])
     dynamodb_query       = optional(list(string), [])
     saas_frontend_data   = optional(bool, false)
+    bedrock_invoke       = optional(list(string), [])
     ses_send             = optional(bool, false)
     assume_roles         = optional(bool, false)
     policy_json          = optional(string)

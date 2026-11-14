@@ -211,6 +211,11 @@ DEFEND_RELEASE="straiker-defend"
 DEFEND_CHART_NAME="straiker-defend"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
+# Argus v3's context reviewer model on Bedrock (the engine's own default); an inference profile, so a cross-region grant.
+ARGUS_V3_BEDROCK_PROFILE="${ARGUS_V3_BEDROCK_PROFILE:-global.openai.gpt-5.6-sol}"
+ARGUS_V3_RELEASE="argus-v3"
+ARGUS_V3_SECRET="argus/v3"
+
 # Iris automated red-teaming engine (charts/straiker-ascend) — Straiker's
 # "Ascend" product. Installed only when "ascend" is in PRODUCTS_OPT, after
 # straiker-inference, straiker-system, and straiker-core.
@@ -2851,6 +2856,14 @@ phase_aws_data() {
     },'
   fi
 
+  # Argus v3 engine role (chart straiker-argus-v3's ServiceAccount): Bedrock for its context reviewer. Same grant as the SaaS
+  # argus pods: the inference profile, the foundation model behind it, and the account's default Bedrock project (the
+  # OpenAI-compatible Responses path authorizes against the project).
+  local aws_account_id argus_v3_profile argus_v3_model
+  aws_account_id="$(aws sts get-caller-identity --query Account --output text)"
+  argus_v3_profile="${ARGUS_V3_BEDROCK_PROFILE}"
+  argus_v3_model="${argus_v3_profile#global.}"
+
   # Pod Identity role for the data-bootstrap Jobs (chart straiker-data's ServiceAccount).
   cat > "${DATA_DIR}/terraform.auto.tfvars.json" <<EOF
 {
@@ -2887,6 +2900,19 @@ phase_aws_data() {
       "secret_keys": ["platform/api-gateway"],
       "secret_prefixes_read": ["${CLUSTER_NAME}/platform/integration/keys/"],
       "dynamodb_query": ["environment"]
+    },
+    "argus-v3": {
+      "namespace": "${INFRA_NAMESPACE}",
+      "service_account": "argus-sa",
+      "msk_clusters": ["bus"],
+      "secret_keys": ["argus/v3"],
+      "s3_read": ["grid-artifacts"],
+      "s3_write": ["grid-artifacts"],
+      "bedrock_invoke": [
+        "arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:inference-profile/${argus_v3_profile}",
+        "arn:aws:bedrock:*::foundation-model/${argus_v3_model}",
+        "arn:aws:bedrock:${AWS_REGION}:${aws_account_id}:project/default"
+      ]
     }
   },
   "secrets": {
@@ -2920,6 +2946,10 @@ phase_aws_data() {
     "platform/api-gateway": {
       "description": "api-gateway key bundle; PLATFORM_VALIDATE_KEY and SYS__ARGUS_INTERNAL_S2S_KEY are shared with foundation/registry/argus",
       "generated_keys": ["PLATFORM_VALIDATE_KEY", "PAT_EXCHANGE_ASSERTION_SECRET", "SYS__ARGUS_INTERNAL_S2S_KEY", "FOUNDATION_API_KEY"]
+    },
+    "argus/v3": {
+      "description": "Argus v3 engine bundle (Secrets Manager source); the two service keys are copied in by the installer so they match the gateway and platform values",
+      "generated_keys": ["SYS__INFERENCE_API_KEY"]
     }
   }
 }
@@ -5291,6 +5321,42 @@ patch_shared_secret() {
   local patch_json
   patch_json="$(python3 -c 'import json,sys; print(json.dumps({"stringData": {sys.argv[1]: sys.argv[2]}}))' "${key}" "${value}")"
   kubectl patch secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" --type=merge -p "${patch_json}" >/dev/null
+}
+
+# Argus v3's Secrets Manager bundle <cluster>/argus/v3: Terraform generates SYS__INFERENCE_API_KEY; the two service keys must
+# EQUAL the ones the gateway and platform already hold, so they are copied here (never regenerated) and only when different.
+ensure_argus_v3_secret() {
+  local name="${CLUSTER_NAME}/${ARGUS_V3_SECRET}" gw platform bundle merged
+  gw="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/platform/api-gateway" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  platform="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/platform/keys" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  bundle="$(aws secretsmanager get-secret-value --secret-id "${name}" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  if [[ -z "${gw}" || -z "${platform}" || -z "${bundle}" ]]; then
+    mark_phase_blocked "Cannot fill ${name}: ${CLUSTER_NAME}/platform/api-gateway, ${CLUSTER_NAME}/platform/keys and ${name} must exist (run phase aws-data first)."
+    return 1
+  fi
+  merged="$(GW="${gw}" PLATFORM="${platform}" BUNDLE="${bundle}" python3 - <<'PY'
+import json, os, sys
+gw, platform, bundle = (json.loads(os.environ[k]) for k in ("GW", "PLATFORM", "BUNDLE"))
+want = {
+    "SYS__ARGUS_INTERNAL_S2S_KEY": gw.get("SYS__ARGUS_INTERNAL_S2S_KEY", ""),
+    "SYS__PLATFORM_INTERNAL_S2S_API_KEY": platform.get("PLATFORM_INTERNAL_S2S_API_KEY", ""),
+}
+missing = [k for k, v in want.items() if not v]
+if missing:
+    print("MISSING:" + ",".join(missing)); sys.exit(0)
+merged = {**bundle, **want}
+print("SAME" if merged == bundle else json.dumps(merged))
+PY
+)"
+  case "${merged}" in
+    MISSING:*)
+      mark_phase_blocked "Cannot fill ${name}: ${merged#MISSING:} not found in the source secrets."
+      return 1
+      ;;
+    SAME) return 0 ;;
+  esac
+  aws secretsmanager put-secret-value --secret-id "${name}" --region "${AWS_REGION}" --secret-string "${merged}" >/dev/null || return 1
+  log "Filled ${name} with the gateway and platform service keys."
 }
 
 # $1=plaintext password. Prints its bcrypt hash (cost 10) on stdout — dex's

@@ -132,6 +132,15 @@ data "aws_iam_policy_document" "pod" {
   }
 
   dynamic "statement" {
+    for_each = length(each.value.bedrock_invoke) > 0 ? [1] : []
+    content {
+      sid       = "BedrockInvoke"
+      actions   = ["bedrock:InvokeModel"]
+      resources = each.value.bedrock_invoke
+    }
+  }
+
+  dynamic "statement" {
     for_each = each.value.ses_send ? [1] : []
     content {
       sid     = "SesSend"
