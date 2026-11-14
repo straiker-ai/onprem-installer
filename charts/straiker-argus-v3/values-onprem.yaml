@@ -1,0 +1,71 @@
+# On-prem overlay for the vendored Argus v3 chart (scripts/sync-argus-v3-chart.sh). Ours: never overwritten by the sync.
+# The installer (phase straiker-defend) sets everything that depends on the install with --set-string:
+#   image.repository / image.tag                       the mirrored engine image (v3-<sha>)
+#   argus.secretManager.region / secretName            the <cluster>/argus/v3 bundle (SYS__ARGUS_INTERNAL_S2S_KEY, ...)
+#   argus.redis.url                                    ElastiCache (rediss://)
+#   argus.{agentConfig,grid,transcript,compactor,...}.bootstrapServers / .region   MSK (IAM auth)
+#   argus.compactor.bucket / argus.compactor.region    the grid-artifacts bucket
+#   argus.copilot.platformRegistryUrl                  http://registry.<ns>.svc.cluster.local:80
+#   argus.llmEndpoints.{vision,imageDetection,kev,kevPromptEndpoint} and argus.contextReview.*   by --inference-mode
+#
+# Decisions here (do not undo without asking):
+#  - llama, qwen, internlm, llmStock and lava stay EMPTY on purpose: antman/thor/quicksilver/hulk are not deployed on-prem,
+#    so the controls that depend on them are reported "unavailable" (a supported state of the engine).
+#  - capture and metrics are OFF: capture files a replayable copy of every request (a SaaS training/ops corpus) and metrics
+#    are projected from it into ClickHouse through a SaaS-only ClickPipe. rawDump is dev-only.
+#  - the transcript compactor stays ON: the console's transcripts are read from the artifacts bucket.
+
+env: "production" # the engine only accepts local|dev|staging|production; production turns on its missing-dependency checks
+
+# Fewer replicas than SaaS (3-12): the fleet here is one cluster. Spread over nodes where possible, never block on it.
+replicaCount: 2
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 60
+pdb:
+  minAvailable: "50%"
+
+image:
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: argus-sa # bound to IAM by the Pod Identity association from the aws-data phase
+
+# The console and the other apps run on the general pool; SaaS has a dedicated "argus" pool.
+nodeSelector:
+  purpose: general
+tolerations: []
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  minDomains: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+argus:
+  logging:
+    level: "INFO"
+
+  # Not served on-prem (see above): left unset deliberately.
+  llmEndpoints:
+    llama: ""
+    qwen: ""
+    internlm: ""
+    llmStock: ""
+    lava: ""
+
+  capture:
+    enabled: false
+  metricsStream: # needs capture, so it goes off with it
+    enabled: false
+  copilot:
+    rawDump: false
+
+  agentConfig:
+    enabled: true
+  compactor:
+    enabled: true

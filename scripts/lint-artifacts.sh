@@ -67,6 +67,9 @@ TARGETS=(
 manifest_repos() { yq -r '.images | keys | .[]' "$MANIFEST"; }
 manifest_tag() { yq -r ".images[\"$1\"].tag" "$MANIFEST"; }
 artifact_tag() { yq -r "(.imageMirror.images[] | select(.destRepository == \"$1\")).tag" "$ARTIFACT_VALUES"; }
+# A repo can be mirrored under several tags (e.g. vllm: one per model's server version; argus: v1 and v3 engines). The
+# manifest's tag is the primary one the charts declare: it must be among the mirrored tags; extra tags are allowed.
+tag_in_list() { grep -Fxq -- "$1" <<<"$2"; }                                              # $1 = tag, $2 = newline-separated tags
 chart_version() { yq -r '.version' "$1"; }                                              # $1 = Chart.yaml path
 dep_version() { yq -r ".dependencies[] | select(.name == \"$2\") | .version" "$1"; }     # $1=parent Chart.yaml $2=child name
 
@@ -148,9 +151,9 @@ fix_manifest_drift() {
     tag="$(manifest_tag "$repo")"
 
     a_tag="$(artifact_tag "$repo")"
-    if [[ "$a_tag" != "$tag" ]]; then
+    if ! tag_in_list "$tag" "$a_tag"; then
       write_artifact_tag "$ARTIFACT_VALUES" "$repo" "$tag"
-      assert_written "${ARTIFACT_VALUES} destRepository=${repo} tag" "$(artifact_tag "$repo")" "$tag"
+      assert_written "${ARTIFACT_VALUES} destRepository=${repo} tag" "$(artifact_tag "$repo" | grep -Fx -- "$tag" | head -1)" "$tag"
       contains "charts/straiker-artifact" "${changed_charts[@]:-}" || changed_charts+=("charts/straiker-artifact")
     fi
 
@@ -216,8 +219,8 @@ check_manifest_drift() {
     a_tag="$(artifact_tag "$repo")"
     if [[ -z "$a_tag" ]]; then
       mismatches+=("MISSING ARTIFACT ENTRY: ${repo} has no imageMirror.images[destRepository==${repo}] in ${ARTIFACT_VALUES}")
-    elif [[ "$a_tag" != "$tag" ]]; then
-      mismatches+=("TAG MISMATCH: ${ARTIFACT_VALUES} imageMirror entry for ${repo} has '${a_tag}', manifest has '${tag}'")
+    elif ! tag_in_list "$tag" "$a_tag"; then
+      mismatches+=("TAG MISMATCH: ${ARTIFACT_VALUES} imageMirror entries for ${repo} have '$(echo $a_tag)', manifest has '${tag}'")
     fi
 
     for row in "${TARGETS[@]}"; do

@@ -77,6 +77,16 @@ imageMirror:
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
       tag: v0.27.0-5
       destRepository: straiker/vllm
+    # Local-vLLM fleet images (same as the SaaS regions): vision/wanda, then the non-agentic Kev (stock vLLM /classify).
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
+      tag: v0.22.1
+      destRepository: straiker/vllm
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm
+      tag: v0.30.0
+      destRepository: straiker/vllm
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/kev-lw-server
+      tag: v0.2.2
+      destRepository: straiker/kev-lw-server
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
       tag: onprem-v2026.11.8-rc3
       destRepository: straiker/frontend
@@ -85,6 +95,10 @@ imageMirror:
       destRepository: straiker/frontend-migrate
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
       tag: onprem-v2026.8.24
+      destRepository: straiker/argus
+    # Argus v3 engine (feature/argus-v3 head), same repository as v1 under a v3-<sha> tag; replaces the v1 engine.
+    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
+      tag: v3-42f20012839da1ebf91d9b9603b3892381029e1c
       destRepository: straiker/argus
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
       tag: onprem-v2026.9.12.3

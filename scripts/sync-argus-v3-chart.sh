@@ -44,12 +44,14 @@ open(p, "w").write(s)
 PY
 # Upstream defaults point at Straiker's own dev environment. Neutralize every internal identifier: the image repository
 # and model endpoints are always set by the installer (an unset model endpoint means "controls unavailable").
-python3 - "${dest}" <<'PY'
+python3 - "${dest}" "${sha}" <<'PY'
 import re, sys
-dest = sys.argv[1]
+dest, sha = sys.argv[1:]
 p = dest + "/values.yaml"
 s = open(p).read()
-s = re.sub(r"\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/be/argus", "argus-v3", s)
+# The engine image as customers receive it: repository straiker/argus (artifact chart mirror entry), tag v3-<sha>.
+s = re.sub(r"\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/be/argus", "straiker/argus", s)
+s = re.sub(r"(?m)^(\s+tag:\s*)v3-latest\b", lambda m: m.group(1) + "v3-" + sha, s)
 s = re.sub(r"arn:aws[a-z-]*:iam::\d{12}:role/[^\"'\s]*", "arn:aws:iam::<account-id>:role/<role>", s)
 s = re.sub(r"rediss?://[^\"'\s]+", "rediss://<redis-endpoint>:6379", s)
 s = re.sub(r"[a-z0-9.-]*\.kafka-serverless\.[a-z0-9-]+\.amazonaws\.com:\d+", "<msk-bootstrap>:9098", s)

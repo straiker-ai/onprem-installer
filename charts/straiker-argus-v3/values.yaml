@@ -33,11 +33,11 @@ pdb:
 env: "dev"
 
 image:
-  repository: argus-v3
+  repository: straiker/argus
   # Overridden per deploy with --set image.tag. The `v3-` prefix is what keeps
   # the two engines' tags apart in a repository they share; ECR tags here are
   # immutable, so a collision would be a failed push rather than a silent swap.
-  tag: v3-latest
+  tag: v3-42f20012839da1ebf91d9b9603b3892381029e1c
   pullPolicy: IfNotPresent
 
 # The pods are reached only by the API gateway, in-cluster, over
