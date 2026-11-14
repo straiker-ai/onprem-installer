@@ -140,47 +140,29 @@ kev-non-agentic:
     - --no-enable-prefix-caching
 # kev-agentic = kev-lw-4b-agentic: NOT served by vLLM directly. The kev-lw-server image's start.sh runs vLLM + llm2jev on
 # loopback and kev-server on the port (/v1/detect); it takes --model/--served-model-name/--port/--threshold and the KEV_* /
-# VLLM_* env below (SaaS values). Weights come from the node-local copy of the model bucket, not Hugging Face.
+# VLLM_* env below. Weights come from the node-local copy of the model bucket, not Hugging Face.
+# Settings are the DEV environment's (sized for one L4: 32 in flight, queue 256) - not prod's (L40S: 128 / 100000, plus
+# KEV_HTTP_THREADS and KEV_MAX_CHUNKS). Image v0.2.2 = dev's v0.2.1 + KEV_MAX_CHUNKS, which stays unset here. No prompt Kev
+# server is deployed (decided): argus-v3's kevPrompt is off.
 kev-agentic:
   engine: kev
   storagePrefix: kev-agentic
   servedNames: [kev-lw-4b-agentic]
-  defaultGpuProfile: g6e
+  defaultGpuProfile: l4
   image: {repository: straiker/kev-lw-server, tag: v0.2.2}
   kev:
     threshold: "0.5"
     env:
-      KEV_MAX_INFLIGHT: "128"
-      KEV_HTTP_THREADS: "256"
-      KEV_MAX_QUEUE: "100000"
+      KEV_MAX_INFLIGHT: "32"
+      KEV_MAX_QUEUE: "256"
       KEV_CACHE_SIZE: "20000"
       KEV_QUEUE_WARN_SECONDS: "10"
-      KEV_BACKEND_WORKERS: "8"
-      KEV_MAX_CHUNKS: "2"
+      KEV_BACKEND_WORKERS: "32"
       KEV_LW_BACKEND: direct
       KEV_BACKEND_TIMEOUT: "120"
       KEV_BACKEND_WAIT_S: "900"
       VLLM_MAX_MODEL_LEN: "9216"
       VLLM_GPU_MEMORY_UTILIZATION: "0.90"
-thanos:
-  storagePrefix: thanos
-  servedNames: [thanos]
-  # g5 (24GB, bitsandbytes-quantized) is the default — the straiker/vllm
-  # image already has vllm-bnb-plugin installed, so bitsandbytes works out of
-  # the box despite moving out-of-tree upstream, and g5 is both cheaper than
-  # g6e/p4d/a100 and (unlike g6e) an instance family most clusters already
-  # have provisioned via charts/straiker-system's default
-  # karpenter.gpu.instanceFamilies. g6e/p4d/a100 stay available below
-  # (unquantized, more headroom) for customers who'd rather not rely on an
-  # out-of-tree plugin or need more context length than the quantized tier
-  # comfortably supports.
-  defaultGpuProfile: g5
-  gpuOverrides:
-    g6e:  {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.90"}
-    g5:   {dtype: bfloat16, max_model_len: "16384", mem_fraction_static: "0.90", quantization: bitsandbytes}
-    l4:   {dtype: bfloat16, max_model_len: "16384", mem_fraction_static: "0.90", quantization: bitsandbytes}
-    p4d:  {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.95"}
-    a100: {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.95"}
 {{- end }}
 
 {{/*
