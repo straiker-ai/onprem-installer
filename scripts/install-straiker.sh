@@ -5823,7 +5823,7 @@ remember_inference_settings() {
 
 # The G/VT vCPU quota gates how many GPU nodes Karpenter can start: too low and servers sit Pending forever, so say so up front.
 check_gpu_vcpu_quota() {
-  local nodes=$1 needed quota
+  local nodes=$1 needed quota used available
   [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
   needed=$((nodes * GPU_NODE_VCPUS))
   if ! quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code "${GPU_VCPU_QUOTA_CODE}" \
@@ -5831,11 +5831,16 @@ check_gpu_vcpu_quota() {
     log "WARNING: could not read the EC2 'Running On-Demand G and VT instances' quota; ${needed} vCPUs are needed for ${nodes} GPU nodes."
     return 0
   fi
-  if awk -v q="${quota}" -v n="${needed}" 'BEGIN { exit !(q + 0 < n + 0) }'; then
-    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION}, but ${nodes} GPU nodes need ${needed}. Request an increase (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}) and re-run this phase."
+  # The quota counts every G/VT instance already running in the account (older model nodes, other teams), not just ours.
+  used="$(aws ec2 describe-instances --region "${AWS_REGION}" --filters Name=instance-state-name,Values=pending,running \
+    --query 'Reservations[].Instances[].[InstanceType,CpuOptions.CoreCount,CpuOptions.ThreadsPerCore]' --output text 2>/dev/null \
+    | awk '$1 ~ /^(g|vt)[0-9]/ { n += $2 * $3 } END { print n + 0 }')"
+  available="$(awk -v q="${quota}" -v u="${used:-0}" 'BEGIN { printf "%d", q - u }')"
+  if [[ "${available}" -lt "${needed}" ]]; then
+    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}), then re-run this phase."
     return 1
   fi
-  log "EC2 G/VT vCPU quota OK: ${quota} available, ${needed} needed for ${nodes} GPU nodes."
+  log "EC2 G/VT vCPU quota OK: ${available} free of ${quota} (${used:-0} in use), ${needed} needed for ${nodes} GPU nodes."
 }
 
 # Advertise each GPU N times (test profile time-slicing) by upgrading straiker-system's device plugin; 0 turns it off.
