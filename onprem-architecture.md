@@ -43,7 +43,7 @@ Before the model servers install, `straiker-inference` runs `scripts/gpu_planner
 | `--inference-profile` | `production` (default), `test` | production: one server per GPU, never shared or quantized, each model on its validated tier (thanos L40S/g6e, vision, wanda, kev-non-agentic A10G/g5, kev-agentic L4/g6). test: may time-slice GPUs that already exist and quantize thanos; for small test clusters only. |
 | `--inference-mode` | `vllm` (default), `bedrock` | bedrock deploys no GPU fleet (vision/wanda/Kev controls and Ascend's thanos are then unavailable). |
 
-Production checks the EC2 "Running On-Demand G and VT instances" vCPU quota (10 servers = 40 vCPUs). Test uses the GPU nodes found in the cluster; with none it plans exactly like production. Time-slicing is applied through the device plugin config in `straiker-system` (`nvidia.devicePlugin.timeSlicing.replicas`); MIG is not automated. With `--defend-engine v3`, `aws-data` and `straiker-argus-v3` first check that the Bedrock models (`global.openai.gpt-5.6-sol`, `-terra`) answer in the account and region.
+Production checks the EC2 "Running On-Demand G and VT instances" vCPU quota (10 servers = 80 vCPUs). Test uses the GPU nodes found in the cluster; with none it plans exactly like production. Time-slicing is applied through the device plugin config in `straiker-system` (`nvidia.devicePlugin.timeSlicing.replicas`); MIG is not automated. With `--defend-engine v3`, `aws-data` and `straiker-argus-v3` first check that the Bedrock models (`global.openai.gpt-5.6-sol`, `-terra`) answer in the account and region.
 
 ## 3. Resources: created on AWS vs only inside the cluster
 

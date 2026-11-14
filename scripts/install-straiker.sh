@@ -222,9 +222,9 @@ INFERENCE_PROFILE="${INFERENCE_PROFILE:-}"
 INFERENCE_MODE="${INFERENCE_MODE:-}"
 GPU_PLANNER="${REPO_ROOT}/scripts/gpu_planner.py"
 GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
-# EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one g5/g6/g6e .xlarge server node is 4 vCPUs.
+# EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one server needs about 4.2 vCPUs, so Karpenter picks a .2xlarge node (8 vCPUs).
 GPU_VCPU_QUOTA_CODE="L-DB2E81BA"
-GPU_NODE_VCPUS=4
+GPU_NODE_VCPUS=8
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
 # Bedrock inference profiles Argus v3 may invoke (space-separated), as SaaS grants its argus pods: sol is the engine's context
