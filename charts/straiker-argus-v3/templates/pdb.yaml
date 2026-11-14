@@ -1,0 +1,17 @@
+---
+# Minimum availability during voluntary disruptions (node drains, upgrades).
+#
+# A percentage rather than a count, so it tracks whatever the autoscaler has
+# settled on instead of pinning to a floor a scaled-in environment can never
+# satisfy.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: argus-v3-app-pdb
+  labels:
+    app.kubernetes.io/part-of: argus-v3
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable | quote }}
+  selector:
+    matchLabels:
+      app: argus-v3-app

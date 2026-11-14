@@ -1,0 +1,320 @@
+---
+# Argus v3 detection engine.
+#
+# No `command:` override: the image's CMD is `python run_v3.py`, which serves
+# `argus.app:app` and reads PORT (8080 in the image, 8081 locally so a laptop can
+# run v1 alongside it). The v1 chart's image runs a different entrypoint entirely,
+# which is why the two cannot share a Deployment spec.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-v3-app
+  labels:
+    app: argus-v3-app
+    app.kubernetes.io/part-of: argus-v3
+spec:
+  # Under an HPA this is only the value each `helm upgrade` re-asserts before the
+  # autoscaler takes the count back; it therefore tracks minReplicas, so a deploy
+  # lands on the autoscaler's floor rather than on a number it has to undo.
+  #
+  # Still rendered rather than omitted on purpose: the field is present in the
+  # released manifest, so removing it here would have Helm patch it away, and a
+  # Deployment with no replicas defaults to 1.
+  replicas: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+      maxSurge: 25%
+  selector:
+    matchLabels:
+      app: argus-v3-app
+  template:
+    metadata:
+      labels:
+        app: argus-v3-app
+      annotations:
+        {{- include "argus-v3.metricsAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.topologySpread }}
+      {{- if .enabled }}
+      topologySpreadConstraints:
+      - maxSkew: {{ .maxSkew }}
+        {{- with .minDomains }}
+        minDomains: {{ . }}
+        {{- end }}
+        topologyKey: {{ .topologyKey }}
+        whenUnsatisfiable: {{ .whenUnsatisfiable }}
+        labelSelector:
+          matchLabels:
+            app: argus-v3-app
+        {{- with .matchLabelKeys }}
+        matchLabelKeys:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+      containers:
+      - name: argus-v3
+        lifecycle:
+          preStop:
+            exec:
+              # Long enough for the endpoint removal to propagate to kube-proxy
+              # before the process starts refusing connections.
+              command: ["/bin/sh", "-c", "sleep 5"]
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        env:
+        {{- include "argus-v3.baseEnv" . | nindent 8 }}
+        # Stamped on every published row and every transcript envelope, so
+        # "which build produced this turn" stays an analytics question rather
+        # than an object-storage scan. Not backfillable.
+        - name: SYS__ARGUS_VERSION
+          value: {{ .Values.image.tag | quote }}
+        # No SYS__INFERENCE_API_KEY here. It arrives with every other credential
+        # through SYS__SECRET_MANAGER_* above, now that the engine reads it from
+        # settings rather than from os.environ.
+        # Model endpoints. v3 reads the v1 names and translates them per model.
+        - name: SYS__LLM_ENDPOINTS__LLAMA
+          value: {{ .Values.argus.llmEndpoints.llama | quote }}
+        - name: SYS__LLM_ENDPOINTS__QWEN
+          value: {{ .Values.argus.llmEndpoints.qwen | quote }}
+        - name: SYS__LLM_ENDPOINTS__INTERNLM
+          value: {{ .Values.argus.llmEndpoints.internlm | quote }}
+        - name: SYS__LLM_ENDPOINTS__LLM_STOCK
+          value: {{ .Values.argus.llmEndpoints.llmStock | quote }}
+        - name: SYS__LLM_ENDPOINTS__LAVA
+          value: {{ .Values.argus.llmEndpoints.lava | quote }}
+        - name: SYS__LLM_ENDPOINTS__VISION
+          value: {{ .Values.argus.llmEndpoints.vision | quote }}
+        - name: SYS__LLM_ENDPOINTS__IMAGE_DETECTION
+          value: {{ .Values.argus.llmEndpoints.imageDetection | quote }}
+        # Kev, the agentic classifier's model, in the `ARGUS__MODEL__` form because it has
+        # no v1 name to translate. Empty leaves it unconfigured, which is a supported
+        # build -- the detector reports its controls unavailable rather than failing --
+        # but it means no trace is ever judged.
+        - name: ARGUS__MODEL__AGENTIC_KEV__ENDPOINT
+          value: {{ (.Values.argus.llmEndpoints).kev | default "" | quote }}
+        # Kev on the prompt of turns with no trace (`kev_prompt`), switched on separately by
+        # `kevPrompt`, so an environment running Kev on traces does not start calling it on
+        # every prompt. At `kevPromptEndpoint` when set (a kev-server of its own), else at
+        # `kev` above. Off leaves the endpoint empty and `llm_evasion` on prompts to the
+        # content judges alone.
+        - name: ARGUS__MODEL__PROMPT_KEV__ENDPOINT
+          value: {{ if (.Values.argus.llmEndpoints).kevPrompt }}{{ (.Values.argus.llmEndpoints).kevPromptEndpoint | default (.Values.argus.llmEndpoints).kev | default "" | quote }}{{ else }}""{{ end }}
+        # The context review layer. An empty endpoint means nothing is deployed,
+        # which keeps every finding.
+        #
+        # A full URL rather than a composed `bedrock://` URI, because this is the
+        # OpenAI-compatible Responses path and not Converse. The region is part of
+        # the host, so it is stated once here.
+        - name: ARGUS__MODEL__CONTEXT_REVIEW__ENDPOINT
+          value: {{ if (.Values.argus.contextReview).enabled }}{{ printf "https://bedrock-runtime.%s.amazonaws.com/openai/v1/responses" (.Values.argus.contextReview).region | quote }}{{ else }}""{{ end }}
+        - name: ARGUS__MODEL__CONTEXT_REVIEW__MODEL
+          value: {{ (.Values.argus.contextReview).model | default "" | quote }}
+        - name: ARGUS__MODEL__CONTEXT_REVIEW__EFFORT
+          value: {{ (.Values.argus.contextReview).effort | default "" | quote }}
+        - name: SYS__CONTEXT_REVIEW__CACHE_MODE
+          value: {{ (.Values.argus.contextReview).cacheMode | default "explicit" | quote }}
+        # ⚠️ Bump whenever the prompt text changes. A new prompt reading a prefix
+        # cached under the old one succeeds silently and feeds the model something
+        # nobody wrote.
+        - name: SYS__CONTEXT_REVIEW__CACHE_KEY_PREFIX
+          value: {{ (.Values.argus.contextReview).cacheKeyPrefix | default "argus-ctx-v4" | quote }}
+        - name: SYS__CONTEXT_REVIEW__SHADOW_MODE
+          value: {{ (.Values.argus.contextReview).shadowMode | default false | quote }}
+        - name: SYS__CONTEXT_REVIEW__EXPLAIN_FINDINGS
+          value: {{ (.Values.argus.contextReview).explainFindings | default false | quote }}
+        - name: SYS__CONTEXT_REVIEW__CONTEXT_DIR
+          value: {{ (.Values.argus.contextReview).contextDir | default "./local_context" | quote }}
+        # Grid producer (MSK). The events/findings path ClickPipes lands in
+        # grid.raw_event / grid.raw_finding, and therefore what the console
+        # renders turns and events from. An empty bootstrap string keeps it off,
+        # which is a supported build.
+        - name: SYS__GRID__ENABLED
+          value: "{{ .Values.argus.grid.enabled }}"
+        - name: SYS__GRID__BOOTSTRAP_SERVERS
+          value: {{ .Values.argus.grid.bootstrapServers | quote }}
+        - name: SYS__GRID__TOPIC_EVENTS
+          value: {{ .Values.argus.grid.topicEvents | quote }}
+        - name: SYS__GRID__TOPIC_FINDINGS
+          value: {{ .Values.argus.grid.topicFindings | quote }}
+        - name: SYS__GRID__SASL_MECHANISM
+          value: {{ .Values.argus.grid.saslMechanism | quote }}
+        - name: SYS__GRID__REGION
+          value: {{ .Values.argus.grid.region | quote }}
+        - name: SYS__GRID__CLIENT_ID
+          value: {{ .Values.argus.grid.clientId | quote }}
+        - name: SYS__GRID__PUBLISH_TIMEOUT_SECONDS
+          value: "{{ .Values.argus.grid.publishTimeoutSeconds }}"
+        # Transcript egress (MSK). Carries message bodies, so it runs two orders
+        # of magnitude larger than the analytics topic and takes its own producer
+        # settings.
+        - name: SYS__TRANSCRIPT__ENABLED
+          value: "{{ .Values.argus.transcript.enabled }}"
+        - name: SYS__TRANSCRIPT__BOOTSTRAP_SERVERS
+          value: {{ .Values.argus.transcript.bootstrapServers | quote }}
+        - name: SYS__TRANSCRIPT__TOPIC
+          value: {{ .Values.argus.transcript.topic | quote }}
+        - name: SYS__TRANSCRIPT__SASL_MECHANISM
+          value: {{ .Values.argus.transcript.saslMechanism | quote }}
+        - name: SYS__TRANSCRIPT__REGION
+          value: {{ .Values.argus.transcript.region | quote }}
+        - name: SYS__TRANSCRIPT__CLIENT_ID
+          value: {{ .Values.argus.transcript.clientId | quote }}
+        - name: SYS__TRANSCRIPT__PUBLISH_TIMEOUT_SECONDS
+          value: "{{ .Values.argus.transcript.publishTimeoutSeconds }}"
+        - name: SYS__TRANSCRIPT__COMPRESSION_TYPE
+          value: {{ .Values.argus.transcript.compressionType | quote }}
+        - name: SYS__TRANSCRIPT__MAX_REQUEST_SIZE
+          value: "{{ .Values.argus.transcript.maxRequestSize }}"
+        # The API pods read the compactor's bucket too, not just the daemon:
+        # attachments are served out of the same bucket rather than through a
+        # second setting that could disagree with it. Only the storage fields are
+        # set here — the consumer ones belong to the daemon.
+        - name: SYS__COMPACTOR__BUCKET
+          value: {{ .Values.argus.compactor.bucket | quote }}
+        - name: SYS__COMPACTOR__REGION
+          value: {{ .Values.argus.compactor.region | quote }}
+        - name: SYS__COMPACTOR__ENDPOINT_URL
+          value: {{ .Values.argus.compactor.endpointUrl | default "" | quote }}
+        {{- include "argus-v3.transcriptKeysEnv" . | nindent 8 }}
+        # The per-request internal capture. A separate bucket from the compactor's on
+        # purpose — internal-only data with training implications, where one shared
+        # read grant would erase the line between serving a transcript and reading
+        # the corpus. API pods only: nothing else writes a capture.
+        - name: SYS__CAPTURE__ENABLED
+          value: "{{ .Values.argus.capture.enabled }}"
+        - name: SYS__CAPTURE__BUCKET
+          value: {{ .Values.argus.capture.bucket | default "" | quote }}
+        - name: SYS__CAPTURE__REGION
+          value: {{ .Values.argus.capture.region | default "us-east-1" | quote }}
+        - name: SYS__CAPTURE__ENDPOINT_URL
+          value: {{ .Values.argus.capture.endpointUrl | default "" | quote }}
+        # The operational metrics stream: one flat row per delivery, for a Kafka
+        # ClickPipe to land in ClickHouse. API pods only, like the capture above --
+        # the row is projected from the capture's record, so it can only be built
+        # where that record is. Parenthesised lookups so an overlay that has not
+        # declared the group yet renders rather than failing.
+        - name: SYS__METRICS__ENABLED
+          value: "{{ (.Values.argus.metricsStream).enabled | default false }}"
+        - name: SYS__METRICS__TOPIC
+          value: {{ (.Values.argus.metricsStream).topic | default "argus.metrics" | quote }}
+        - name: SYS__METRICS__BOOTSTRAP_SERVERS
+          value: {{ (.Values.argus.metricsStream).bootstrapServers | default "" | quote }}
+        - name: SYS__METRICS__SASL_MECHANISM
+          value: {{ (.Values.argus.metricsStream).saslMechanism | default "OAUTHBEARER" | quote }}
+        - name: SYS__METRICS__REGION
+          value: {{ (.Values.argus.metricsStream).region | default "us-east-1" | quote }}
+        - name: SYS__METRICS__CLIENT_ID
+          value: {{ (.Values.argus.metricsStream).clientId | default "argus-metrics-producer" | quote }}
+        - name: SYS__METRICS__PUBLISH_TIMEOUT_SECONDS
+          value: "{{ (.Values.argus.metricsStream).publishTimeoutSeconds | default 5.0 }}"
+        - name: SYS__METRICS__COMPRESSION_TYPE
+          value: {{ (.Values.argus.metricsStream).compressionType | default "zstd" | quote }}
+        # The Copilot Studio / M365 Copilot runtime. Its credentials -- the registry S2S
+        # key and the M365 app -- are `secret: True` settings read from the Secrets
+        # Manager bundle, under the names Pathfinder already provisions there.
+        - name: SYS__COPILOT__PLATFORM_REGISTRY_URL
+          value: {{ (.Values.argus.copilot).platformRegistryUrl | default "" | quote }}
+        - name: SYS__COPILOT__M365_QUIET_SECONDS
+          value: {{ (.Values.argus.copilot).m365QuietSeconds | default 60 | quote }}
+        - name: SYS__COPILOT__SESSION_QUIET_SECONDS
+          value: {{ (.Values.argus.copilot).sessionQuietSeconds | default 300 | quote }}
+        - name: SYS__COPILOT__TURN_QUIET_SECONDS
+          value: {{ (.Values.argus.copilot).turnQuietSeconds | default 1800 | quote }}
+        - name: SYS__COPILOT__GRAPH_SWEEP_SECONDS
+          value: {{ (.Values.argus.copilot).graphSweepSeconds | default 5 | quote }}
+        - name: SYS__COPILOT__GRAPH_LEASE_SECONDS
+          value: {{ (.Values.argus.copilot).graphLeaseSeconds | default 300 | quote }}
+        - name: SYS__COPILOT__GRAPH_RETENTION_HOURS
+          value: {{ (.Values.argus.copilot).graphRetentionHours | default 24 | quote }}
+        - name: SYS__COPILOT__RAW_DUMP
+          value: {{ (.Values.argus.copilot).rawDump | default false | quote }}
+        # Tracing. Only the two identity variables are set here; every endpoint,
+        # protocol and credential arrives through `otel-secret` below, which is the
+        # nine-key contract the whole estate already shares. Setting an endpoint
+        # here would fork that contract for one service.
+        - name: OTEL_SERVICE_NAME
+          value: "argus"
+        # `deployment.environment` is what separates dev from prod inside one
+        # Honeycomb dataset; `service.version` is the image tag, so "which build
+        # produced this trace" is a question the trace answers by itself -- the same
+        # reasoning as SYS__ARGUS_VERSION above, for the same reason.
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "deployment.environment={{ .Values.env }},service.version={{ .Values.image.tag }}"
+        # ⚠️ **Bounded because an unreachable collector must not slow a deploy.**
+        # Measured: `shutdown()` against a collector that refuses connections blocks
+        # ~7s while the exporter retries with backoff. It fits the budget -- 30s
+        # `terminationGracePeriodSeconds` minus 5s `preStop` minus the queue's 5s
+        # drain -- but it buys nothing, because the spans are lost either way, and it
+        # would be added to every pod termination during a Refinery outage. Across 20
+        # prod replicas at 25% surge that is a materially slower rollout for no
+        # telemetry gained.
+        #
+        # ↩️ **`OTEL_BSP_EXPORT_TIMEOUT` was the obvious knob and does nothing here**
+        # -- 6.4s against a 6.5s baseline -- because the delay is the *exporter's* own
+        # gRPC retry rather than the batch processor's export deadline. Measured
+        # before shipping, which is the only reason this is the working variable and
+        # not a comment claiming a bound that was never applied:
+        #
+        #     timeout   shutdown block      healthy export
+        #     2s        1.2s                fine
+        #     5s        3.4s                512 of 512 spans delivered
+        #     10s       6.3s                fine
+        #     default   ~7s
+        #
+        # 5s rather than 2s: the collector is in-cluster so an export is milliseconds,
+        # and the extra headroom costs 2s of shutdown only when it is already broken.
+        - name: OTEL_EXPORTER_OTLP_TRACES_TIMEOUT
+          value: "5"
+        envFrom:
+        # `optional: true`, matching the api-gateway, and it is doing real work
+        # rather than being defensive boilerplate: this secret is hand-managed and
+        # does not exist in `argusv3` yet. Without the flag every pod in the
+        # namespace would CrashLoop on a missing secret the moment this chart
+        # shipped -- turning an observability improvement into an outage. With it,
+        # the pods run untraced until the secret lands and then pick it up on the
+        # next roll, because `telemetry.setup_tracing` treats an unset endpoint as
+        # "off" rather than as an error.
+        - secretRef:
+            name: otel-secret
+            optional: true
+        ports:
+        - containerPort: {{ .Values.service.targetPort }}
+        # Declared so `kubectl describe` and anyone reading this spec can see the
+        # port exists. It is *not* in the Service -- see the annotations helper.
+        - containerPort: {{ .Values.argus.metrics.port }}
+          name: metrics
+        # /api/v3/health, not v1's /api/v1/private/ping: this engine serves
+        # exactly two routes, and the v1 path would 404 every probe.
+        startupProbe:
+          httpGet:
+            path: /api/v3/health
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 18
+        livenessProbe:
+          httpGet:
+            path: /api/v3/health
+            port: {{ .Values.service.targetPort }}
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/v3/health
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: 5
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+      {{- include "argus-v3.placement" . | nindent 6 }}

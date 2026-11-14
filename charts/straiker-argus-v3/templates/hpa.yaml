@@ -1,0 +1,23 @@
+{{- if .Values.autoscaling.enabled }}
+---
+# Horizontal autoscaler for argus-v3-app.
+#
+# Once this exists it owns the replica count. The Deployment still renders one
+# (removing the field would have Helm patch it away, and the default is 1), but
+# renders minReplicas so that the count Helm asserts and the count the autoscaler
+# wants are the same number.
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: argus-v3-app-hpa
+  labels:
+    app.kubernetes.io/part-of: argus-v3
+spec:
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: argus-v3-app
+  targetCPUUtilizationPercentage: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

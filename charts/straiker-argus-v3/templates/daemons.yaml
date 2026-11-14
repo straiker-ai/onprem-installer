@@ -1,0 +1,169 @@
+{{- if and .Values.argus.agentConfig.enabled .Values.argus.agentConfig.bootstrapServers }}
+---
+# Agent Config Consumer Daemon — reads per-agent control configuration from the
+# platform off a compacted MSK topic and materializes it into Redis.
+#
+# Only rendered when enabled AND bootstrapServers is non-empty, so an overlay can
+# flip enabled:true before the env's brokers are known without CrashLooping a
+# consumer that immediately exits.
+#
+# There is no settings-synchronizer alongside this one. v1's chart runs
+# `python -m argus.daemons.settings_synchronizer`; that module does not exist on
+# this branch, and deploying it here would buy a permanent CrashLoop. Per-agent
+# config arrives on the topic below instead of being pulled from Foundation.
+#
+# Scales independently of the API. Replicas may go up to the topic's partition
+# count (6); beyond that the extras idle. terminationGracePeriodSeconds gives the
+# consumer room to finish and commit the batch it is holding on SIGTERM rather
+# than replaying it after restart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-v3-agent-config
+  labels:
+    app: argus-v3-agent-config
+    app.kubernetes.io/part-of: argus-v3
+spec:
+  replicas: {{ .Values.argus.agentConfig.replicaCount }}
+  selector:
+    matchLabels:
+      app: argus-v3-agent-config
+  template:
+    metadata:
+      labels:
+        app: argus-v3-agent-config
+      annotations:
+        {{- include "argus-v3.metricsAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 30
+      {{- with include "argus-v3.daemonSpread" (dict "root" $ "app" "argus-v3-agent-config") | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      containers:
+      - name: agent-config-consumer
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "-m", "argus.daemons.agent_config_consumer"]
+        resources:
+          requests:
+            cpu: 250m
+            memory: "512Mi"
+          limits:
+            memory: "512Mi"
+        env:
+        {{- include "argus-v3.baseEnv" . | nindent 8 }}
+        - name: SYS__AGENT_CONFIG__ENABLED
+          value: "{{ .Values.argus.agentConfig.enabled }}"
+        - name: SYS__AGENT_CONFIG__BOOTSTRAP_SERVERS
+          value: {{ .Values.argus.agentConfig.bootstrapServers | quote }}
+        - name: SYS__AGENT_CONFIG__TOPIC
+          value: {{ .Values.argus.agentConfig.topic | quote }}
+        - name: SYS__AGENT_CONFIG__GROUP_ID
+          value: {{ .Values.argus.agentConfig.groupId | quote }}
+        - name: SYS__AGENT_CONFIG__AUTO_OFFSET_RESET
+          value: {{ .Values.argus.agentConfig.autoOffsetReset | quote }}
+        - name: SYS__AGENT_CONFIG__SASL_MECHANISM
+          value: {{ .Values.argus.agentConfig.saslMechanism | quote }}
+        - name: SYS__AGENT_CONFIG__REGION
+          value: {{ .Values.argus.agentConfig.region | quote }}
+        {{- include "argus-v3.transcriptKeysEnv" . | nindent 8 }}
+      {{- include "argus-v3.placement" . | nindent 6 }}
+{{- include "argus-v3.daemonPdb" (dict "root" $ "app" "argus-v3-agent-config") }}
+{{- end }}
+{{- if and .Values.argus.compactor.enabled .Values.argus.compactor.bootstrapServers .Values.argus.compactor.bucket }}
+---
+# Transcript compactor. Its own Deployment because it is the only stateful part
+# of the transcript pipeline: it holds turns in memory between flushes, and its
+# failure should stop transcripts appearing without touching detection, findings
+# or analytics.
+#
+# Rendered only when the brokers and the bucket are both known. The daemon itself
+# refuses to start without a bucket rather than guessing one, so rendering it
+# half-configured would buy a pod that exits on every restart instead of a clear
+# "not deployed here".
+#
+# Replicas are bounded by the topic's partition count (32); beyond that the
+# extras idle. Scaling it is also a rebalance, which is not free here — the new
+# owner of a partition must recover its turns in flight from object storage — so
+# scale in steps rather than in one jump.
+#
+# terminationGracePeriodSeconds is longer than the other daemon's: on SIGTERM
+# this one flushes every turn it is holding before exiting, and each flush is an
+# S3 round trip.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-v3-compactor
+  labels:
+    app: argus-v3-compactor
+    app.kubernetes.io/part-of: argus-v3
+spec:
+  replicas: {{ .Values.argus.compactor.replicaCount }}
+  selector:
+    matchLabels:
+      app: argus-v3-compactor
+  template:
+    metadata:
+      labels:
+        app: argus-v3-compactor
+      annotations:
+        {{- include "argus-v3.metricsAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 60
+      {{- with include "argus-v3.daemonSpread" (dict "root" $ "app" "argus-v3-compactor") | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      containers:
+      - name: transcript-compactor
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "-m", "argus.daemons.transcript_compactor"]
+        resources:
+          requests:
+            cpu: 500m
+            memory: "1Gi"
+          limits:
+            # Bodies accumulate here between flushes. The flush timer exists for
+            # offset-commit reasons rather than memory ones, but a partition that
+            # falls hours behind the log head buffers accordingly.
+            memory: "2Gi"
+        env:
+        {{- include "argus-v3.baseEnv" . | nindent 8 }}
+        - name: SYS__COMPACTOR__ENABLED
+          value: "{{ .Values.argus.compactor.enabled }}"
+        - name: SYS__COMPACTOR__BOOTSTRAP_SERVERS
+          value: {{ .Values.argus.compactor.bootstrapServers | quote }}
+        - name: SYS__COMPACTOR__TOPIC
+          value: {{ .Values.argus.compactor.topic | quote }}
+        - name: SYS__COMPACTOR__GROUP_ID
+          value: {{ .Values.argus.compactor.groupId | quote }}
+        - name: SYS__COMPACTOR__AUTO_OFFSET_RESET
+          value: {{ .Values.argus.compactor.autoOffsetReset | quote }}
+        - name: SYS__COMPACTOR__SASL_MECHANISM
+          value: {{ .Values.argus.compactor.saslMechanism | quote }}
+        - name: SYS__COMPACTOR__REGION
+          value: {{ .Values.argus.compactor.region | quote }}
+        - name: SYS__COMPACTOR__BUCKET
+          value: {{ .Values.argus.compactor.bucket | quote }}
+        - name: SYS__COMPACTOR__ENDPOINT_URL
+          value: {{ .Values.argus.compactor.endpointUrl | default "" | quote }}
+        # Defaulted rather than required, so an overlay that only carries
+        # connection settings keeps rendering. These three are the knobs that
+        # decide whether the resident set stays bounded: how fast a pass writes,
+        # how long a turn nobody closes stays open, and how much payload is held
+        # at once.
+        - name: SYS__COMPACTOR__FLUSH_CONCURRENCY
+          value: "{{ .Values.argus.compactor.flushConcurrency | default 16 }}"
+        - name: SYS__COMPACTOR__IDLE_SEAL_SECONDS
+          value: "{{ .Values.argus.compactor.idleSealSeconds | default 21600 }}"
+        - name: SYS__COMPACTOR__MAX_RESIDENT_EVENTS
+          value: "{{ .Values.argus.compactor.maxResidentEvents | default 200000 }}"
+        # Empty publishes no turn records, and holds nothing for them.
+        - name: SYS__COMPACTOR__RECORD_TOPIC
+          value: {{ .Values.argus.compactor.recordTopic | default "" | quote }}
+        {{- include "argus-v3.transcriptKeysEnv" . | nindent 8 }}
+      {{- include "argus-v3.placement" . | nindent 6 }}
+{{- include "argus-v3.daemonPdb" (dict "root" $ "app" "argus-v3-compactor") }}
+{{- end }}

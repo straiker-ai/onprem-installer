@@ -1,0 +1,6 @@
+apiVersion: v2
+name: straiker-argus-v3
+description: Argus Detection Engine (v3) - DefendAI
+type: application
+version: 0.0.1
+appVersion: "v3-42f20012839da1ebf91d9b9603b3892381029e1c"

@@ -1,0 +1,439 @@
+# argus-v3 helm chart — dev defaults.
+#
+# A separate chart from deploy/helm/argus rather than a parameterization of it.
+# That chart deploys the v1 engine to the `argus` namespace from `main`, and for
+# as long as both engines are live it must stay identical to main: a shared chart
+# would mean every v1 hotfix conflicts with this branch, and a v3 mistake could
+# reach v1's production release. When v3 becomes the only engine this chart
+# replaces that one and the old one is deleted, which is a cheaper end state than
+# unpicking a chart that learned to be two things.
+#
+# THIS FILE IS THE BASE EVERY ENVIRONMENT INHERITS. A value left only here
+# silently becomes stage's and prod's too, so anything deliberately dev-shaped is
+# restated in each overlay.
+
+# Only used when autoscaling is off. While the HPA exists the Deployment renders
+# minReplicas instead and the autoscaler owns the count from there.
+replicaCount: 3
+
+# dev runs synthetic traffic and sits near 0% CPU against a 60% target, so the
+# floor is what the environment costs at idle. Three is one pod per argus node
+# currently in the cluster, which is also what the topology spread below wants.
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 60
+
+# Percentage of the current replica count, so it follows the autoscaler rather
+# than pinning to a floor a scaled-in environment cannot meet.
+pdb:
+  minAvailable: "80%"
+
+env: "dev"
+
+image:
+  repository: argus-v3
+  # Overridden per deploy with --set image.tag. The `v3-` prefix is what keeps
+  # the two engines' tags apart in a repository they share; ECR tags here are
+  # immutable, so a collision would be a failed push rather than a silent swap.
+  tag: v3-latest
+  pullPolicy: IfNotPresent
+
+# The pods are reached only by the API gateway, in-cluster, over
+# argus-service.<namespace>. There is deliberately no Ingress and no load
+# balancer in this chart: v1 has an internet-facing ALB because it predates the
+# gateway, and reproducing it here would publish an unauthenticated route to an
+# engine whose only authentication is a header the gateway stamps.
+service:
+  port: 80
+  targetPort: 8080
+
+serviceAccount:
+  # The name is bound to an IAM role by an EKS Pod Identity association, which
+  # lives outside this chart — the association is a cluster-scoped AWS resource,
+  # and a Helm rollback must not be able to revoke the pods' credentials.
+  #
+  # Reuses the role the v1 namespace already has. Its trust policy names only
+  # pods.eks.amazonaws.com with no namespace condition, so a second association
+  # pointing the same role at this namespace needs no IAM change:
+  #
+  #   aws eks create-pod-identity-association --cluster-name dev-use1-be \
+  #     --namespace argusv3 --service-account argus-sa \
+  #     --role-arn arn:aws:iam::<account-id>:role/<role>
+  #
+  # Without it the pods have no AWS identity and die on the first Secrets Manager
+  # call, so the association has to exist before the first deploy.
+  create: true
+  name: argus-sa
+
+resources:
+  requests:
+    cpu: 1
+    memory: 4Gi
+  limits:
+    cpu: 1       # GIL limits Python to 1 effective core; match request for Guaranteed QoS
+    memory: 4Gi
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  minDomains: 2
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: DoNotSchedule
+
+# The two daemons (agent-config, compactor): a topology spread and a PDB each, off
+# here because most environments run one replica of each, where a spread does
+# nothing and a PDB only holds up drains. An overlay that runs two or more turns
+# them on.
+daemons:
+  topologySpread:
+    enabled: false
+    maxSkew: 1
+    # Without it the scheduler counts only zones that already have a matching node:
+    # with every argus node in one zone, both replicas go there.
+    minDomains: 2
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    # Spread each rollout's new pods among themselves: counted together with the old
+    # ReplicaSet's, the new pods can all land in one zone.
+    matchLabelKeys:
+      - pod-template-hash
+  # maxUnavailable rather than minAvailable: one replica still drains.
+  pdb:
+    enabled: false
+    maxUnavailable: 1
+
+nodeSelector:
+  purpose: argus
+
+tolerations:
+  - key: "purpose"
+    operator: "Equal"
+    value: "argus"
+    effect: "NoSchedule"
+
+argus:
+  # The renderer is not overridable: every deployed environment ships JSON, and a
+  # knob whose only wrong setting is "unparseable in production" is not worth
+  # having. Level is, so a noisy incident can be turned up without a code change.
+  logging:
+    level: "INFO"
+
+  # 9090, the Prometheus convention and what Refinery uses for the same purpose in
+  # this cluster. Not 8080 (the API) and not 8081 (`run_v3.py`'s local API port, so a
+  # laptop can run both). Overridable per environment, though there is no reason to:
+  # the port is only ever reached at the pod IP by Alloy.
+  metrics:
+    port: 9090
+
+  secretManager:
+    region: "us-east-1"
+    secretName: "dev-secrets"
+
+  # Every credential this chart needs comes from the bundle named above --
+  # including SYS__INFERENCE_API_KEY and SYS__ARGUS_INTERNAL_S2S_KEY, both of
+  # which are `secret: True` settings fields that the Secrets Manager source
+  # loads. There is deliberately no ExternalSecret and no literal key anywhere in
+  # this chart.
+
+  # Shared with the v1 engine, and that is fine, because the two engines' key
+  # spaces barely meet:
+  #
+  #   - Agent configuration does not overlap at all. v1 writes
+  #     settings:<tenant>:<app_id>; v3 writes agent_settings:<tenant>:<ref>. v3 is
+  #     the only writer AND the only reader of its own, which is why this chart
+  #     runs its own agent-config consumer rather than relying on v1's.
+  #   - Session state is under v3's `argus:{tenant:agent}:` prefix, which v1 has
+  #     never written.
+  #   - seq:<tenant>:<session>:<turn> IS a shared key space -- both engines build
+  #     it identically. But contention needs the same (tenant, session, turn) to
+  #     be scored twice, and a gateway route has exactly one upstream, so once
+  #     /api/v3/detect points here a turn reaches one engine or the other and
+  #     never both.
+  #
+  # The one thing that would break that: deliberately replaying the same traffic
+  # into both engines to compare their verdicts. That is a plausible thing to want
+  # during a rearchitecture, and it is the case that needs a separate cache first
+  # -- a shared counter would hand each engine half a sequence, and the holes read
+  # downstream as event loss that never happened.
+  redis:
+    url: "rediss://<redis-endpoint>:6379"
+
+  # Model endpoints. v3 still reads the v1 names and translates them per model;
+  # ARGUS__MODEL__<ID>__ENDPOINT overrides a single model without disturbing the
+  # rest, which is the seam to canary one classifier on new inference.
+  llmEndpoints:
+    llama: ""
+    qwen: ""
+    internlm: ""
+    llmStock: ""
+    lava: ""
+    vision: ""
+    imageDetection: ""
+    # Kev, the agentic classifier's model: the five trace controls, judged over the whole
+    # trace. kev-server's `/v1/detect`, routed on `x-straiker-model: kev-lw-4b-agentic`;
+    # kev-server chunks the trace itself. Empty leaves it unconfigured, and the detector
+    # reports those controls unavailable. Every overlay states its own fleet's endpoint.
+    kev: ""
+    # Kev on the PROMPT of turns with no trace (`kev_prompt`), at `kev` above: the same
+    # kev-server and routing name, in `/v1/detect`'s `messages` mode. Its `AttackAttempt`
+    # fires `llm_evasion` beside the content judges. A switch rather than a second URL:
+    # it calls Kev on every prompt turn, several times the trace traffic, so turning Kev
+    # on for traces must not turn this on too. A boolean, not a string -- "false" quoted
+    # is truthy to Helm. Every overlay states its own value.
+    kevPrompt: true
+    # Where prompt Kev calls when it has a kev-server of its own; empty uses `kev`. Prompts
+    # can't share a vLLM with trace chunks: batched behind them, a ~100-token prompt takes
+    # seconds instead of ~0.1 s.
+    kevPromptEndpoint: ""
+
+  # The false-positive review layer -- re-judge what fired against what this agent
+  # is actually for, and drop what the evidence no longer supports.
+  #
+  # ⚠️ **Turning this on opts the environment into allow-on-outage.** An *absent*
+  # reviewer keeps every finding; a *configured* one that cannot be reached allows
+  # the findings it would have judged.
+  #
+  # Scope, precisely, because the generic rule in `review/runner.py` is wider than
+  # what this reviewer does. It only ever asks about controls a model can have an
+  # opinion on, and it scopes the outage to those -- so the deterministic controls
+  # (`malicious_packages`, `malicious_urls`, `high_risk_mcp`, the tenant's own
+  # lists) **keep enforcing while the provider is down**. What is released is the
+  # model-judgeable set: exfiltration, RCE, destructive commands, IPI and the rest.
+  # Pinned by `TestWhatAnOutageActuallyAllows`.
+  #
+  # Wire the alert on `review allowed findings` first. Two signals exist and
+  # neither is a metric: that log line, and `attenuated_by=review:unavailable` on
+  # the finding rows in egress. `Verdict.gaps` is not projected.
+  #
+  # ⚠️ **A bad IAM grant is indistinguishable from an outage, and allows.** This
+  # signs the Responses request with the pod role. An access denied is
+  # `ReviewUnavailable`, which allows findings. Check a real response, including
+  # `cached_tokens`, before trusting an environment.
+  #
+  # ⚠️ **Data residency: do not enable this in ap-northeast-2.** Stronger here than
+  # The model this layer calls is
+  # `global.openai.gpt-5.6-sol`, and a *global* inference profile routes out of
+  # the region it is called from by design. A residency-constrained deployment
+  # turns this layer off via the tenant's `context_review`.
+  contextReview:
+    # ON in every current v3 environment. Each overlay restates this so deployment
+    # intent and endpoint region are reviewable where that environment is defined.
+    enabled: true
+    # Part of the host for the OpenAI-compatible Responses path.
+    region: "us-east-1"
+    # Empty takes the registry default, `global.openai.gpt-5.6-sol`. Treat a model
+    # change and a prompt change as one decision.
+    model: ""
+    effort: "medium"
+    # `explicit` places a cache breakpoint after the system prompt. Set to "off"
+    # for an endpoint that rejects cache instructions.
+    cacheMode: "explicit"
+    # ⚠️ Bump whenever the prompt text or the output schema changes.
+    cacheKeyPrefix: "argus-ctx-v4"
+    # Record what the layer would have suppressed without acting on it. The way
+    # to measure it against live traffic before trusting it.
+    shadowMode: false
+    # Ask the reviewer to explain the findings it upholds (a summary plus an evidence
+    # highlight). Uses its own schema and cache key. On in dev (this file) and stage,
+    # off in prod until the replay gate passes. ⚠️ Every overlay states its own value
+    # rather than inheriting this one, so a new overlay cannot switch it on by omission.
+    explainFindings: true
+    # Read-only path where per-agent business context is mounted.
+    contextDir: "./local_context"
+
+  # Inbound per-agent control configuration from the platform (MSK, compacted).
+  agentConfig:
+    enabled: true
+    replicaCount: 1
+    bootstrapServers: "<msk-bootstrap>:9098"
+    topic: "platform.agent_config"
+    # NOT the v1 group. Sharing it would put both engines' consumers in one group
+    # splitting the topic's partitions, so each would materialize a fraction of
+    # the agent fleet into its Redis and neither would be able to answer for an
+    # agent on the other's partitions.
+    #
+    # The suffix goes on the end because the pod policy grants MSK group access
+    # by prefix — group/.../argus-agent-config* — so `argus-agent-config-v3` is
+    # covered by the existing grant and `argus-v3-agent-config` is not.
+    groupId: "argus-agent-config-v3"
+    # Compacted topic: replaying from the start rebuilds every agent's state,
+    # which is what makes a cold boot self-sufficient. It is also what makes a
+    # second consumer group free — v3 rebuilds the whole fleet from the log
+    # rather than needing anything v1 already wrote.
+    autoOffsetReset: "earliest"
+    saslMechanism: "OAUTHBEARER"   # MSK IAM
+    region: "us-east-1"
+
+  # Per-tenant config (MSK), consumed inside the agent-config daemon on its brokers
+  # and auth; today it delivers only each tenant's own KMS key for transcripts.
+  # No consumer group, so the pod role needs ReadData/DescribeTopic on the topic
+  # and nothing on groups.
+  #
+  # ⚠️ **On only where the pod role can read the topic.** Turning it on also tells
+  # the compactor and the API pods to hold every transcript write until the
+  # consumer has synced, so on where the read is denied, transcripts stop for
+  # every tenant. Check `tenant_config.synced` in the agent-config logs right
+  # after enabling. Dev's role can (S6REKSDevArgusPodPolicy v17); every other
+  # overlay restates it off until its own role is verified.
+  tenantConfig:
+    enabled: true
+    topic: "platform.tenant_config"
+
+  # Analytics egress (MSK). ClickPipes lands these in grid.raw_event /
+  # grid.raw_finding, which is what the console renders turns and events from.
+  # Shared with v1 on purpose: both engines' rows carry engine_version, so the
+  # console can tell them apart and a side-by-side comparison is possible at all.
+  grid:
+    enabled: true
+    bootstrapServers: "<msk-bootstrap>:9098"
+    topicEvents: "s6r.events"
+    topicFindings: "s6r.findings"
+    saslMechanism: "OAUTHBEARER"   # MSK IAM
+    region: "us-east-1"
+    clientId: "argus-grid-producer-v3"
+    publishTimeoutSeconds: "5.0"
+
+  # Transcript egress (MSK). Feeds the Argus-owned compactor, not ClickPipes —
+  # hence the argus.* namespace rather than s6r.*, which denotes the Grid landing
+  # family and implies a pipe this topic must never get.
+  transcript:
+    # This flag is also what moves `capture_level` from 0 to 3, which tells
+    # readers a document EXISTS at the derived key — so it must not be enabled
+    # anywhere the compactor below is off, or every reader goes hunting for
+    # objects nobody wrote.
+    enabled: true
+    bootstrapServers: "<msk-bootstrap>:9098"
+    topic: "argus.transcript_events"
+    saslMechanism: "OAUTHBEARER"   # MSK IAM
+    region: "us-east-1"
+    clientId: "argus-transcript-producer-v3"
+    publishTimeoutSeconds: "5.0"
+    compressionType: "zstd"
+    # 2 MB, matching the topic's max.message.bytes. Both must agree, along with
+    # the consumer's fetch size and the broker's replica.fetch.max.bytes.
+    maxRequestSize: "2097152"
+
+  # Transcript compactor. Consumes the topic above and writes documents to the
+  # artifacts bucket.
+  #
+  # `bucket` and `region` are read by the API pods too, not only this daemon:
+  # v3 serves attachments out of the same bucket rather than carrying a second
+  # bucket setting that could disagree with this one.
+  # The internal capture: one replayable record per request, filed under its turn,
+  # written by the API pods.
+  #
+  # Its OWN bucket, named for the engine with `capture/v2/` as the prefix inside,
+  # so the next thing Argus stores needs a prefix rather than a new bucket and a
+  # new IAM grant. Not the artifacts bucket: this is internal data with training
+  # implications, and sharing one bucket makes the line between serving a
+  # transcript and reading the corpus a prefix convention instead of a boundary.
+  #
+  # `enabled` is separate from `bucket` so a rollback is a flag rather than an
+  # edit that loses the bucket name — which matters for something whose volume is
+  # the concern. Both must be set for a single write to happen.
+  #
+  # No retention here: a TTL is a bucket lifecycle rule, which the writer cannot
+  # enforce. The `dt=` partition is what makes one cheap to add.
+  # The Copilot Studio / M365 Copilot runtime: the tool gate's buffer, the Graph
+  # `aiInteraction` notify endpoint and the sweeper that flushes both into archived
+  # turns. Timings are Pathfinder's harvester values; turnQuietSeconds must stay well
+  # above sessionQuietSeconds, or the tool calls are archived before the Graph session
+  # can join them.
+  #
+  # The registry is reached at its in-cluster service, as Pathfinder reached it. The S2S
+  # key and the M365 app credentials are read from the Secrets Manager bundle under the
+  # names Pathfinder already uses there; nothing new is provisioned.
+  copilot:
+    platformRegistryUrl: "http://registry.platform:80"
+    m365QuietSeconds: 60
+    sessionQuietSeconds: 300
+    turnQuietSeconds: 1800
+    graphSweepSeconds: 5
+    graphLeaseSeconds: 300
+    graphRetentionHours: 24
+    # Raw gate bodies and decrypted Graph interactions, one document per flushed group,
+    # under `copilot-raw/` in the capture bucket. Dev only, like Pathfinder's S3 dump;
+    # every other overlay turns it off.
+    rawDump: true
+
+  capture:
+    enabled: true
+    bucket: ""
+    region: "us-east-1"
+    # Empty means AWS S3. Set only for an S3-compatible endpoint (MinIO locally).
+    endpointUrl: ""
+
+  # Operational metrics (MSK -> ClickHouse via a Kafka ClickPipe). One flat row per
+  # delivery: counts, durations, and the maps a per-tenant dashboard groups by.
+  #
+  # ⚠️ **Requires `capture.enabled` above.** The row is projected from the record the
+  # capture builds, which is what stops the S3 object and the ClickHouse row from
+  # disagreeing about a delivery -- and means there is no row without that record.
+  # Enabling this alone logs `boot.metrics_without_capture` and publishes nothing,
+  # rather than looking healthy while the table stays empty.
+  #
+  # Deliberately `argus.*` while carrying a pipe, which reverses what that prefix has
+  # meant for the transcript topic. The half that still holds is the half about
+  # contracts: `s6r.*` is the Grid landing family the console and the customer read,
+  # and this is internal engineering telemetry on a pipe we own.
+  metricsStream:
+    enabled: true
+    topic: "argus.metrics"
+    bootstrapServers: "<msk-bootstrap>:9098"
+    saslMechanism: "OAUTHBEARER"   # MSK IAM
+    region: "us-east-1"
+    clientId: "argus-metrics-producer-v3"
+    publishTimeoutSeconds: "5.0"
+    # Compressed but NOT resized, unlike the transcript's producer: a row of counts
+    # is ~1.6 KB, so the broker default is ample and none of the four-way
+    # max.message.bytes agreement the fat topic needs applies here.
+    compressionType: "zstd"
+
+  compactor:
+    enabled: true
+    replicaCount: 1
+    bootstrapServers: "<msk-bootstrap>:9098"
+    topic: "argus.transcript_events"
+    # Suffixed for the same two reasons as agentConfig.groupId above: a shared
+    # group would split partitions with v1's compactor so each sealed only some
+    # of the turns, and the pod policy grants by the `argus-compactor*` prefix.
+    groupId: "argus-compactor-v3"
+    autoOffsetReset: "earliest"
+    saslMechanism: "OAUTHBEARER"
+    region: "us-east-1"
+    bucket: ""
+    # Empty means AWS S3. Set only for an S3-compatible endpoint (MinIO locally).
+    endpointUrl: ""
+    # DEV ONLY, and every other environment restates it.
+    #
+    # The CMEK transcripts role every transcript and attachment write assumes;
+    # customer key policies name it rather than the pod role. Verified on dev
+    # 2026-10-27: argus-sa assumes it and writes, reads and lists through it.
+    # Empty writes as the pod role. A role that cannot be assumed fails every
+    # write, so set it per env only once verified there.
+    transcriptRoleArn: "arn:aws:iam::<account-id>:role/<role>"
+    # How many turns a flush pass writes at once. Serially, a pass costs one S3
+    # round trip per due turn, and a pass slow enough to fall behind arrivals
+    # grows the resident set, which makes the next pass slower still.
+    flushConcurrency: 16
+    # DEV ONLY, and every other environment restates it.
+    #
+    # 30min against a 6h default. This is the backstop for the last turn of a
+    # session, which by definition never rolls over. Short here because dev
+    # traffic is synthetic and bursty and the real timeout would leave a load
+    # test's turns resident all day rather than exercising the seal at all. It
+    # would be *wrong* in production: mid-session gaps reached a 2.9h p99, so
+    # 30min would seal turns that are still live, and a wrongly sealed manifest
+    # reads as finished for 24h.
+    idleSealSeconds: 1800
+    # Events held in memory across all turns before the coldest durable ones shed
+    # their bodies. Low here on purpose: dev volume would never reach the default,
+    # so shedding and resurrection would never actually be exercised.
+    maxResidentEvents: 20000
+    # Where one CloudEvent per sealed turn goes for databridge to export. Empty
+    # publishes nothing. The pod role must be able to write it: a turn whose
+    # record cannot be published stays resident and holds its offsets until it
+    # can, so a denied write stalls this consumer rather than dropping records.
+    recordTopic: "s6r.defend_turns"

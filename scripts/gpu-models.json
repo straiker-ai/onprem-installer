@@ -38,7 +38,7 @@
     {
       "name": "kev-non-agentic",
       "weights_gb": 8.5,
-      "kv_gb": 3.5,
+      "kv_gb": 6.0,
       "can_quantize": false,
       "multimodal": false,
       "server": "vllm"
