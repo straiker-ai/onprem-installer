@@ -31,6 +31,7 @@ locals {
     "straiker/frontend",
     "straiker/frontend-migrate",
     "straiker/vllm",
+    "straiker/kev-lw-server",
     "straiker/argus",
     "straiker/iris",
     "straiker/api-gateway",
