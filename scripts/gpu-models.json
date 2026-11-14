@@ -1,5 +1,5 @@
 {
-  "_comment": "Models served by local vLLM. weights_gb/kv_gb are ESTIMATES (bf16 weights + KV/activation budget at serving length); replace with measured values. quantized_gb is the footprint with bitsandbytes 4-bit (only if can_quantize). Edit this file, not the planner, to change the fleet.",
+  "_comment": "Models served by local vLLM. weights_gb/kv_gb are ESTIMATES (bf16 weights + KV/activation budget at serving length); replace with measured values. quantized_gb is the footprint with bitsandbytes 4-bit (only if can_quantize). Edit this file, not the planner, to change the fleet. default_gpu = the GPU the chart's default tier gives this model on EKS (g6e=L40S, g5=A10G, l4=L4); used to project a plan before any GPU node exists.",
   "default_replicas": 2,
   "models": [
     {
@@ -9,7 +9,8 @@
       "quantized_gb": 13.0,
       "can_quantize": true,
       "multimodal": false,
-      "server": "vllm"
+      "server": "vllm",
+      "default_gpu": "L40S"
     },
     {
       "name": "vision",
@@ -17,7 +18,8 @@
       "kv_gb": 3.5,
       "can_quantize": false,
       "multimodal": true,
-      "server": "vllm"
+      "server": "vllm",
+      "default_gpu": "A10G"
     },
     {
       "name": "wanda",
@@ -25,7 +27,8 @@
       "kv_gb": 4.0,
       "can_quantize": false,
       "multimodal": true,
-      "server": "vllm"
+      "server": "vllm",
+      "default_gpu": "A10G"
     },
     {
       "name": "kev-agentic",
@@ -33,7 +36,8 @@
       "kv_gb": 8.5,
       "can_quantize": false,
       "multimodal": false,
-      "server": "kev-server"
+      "server": "kev-server",
+      "default_gpu": "L4"
     },
     {
       "name": "kev-non-agentic",
@@ -41,7 +45,8 @@
       "kv_gb": 6.0,
       "can_quantize": false,
       "multimodal": false,
-      "server": "vllm"
+      "server": "vllm",
+      "default_gpu": "A10G"
     }
   ]
 }

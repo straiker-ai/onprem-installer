@@ -13,6 +13,50 @@ def nodes(product, count_per_node, n_nodes, memory_gb=None):
     return [{"name": f"n{i}", "product": product, "count": count_per_node, "memory_gb": memory_gb} for i in range(n_nodes)]
 
 
+class Projected(unittest.TestCase):
+    def test_production_default_tiers_fit_without_sharing(self):
+        out = gp.plan(MODELS, gp.project_inventory(MODELS))
+        self.assertTrue(out["feasible"], out)
+        self.assertEqual(out["sharing"], "none")
+        self.assertEqual(out["gpus_used"], 10)
+        thanos = [p for p in out["placements"] if p["model"] == "thanos"]
+        self.assertTrue(all(p["gpu_product"] == "L40S" and "quantization" not in p["vllm"] for p in thanos))
+
+    def test_each_model_lands_on_its_default_tier(self):
+        out = gp.plan(MODELS, gp.project_inventory(MODELS))
+        want = {m["name"]: m["default_gpu"] for m in MODELS["models"]}
+        for p in out["placements"]:
+            self.assertEqual(p["gpu_product"], want[p["model"]])
+
+    def test_subset_and_replicas(self):
+        doc = {**MODELS, "models": [m for m in MODELS["models"] if m["name"] == "vision"]}
+        self.assertEqual(len(gp.project_inventory(doc, replicas=3)), 3)
+
+    def test_no_mig_skips_mig(self):
+        out = gp.plan(MODELS, nodes("A100-SXM4-80GB", 8, 1), profile="test", allow_mig=False)
+        self.assertNotEqual(out["sharing"], "mig")
+
+
+class HelmSets(unittest.TestCase):
+    def test_exclusive_plan_changes_nothing(self):
+        out = gp.plan(MODELS, gp.project_inventory(MODELS))
+        self.assertEqual(gp.helm_sets(out, "thanos"), [])
+
+    def test_exclusive_but_too_small_gpu_still_quantizes(self):
+        out = gp.plan(MODELS, nodes("L4", 1, 12), profile="test", allow_mig=False)
+        self.assertEqual(out["sharing"], "none")
+        self.assertEqual(gp.helm_sets(out, "thanos"), ["inferenceService.quantization=bitsandbytes"])
+        self.assertEqual(gp.helm_sets(out, "vision"), [])
+
+    def test_time_sliced_plan_sets_serving_and_slices(self):
+        out = gp.plan(MODELS, nodes("L4", 1, 8), profile="test", allow_mig=False)
+        self.assertEqual(out["sharing"], "time-slicing")
+        sets = gp.helm_sets(out, "thanos")
+        self.assertIn("inferenceService.quantization=bitsandbytes", sets)
+        self.assertTrue(any(x.startswith("inferenceService.max_model_len=") for x in sets))
+        self.assertGreaterEqual(gp.slices_needed(out), 2)
+
+
 class Fleet(unittest.TestCase):
     def test_fleet_is_five_models_two_replicas(self):
         out = gp.plan(MODELS, nodes("A100-SXM4-80GB", 8, 2))

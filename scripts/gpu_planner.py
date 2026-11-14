@@ -147,7 +147,8 @@ def place_exclusive(pods: list[Pod], gpus: list[Gpu], allow_quant: bool = False)
     plan = Plan("none")
     free = sorted(gpus, key=lambda g: -g.memory_gb)
     for pod in sorted(pods, key=lambda p: -(p.model["weights_gb"] + p.model["kv_gb"])):
-        for g in free:
+        # a projected node was made for exactly this server (its default tier): use it before any other GPU
+        for g in sorted(free, key=lambda g: g.node != f"projected-{pod.name}"):
             need, q = footprint(pod.model, g.memory_gb, allow_quant)
             if need <= g.memory_gb * EXCLUSIVE_FILL:
                 free.remove(g)
@@ -221,8 +222,18 @@ def _placement(pod: Pod, gpu: Gpu, sharing: str, mig_profile, need: float, quant
 PROFILES = ("production", "test")
 
 
+def project_inventory(models_doc: dict, replicas: int | None = None) -> list[dict]:
+    """The inventory Karpenter will create when no GPU node exists yet: one single-GPU node per server, of the model's
+    default tier. Only valid for exclusive placement (nothing is shared on a node that does not exist)."""
+    nodes = []
+    for pod in pods_for(models_doc["models"], replicas, models_doc.get("default_replicas", 2)):
+        nodes.append({"name": f"projected-{pod.name}", "product": pod.model.get("default_gpu", "A10G"), "count": 1,
+                      "memory_gb": None})
+    return nodes
+
+
 def plan(models_doc: dict, nodes: list[dict], sharing: str = "auto", replicas: int | None = None,
-         profile: str = "production") -> dict:
+         profile: str = "production", allow_mig: bool = True) -> dict:
     if profile not in PROFILES:
         raise ValueError(f"profile must be one of {PROFILES}")
     if profile == "production" and sharing not in ("auto", "none"):
@@ -235,7 +246,7 @@ def plan(models_doc: dict, nodes: list[dict], sharing: str = "auto", replicas: i
     if profile == "production":
         order = ["none"]
     else:
-        order = ["none", "mig", "time-slicing"] if sharing == "auto" else [sharing]
+        order = (["none"] + (["mig"] if allow_mig else []) + ["time-slicing"]) if sharing == "auto" else [sharing]
     best = None
     for mode in order:
         result = attempts[mode](pods, gpus, allow_quant)
@@ -273,6 +284,53 @@ def _shortfall(models_doc: dict, pods: list[Pod], gpus: list[Gpu], profile: str 
     return f"needs about {need} GPUs of {gb:g} GB with sharing (found {len(gpus)}); {len(pods)} servers, {total:.0f} GB planned"
 
 
+def helm_sets(plan_doc: dict, model: str) -> list[str]:
+    """`--set` pairs for charts/straiker-inference when the plan packs GPUs (test profile). Exclusive placement returns
+    nothing: the model keeps the settings SaaS validated for it. One release serves all replicas, so the plan's most
+    constrained placement of that model (smallest context) is used for all of them."""
+    mine = [p for p in plan_doc["placements"] if p["model"] == model]
+    if not mine:
+        return []
+    quantized = next((p["vllm"]["quantization"] for p in mine if p["vllm"].get("quantization")), None)
+    if plan_doc.get("sharing") in (None, "none"):  # one server per GPU keeps SaaS's settings, except a forced quantization
+        return [f"inferenceService.quantization={quantized}"] if quantized else []
+    worst = min(mine, key=lambda p: int(p["vllm"]["max_model_len"]))["vllm"]
+    sets = {k: worst[k] for k in ("dtype", "max_model_len", "mem_fraction_static", "kv_cache_dtype") if worst.get(k)}
+    if quantized:  # one release, one setting: if any replica must be quantized they all are
+        sets["quantization"] = quantized
+    return [f"inferenceService.{k}={v}" for k, v in sets.items()]
+
+
+def summary(plan_doc: dict) -> str:
+    """A short human-readable plan for the installer log."""
+    lines = [f"GPU plan ({plan_doc['profile']} profile, {plan_doc['source']}): {plan_doc['pods']} model servers on "
+             f"{plan_doc['gpus_used']} GPU(s), sharing={plan_doc['sharing']}"]
+    if plan_doc.get("discovered"):
+        found = ", ".join(f"{n['name']}: {n['count']}x {n['product']}" for n in plan_doc["discovered"])
+        lines.append(f"  GPU nodes found: {found}")
+    elif plan_doc["source"] == "projected":
+        lines.append("  No GPU node is needed yet: Karpenter creates one per server, on the tier each model is validated for")
+    by_model: dict = {}
+    for p in plan_doc["placements"]:
+        by_model.setdefault(p["model"], []).append(p)
+    for model, ps in by_model.items():
+        extra = ", quantized" if any(p["vllm"].get("quantization") for p in ps) else ""
+        lines.append(f"  {model}: {len(ps)} x {ps[0]['gpu_product']} ({ps[0]['planned_gb']} GB planned each){extra}")
+    for n in plan_doc.get("notes", []):
+        lines.append(f"  note: {n}")
+    if not plan_doc["feasible"]:
+        lines.append(f"  NOT FEASIBLE: {plan_doc.get('shortfall', '')}")
+    return "\n".join(lines)
+
+
+def slices_needed(plan_doc: dict) -> int:
+    """Most servers planned onto one GPU (the time-slicing replica count the device plugin must advertise)."""
+    per_gpu: dict = {}
+    for p in plan_doc["placements"]:
+        per_gpu[(p["node"], p["gpu"])] = per_gpu.get((p["node"], p["gpu"]), 0) + 1
+    return max(per_gpu.values(), default=1)
+
+
 def nodes_from_kubectl(doc: dict) -> list[dict]:
     nodes = []
     for item in doc.get("items", []):
@@ -301,14 +359,48 @@ def main(argv=None) -> int:
     ap.add_argument("--sharing", default="auto", choices=["auto", "none", "time-slicing", "mig"],
                     help="test profile only")
     ap.add_argument("--replicas", type=int)
+    ap.add_argument("--projected", action="store_true",
+                    help="no GPU nodes yet: plan on the nodes Karpenter will create (each model's default tier)")
+    ap.add_argument("--no-mig", action="store_true", help="never plan MIG (the installer does not partition GPUs)")
+    ap.add_argument("--discover", action="store_true",
+                    help="read `kubectl get nodes -o json` on stdin; plan on the GPU nodes found (test profile) or on the "
+                         "projected default tiers (production, or no GPU node yet). The result says which and lists what was found")
+    ap.add_argument("--helm-sets", nargs=2, metavar=("PLAN_JSON", "MODEL"),
+                    help="print the inferenceService --set pairs for MODEL from a saved plan, one per line")
+    ap.add_argument("--summary", metavar="PLAN_JSON", help="print a short readable summary of a saved plan")
+    ap.add_argument("--slices", metavar="PLAN_JSON", help="print the time-slicing replica count a saved plan needs")
+    ap.add_argument("--only", help="comma-separated model names to plan (default: the whole fleet)")
     a = ap.parse_args(argv)
+    if a.helm_sets:
+        print("\n".join(helm_sets(json.loads(Path(a.helm_sets[0]).read_text()), a.helm_sets[1])))
+        return 0
+    if a.summary:
+        print(summary(json.loads(Path(a.summary).read_text())))
+        return 0
+    if a.slices:
+        print(slices_needed(json.loads(Path(a.slices).read_text())))
+        return 0
     models_doc = json.loads(Path(a.models).read_text())
-    nodes = nodes_from_kubectl(json.load(sys.stdin)) if a.from_kubectl else json.loads(Path(a.inventory).read_text())
+    if a.only:
+        wanted = set(a.only.split(","))
+        models_doc["models"] = [m for m in models_doc["models"] if m["name"] in wanted]
+    discovered, source = [], "inventory"
+    if a.discover:
+        discovered = nodes_from_kubectl(json.load(sys.stdin))
+        # production never shares, and Karpenter adds nodes as servers are scheduled, so existing nodes do not bound it
+        use_cluster = a.profile == "test" and discovered
+        nodes, source = (discovered, "cluster") if use_cluster else (project_inventory(models_doc, a.replicas), "projected")
+    elif a.projected:
+        nodes, source = project_inventory(models_doc, a.replicas), "projected"
+    else:
+        nodes = nodes_from_kubectl(json.load(sys.stdin)) if a.from_kubectl else json.loads(Path(a.inventory).read_text())
     try:
-        result = plan(models_doc, nodes, a.sharing, a.replicas, a.profile)
+        result = plan(models_doc, nodes, a.sharing, a.replicas, a.profile, allow_mig=not a.no_mig)
     except ValueError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
+    result["source"] = source
+    result["discovered"] = discovered
     json.dump(result, sys.stdout, indent=2)
     print()
     return 0 if result["feasible"] else 2

@@ -213,6 +213,18 @@ DEFEND_RELEASE="straiker-defend"
 # --data-layer). v3 runs next to v1 until Ascend is moved to it; then v3 becomes the default and v1 is removed.
 DEFEND_ENGINE="${DEFEND_ENGINE:-v1}"
 DEFEND_CHART_NAME="straiker-defend"
+
+# How the local model servers (GPU) are provided. Profile: production (default; one server per GPU, never shared or
+# quantized: what customers get) or test (opt-in; may time-slice GPUs and quantize so a small cluster runs the whole fleet).
+# Mode: vllm (default; the model fleet runs on GPU nodes here) or bedrock (no GPU fleet). Bedrock is also used by Argus v3's
+# context reviewer in every mode, so it is checked whenever --defend-engine v3 is selected.
+INFERENCE_PROFILE="${INFERENCE_PROFILE:-}"
+INFERENCE_MODE="${INFERENCE_MODE:-}"
+GPU_PLANNER="${REPO_ROOT}/scripts/gpu_planner.py"
+GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
+# EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one g5/g6/g6e .xlarge server node is 4 vCPUs.
+GPU_VCPU_QUOTA_CODE="L-DB2E81BA"
+GPU_NODE_VCPUS=4
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
 # Bedrock inference profiles Argus v3 may invoke (space-separated), as SaaS grants its argus pods: sol is the engine's context
@@ -698,6 +710,13 @@ Options:
                                    the frontend. Remembered in install state; needs a SaaS-style frontend image.
   --defend-engine <v1|v3>          Defend's detection engine. v1 (default for now): charts/straiker-defend. v3: Argus v3
                                    (phase straiker-argus-v3, needs --data-layer), run next to v1 until Ascend moves to it.
+  --inference-profile <production|test>
+                                   production (default): one model server per GPU, never shared or quantized, on the GPU
+                                   tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
+                                   that already exist and quantize thanos. NEVER use test for a customer. Remembered.
+  --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
+                                   fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
+                                   use --ai-provider-mode bedrock for Ascend). Remembered.
   --gateway-exposure <mode>        Who can reach the platform api-gateway (the API behind the console and SDK calls):
                                    internal (default): internal load balancer, VPC / private network only.
                                    public: internet-facing, TLS required (--gateway-cert-arn), optionally limited
@@ -1586,6 +1605,14 @@ parse_args() {
         ;;
       --defend-engine)
         DEFEND_ENGINE=${2:-}
+        shift 2
+        ;;
+      --inference-profile)
+        INFERENCE_PROFILE=${2:-}
+        shift 2
+        ;;
+      --inference-mode)
+        INFERENCE_MODE=${2:-}
         shift 2
         ;;
       --saas-frontend)
@@ -2797,6 +2824,9 @@ phase_aws_data() {
     mark_phase_blocked "AWS region is required. Use --aws-region, AWS_REGION, or configure the AWS CLI."
     return
   fi
+  if [[ "${DEFEND_ENGINE}" == "v3" ]]; then
+    preflight_argus_v3_bedrock || return
+  fi
 
   require_command aws
   require_command tofu
@@ -3487,6 +3517,9 @@ phase_straiker_system() {
   # --values (see show_plan's note).
   log "Auto-filling clusterName (${CLUSTER_NAME})."
   cmd+=(--set "clusterName=${CLUSTER_NAME}")
+  if [[ -n "$(get_metadata "gpu_time_slicing_replicas")" ]]; then # test profile: keep the shared-GPU setting across re-runs
+    cmd+=(--set "nvidia.devicePlugin.timeSlicing.replicas=$(get_metadata "gpu_time_slicing_replicas")")
+  fi
 
   if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
     cmd+=(--set "cloudProvider=gke")
@@ -5754,12 +5787,147 @@ phase_straiker_core() {
   "${cmd[@]}"
 }
 
+# --inference-profile / --inference-mode: flag > remembered in install state > default.
+inference_profile() {
+  local v="${INFERENCE_PROFILE:-$(get_metadata "inference_profile")}"
+  printf '%s' "${v:-production}"
+}
+inference_mode() {
+  local v="${INFERENCE_MODE:-$(get_metadata "inference_mode")}"
+  printf '%s' "${v:-vllm}"
+}
+
+remember_inference_settings() {
+  local profile mode
+  profile="$(inference_profile)"
+  mode="$(inference_mode)"
+  case "${profile}" in production | test) ;; *)
+    echo "ERROR: --inference-profile must be 'production' or 'test', got '${profile}'." >&2
+    return 1
+    ;;
+  esac
+  case "${mode}" in vllm | bedrock) ;; *)
+    echo "ERROR: --inference-mode must be 'vllm' or 'bedrock', got '${mode}'." >&2
+    return 1
+    ;;
+  esac
+  set_metadata "inference_profile" "${profile}"
+  set_metadata "inference_mode" "${mode}"
+  if [[ "${profile}" == "test" ]]; then
+    log "WARNING: --inference-profile test: model servers may share GPUs and thanos may be quantized. This is for small test clusters only, never for a customer."
+  fi
+  if [[ "${mode}" == "bedrock" ]]; then
+    log "Inference mode bedrock: no GPU model fleet is deployed (Argus v3's vision/wanda/Kev controls and Ascend's thanos are unavailable)."
+  fi
+}
+
+# The G/VT vCPU quota gates how many GPU nodes Karpenter can start: too low and servers sit Pending forever, so say so up front.
+check_gpu_vcpu_quota() {
+  local nodes=$1 needed quota
+  [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
+  needed=$((nodes * GPU_NODE_VCPUS))
+  if ! quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code "${GPU_VCPU_QUOTA_CODE}" \
+      --region "${AWS_REGION}" --query 'Quota.Value' --output text 2>/dev/null)"; then
+    log "WARNING: could not read the EC2 'Running On-Demand G and VT instances' quota; ${needed} vCPUs are needed for ${nodes} GPU nodes."
+    return 0
+  fi
+  if awk -v q="${quota}" -v n="${needed}" 'BEGIN { exit !(q + 0 < n + 0) }'; then
+    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION}, but ${nodes} GPU nodes need ${needed}. Request an increase (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}) and re-run this phase."
+    return 1
+  fi
+  log "EC2 G/VT vCPU quota OK: ${quota} available, ${needed} needed for ${nodes} GPU nodes."
+}
+
+# Advertise each GPU N times (test profile time-slicing) by upgrading straiker-system's device plugin; 0 turns it off.
+apply_gpu_time_slicing() {
+  local n=$1 current chart
+  current="$(get_metadata "gpu_time_slicing_replicas")"
+  current="${current:-0}"
+  [[ "${n}" == "${current}" ]] && return 0
+  log "Setting NVIDIA device plugin time-slicing to ${n} servers per GPU (was ${current})."
+  chart="$(chart_ref "${INFRA_CHART_NAME}")"
+  [[ -d "${chart}" ]] && helm dependency build "${chart}" >/dev/null
+  helm upgrade "${INFRA_RELEASE}" "${chart}" --namespace "${INFRA_NAMESPACE}" \
+    --reset-then-reuse-values --set "nvidia.devicePlugin.timeSlicing.replicas=${n}" \
+    --wait --timeout "${HELM_TIMEOUT}" >/dev/null || { mark_phase_blocked "Could not apply GPU time-slicing to release '${INFRA_RELEASE}'."; return 1; }
+  kubectl -n kube-system rollout status ds/straiker-nvidia-device-plugin --timeout=300s >/dev/null 2>&1 || true
+  set_metadata "gpu_time_slicing_replicas" "${n}"
+}
+
+# Plans where the model servers run (scripts/gpu_planner.py), prints it, blocks if the hardware cannot hold the fleet, and leaves
+# the plan in INFERENCE_PLAN_FILE. production: one server per GPU on each model's validated tier (what Karpenter creates).
+# test: the GPU nodes that exist now, shared if needed; with none, the same exclusive plan as production.
+INFERENCE_PLAN_FILE=""
+plan_inference_gpus() {
+  local models_csv=$1 profile nodes_json rc=0 sharing
+  profile="$(inference_profile)"
+  require_command python3
+  nodes_json="$(kubectl get nodes -o json 2>/dev/null || true)"
+  [[ -n "${nodes_json}" ]] || nodes_json='{"items":[]}'
+  INFERENCE_PLAN_FILE="$(mktemp)"
+  printf '%s' "${nodes_json}" | python3 "${GPU_PLANNER}" --discover --profile "${profile}" --no-mig \
+    --models "${GPU_MODELS_FILE}" --only "${models_csv}" >"${INFERENCE_PLAN_FILE}" || rc=$?
+  if [[ ${rc} -ne 0 && ${rc} -ne 2 ]]; then
+    mark_phase_blocked "The GPU planner failed (exit ${rc}); see its error above."
+    return 1
+  fi
+  python3 "${GPU_PLANNER}" --summary "${INFERENCE_PLAN_FILE}" | while IFS= read -r line; do log "${line}"; done
+  if [[ ${rc} -eq 2 ]]; then
+    mark_phase_blocked "The GPUs cannot hold the model fleet: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("shortfall",""))' "${INFERENCE_PLAN_FILE}")"
+    return 1
+  fi
+  sharing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sharing"])' "${INFERENCE_PLAN_FILE}")"
+  if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "${INFERENCE_PLAN_FILE}")" == "projected" ]]; then
+    check_gpu_vcpu_quota "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpus_used"])' "${INFERENCE_PLAN_FILE}")" || return 1
+    apply_gpu_time_slicing 0 || return 1
+  elif [[ "${sharing}" == "time-slicing" ]]; then
+    apply_gpu_time_slicing "$(python3 "${GPU_PLANNER}" --slices "${INFERENCE_PLAN_FILE}")" || return 1
+  else
+    apply_gpu_time_slicing 0 || return 1
+  fi
+}
+
+# Argus v3's context reviewer calls Bedrock (global.openai.gpt-5.6-sol / -terra) in every deployment, so a customer account without
+# access would otherwise fail only at the first request. Uses the operator's credentials: it proves the models are enabled in this
+# account and region, not that the pods' role is allowed (that role is created by the aws-data phase).
+preflight_argus_v3_bedrock() {
+  require_command aws
+  local region profile out rc failed=() warned=()
+  region="$(get_metadata "bedrock_region")"
+  region="${region:-${AWS_REGION}}"
+  for profile in ${ARGUS_V3_BEDROCK_PROFILES}; do
+    rc=0
+    out="$(aws bedrock-runtime converse --region "${region}" --model-id "${profile}" \
+      --messages '[{"role":"user","content":[{"text":"hi"}]}]' --inference-config '{"maxTokens":1}' 2>&1)" || rc=$?
+    if [[ ${rc} -eq 0 || "${out}" == *ThrottlingException* ]]; then
+      log "Bedrock preflight OK: '${profile}' answers in ${region}."
+    elif [[ "${out}" == *"not authorized to perform: bedrock:"* ]]; then
+      warned+=("${profile}")
+      log "WARNING: Bedrock preflight for '${profile}' is inconclusive: the installer's AWS identity may not call Bedrock (the pods use their own role)."
+    elif [[ "${out}" == *ResourceNotFoundException* || "${out}" == *ValidationException* || "${out}" == *AccessDeniedException* || "${out}" == *"not supported"* ]]; then
+      failed+=("${profile}")
+      echo "  [!] ${profile} in ${region}: ${out}" >&2
+    else
+      warned+=("${profile}")
+      log "WARNING: Bedrock preflight for '${profile}' is inconclusive: ${out}"
+    fi
+  done
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    mark_phase_blocked "Bedrock is not usable for: ${failed[*]} in ${region}. Enable the models under Bedrock > Model access in that account and region (and check any SCP that denies bedrock:InvokeModel), then re-run."
+    return 1
+  fi
+}
+
 # Product -> inference model mapping (Defend's argus needs 4 backends, Ascend's
 # iris needs 1). Derived from PRODUCTS_OPT fresh on every call rather than
 # persisted separately, so it can never drift from the actual product
 # selection captured earlier.
 inference_models_for_products() {
   local models=()
+  # --inference-mode bedrock: nothing runs on GPU here.
+  if [[ "$(inference_mode)" == "bedrock" ]]; then
+    return 0
+  fi
   if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
     # Argus v3's models (the manager's final list): vision/wanda (image checks) and the two Kev classifiers. antman, hulk,
     # quicksilver and thor are not deployed: the v3 controls that used them are off on-prem, on purpose.
@@ -5789,7 +5957,11 @@ phase_straiker_inference() {
     [[ -n "${model_line}" ]] && models+=("${model_line}")
   done < <(inference_models_for_products)
   if [[ ${#models[@]} -eq 0 ]]; then
-    log "No selected product needs a GPU inference model — skipping."
+    if [[ "$(inference_mode)" == "bedrock" ]]; then
+      log "--inference-mode bedrock: no GPU inference models are deployed."
+    else
+      log "No selected product needs a GPU inference model — skipping."
+    fi
     return
   fi
 
@@ -5802,6 +5974,10 @@ phase_straiker_inference() {
   fi
 
   ensure_k8s_ready_for_charts || return
+
+  local models_csv
+  models_csv="$(IFS=','; echo "${models[*]}")"
+  plan_inference_gpus "${models_csv}" || return
 
   # Shared across all per-model releases below — EKS Pod Identity binds one
   # IAM role to exactly one (namespace, ServiceAccount name) pair (set up by
@@ -5874,6 +6050,11 @@ phase_straiker_inference() {
       if [[ -n "${CHART_VERSION}" ]]; then
         cmd+=(--version "${CHART_VERSION}")
       fi
+      # Shared GPUs (test profile only): the plan's serving settings (smaller context, quantization). Empty for production.
+      local plan_set
+      while IFS= read -r plan_set; do
+        [[ -n "${plan_set}" ]] && cmd+=(--set "${plan_set}")
+      done < <(python3 "${GPU_PLANNER}" --helm-sets "${INFERENCE_PLAN_FILE}" "${model}")
 
       local logfile
       logfile="$(mktemp)"
@@ -5906,6 +6087,7 @@ phase_straiker_inference() {
     done
   done
 
+  rm -f "${INFERENCE_PLAN_FILE}"
   if [[ ${#failed[@]} -gt 0 ]]; then
     mark_phase_blocked "Inference model(s) failed to install: ${failed[*]}. Each model is its own Helm release named 'inference-<model>' — check GPU node/capacity availability for the failed one(s), then re-run --phase straiker-inference --rerun-phase (already-succeeded models are just re-verified, not disrupted)."
     return
@@ -5944,6 +6126,7 @@ phase_straiker_argus_v3() {
     mark_phase_blocked "Argus v3 needs --data-layer: it runs on MSK, ElastiCache and Secrets Manager (phase aws-data)."
     return
   fi
+  preflight_argus_v3_bedrock || return
 
   local infra_status
   infra_status="$(helm status "${INFRA_RELEASE}" -n "${INFRA_NAMESPACE}" -o json 2>/dev/null \
@@ -7928,6 +8111,7 @@ main() {
     exit 0
   fi
 
+  remember_inference_settings || exit 1
   capture_install_config
   require_resource_ack
   build_phase_list

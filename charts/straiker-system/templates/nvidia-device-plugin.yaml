@@ -1,5 +1,26 @@
 {{- if .Values.nvidia.devicePlugin.enabled }}
 {{- $dp := .Values.nvidia.devicePlugin }}
+{{- $slices := int (($dp.timeSlicing | default dict).replicas | default 0) }}
+{{- if gt $slices 1 }}
+# TEST profile only (installer --inference-profile test): each GPU is advertised $slices times so several model servers can
+# share it. Production never sets this: one server per GPU.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: straiker-nvidia-device-plugin-config
+  namespace: kube-system
+  labels:
+    {{- include "base.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: {{ $slices }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -19,6 +40,10 @@ spec:
       labels:
         app: straiker-nvidia-device-plugin
         app.kubernetes.io/component: nvidia-device-plugin
+      {{- if gt $slices 1 }}
+      annotations:
+        straiker.ai/time-slicing-replicas: {{ $slices | quote }} # a changed value restarts the plugin so nodes re-advertise
+      {{- end }}
     spec:
       priorityClassName: system-node-critical
 
@@ -42,6 +67,10 @@ spec:
           env:
             - name: FAIL_ON_INIT_ERROR
               value: {{ $dp.failOnInitError | quote }}
+            {{- if gt $slices 1 }}
+            - name: CONFIG_FILE
+              value: /config/config.yaml
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -51,9 +80,18 @@ spec:
           volumeMounts:
             - name: device-plugin
               mountPath: /var/lib/kubelet/device-plugins
+            {{- if gt $slices 1 }}
+            - name: config
+              mountPath: /config
+            {{- end }}
 
       volumes:
         - name: device-plugin
           hostPath:
             path: /var/lib/kubelet/device-plugins
+        {{- if gt $slices 1 }}
+        - name: config
+          configMap:
+            name: straiker-nvidia-device-plugin-config
+        {{- end }}
 {{- end }}

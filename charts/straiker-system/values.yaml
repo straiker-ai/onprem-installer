@@ -320,6 +320,9 @@ nvidia:
       tag: v0.17.0
       pullPolicy: IfNotPresent
     failOnInitError: "false"
+    # Test profile only: advertise each GPU N times (N > 1) so servers can share it. 0 = off (production).
+    timeSlicing:
+      replicas: 0
     resources:
       requests:
         cpu: 50m
