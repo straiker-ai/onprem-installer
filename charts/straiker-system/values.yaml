@@ -169,7 +169,7 @@ eks:
     # g6e added for thanos's default GPU tier (L40S, 48GB — see
     # charts/straiker-inference's gpuProfiles) — verified against Straiker's
     # own production config, not just the older g5+bitsandbytes assumption.
-    instanceFamilies: ["g4dn", "g5", "g6e"]
+    instanceFamilies: ["g4dn", "g5", "g6", "g6e"]
     nodeClass:
       name: straiker-gpu
       amiSelectorTerms:

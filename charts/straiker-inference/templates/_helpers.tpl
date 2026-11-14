@@ -230,7 +230,7 @@ l4:
   max_model_len: "32768"
   mem_fraction_static: "0.9"
   nodeSelector:
-    cloud.google.com/gke-accelerator: nvidia-l4
+    karpenter.k8s.aws/instance-family: g6 # EKS (L4); the GKE accelerator label never matched an EKS node
   resources: *res24gb
 a100:
   dtype: bfloat16
