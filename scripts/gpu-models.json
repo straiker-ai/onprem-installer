@@ -1,0 +1,47 @@
+{
+  "_comment": "Models served by local vLLM. weights_gb/kv_gb are ESTIMATES (bf16 weights + KV/activation budget at serving length); replace with measured values. quantized_gb is the footprint with bitsandbytes 4-bit (only if can_quantize). Edit this file, not the planner, to change the fleet.",
+  "default_replicas": 2,
+  "models": [
+    {
+      "name": "thanos",
+      "weights_gb": 24.5,
+      "kv_gb": 6.0,
+      "quantized_gb": 13.0,
+      "can_quantize": true,
+      "multimodal": false,
+      "server": "vllm"
+    },
+    {
+      "name": "vision",
+      "weights_gb": 4.5,
+      "kv_gb": 3.5,
+      "can_quantize": false,
+      "multimodal": true,
+      "server": "vllm"
+    },
+    {
+      "name": "wanda",
+      "weights_gb": 9.0,
+      "kv_gb": 4.0,
+      "can_quantize": false,
+      "multimodal": true,
+      "server": "vllm"
+    },
+    {
+      "name": "kev-agentic",
+      "weights_gb": 8.5,
+      "kv_gb": 8.5,
+      "can_quantize": false,
+      "multimodal": false,
+      "server": "kev-server"
+    },
+    {
+      "name": "kev-non-agentic",
+      "weights_gb": 8.5,
+      "kv_gb": 3.5,
+      "can_quantize": false,
+      "multimodal": false,
+      "server": "vllm"
+    }
+  ]
+}
