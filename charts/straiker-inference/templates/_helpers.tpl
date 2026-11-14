@@ -120,7 +120,9 @@ wanda:
   multimodal:
     limitImage: 1
     limitVideo: 0
-# kev-non-agentic = kev-4b-19cat v2 (tag v2.0): stock vLLM in pooling/classify mode (POST /classify), same 19 labels as v1.
+# kev-non-agentic = kev-4b-19cat v2 (tag v2.0, Hugging Face commit b5c5437eef31043b45e58750402cf628f6b01b99), as argus PR #344 moves
+# dev to: stock vLLM in pooling/classify mode (POST /classify), same 19 labels as v1. Flags are PR #344's: identical to v1's except
+# the 32768 context that v2's model card verified. Weights are published by model-release (straikerinc/kev-4b-19cat-r32-a64-v2).
 # Flags are SaaS's, with v2's verified 32k context. No trust-remote-code, no prefix caching, eager (no CUDA graphs).
 kev-non-agentic:
   storagePrefix: kev-non-agentic
