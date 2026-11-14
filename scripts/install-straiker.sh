@@ -208,6 +208,10 @@ INFERENCE_CONCURRENCY=4
 # only install still needs it running. Runs after straiker-inference and
 # straiker-system.
 DEFEND_RELEASE="straiker-defend"
+
+# Defend's detection engine: v1 (charts/straiker-defend, the default for now) or v3 (charts/straiker-argus-v3, Argus v3, needs
+# --data-layer). v3 runs next to v1 until Ascend is moved to it; then v3 becomes the default and v1 is removed.
+DEFEND_ENGINE="${DEFEND_ENGINE:-v1}"
 DEFEND_CHART_NAME="straiker-defend"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
@@ -495,7 +499,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -692,6 +696,8 @@ Options:
   --saas-frontend                  With --data-layer: also create the AWS backends of the SaaS frontend (DynamoDB
                                    environment + guardrail tables, Kinesis audit stream) and a Pod Identity role for
                                    the frontend. Remembered in install state; needs a SaaS-style frontend image.
+  --defend-engine <v1|v3>          Defend's detection engine. v1 (default for now): charts/straiker-defend. v3: Argus v3
+                                   (phase straiker-argus-v3, needs --data-layer), run next to v1 until Ascend moves to it.
   --gateway-exposure <mode>        Who can reach the platform api-gateway (the API behind the console and SDK calls):
                                    internal (default): internal load balancer, VPC / private network only.
                                    public: internet-facing, TLS required (--gateway-cert-arn), optionally limited
@@ -1176,7 +1182,13 @@ Installer phases:
                              straiker-inference (needs its per-model Services) and
                              straiker-system (needs its Redis/OpenSearch/Benthos and shared
                              NodePool).
- 13) straiker-ascend      - install/upgrade release 'straiker-ascend' (iris automated
+ 12b) straiker-argus-v3   - install/upgrade release 'argus-v3' (the Argus v3 engine, its
+                             agent-config consumer and transcript compactor —
+                             charts/straiker-argus-v3). Only with --defend-engine v3 and
+                             --data-layer: it runs on MSK, ElastiCache, Secrets Manager and
+                             the argus-sa Pod Identity role from aws-data. Fills the
+                             <cluster>/argus/v3 secret from the gateway and platform keys.
+ 13) straiker-ascend     - install/upgrade release 'straiker-ascend' (iris automated
                              red-teaming engine — charts/straiker-ascend: control-plane,
                              probe-worker, probe-shadow, recon-worker, report-worker, and a
                              daily assessment-cleanup CronJob). Only when 'ascend' is
@@ -1571,6 +1583,10 @@ parse_args() {
       --reset-admin-password)
         RESET_ADMIN_PASSWORD=true
         shift
+        ;;
+      --defend-engine)
+        DEFEND_ENGINE=${2:-}
+        shift 2
         ;;
       --saas-frontend)
         SAAS_FRONTEND=true
@@ -5905,6 +5921,108 @@ phase_straiker_inference() {
 # being up; checks straiker-system's live release status the same way
 # phase_straiker_core does, since a phase that merely ran earlier isn't proof
 # it's still healthy.
+# Argus v3 (the Defend detection engine; charts/straiker-argus-v3, vendored from straiker-ai/argus feature/argus-v3). Needs the
+# data layer: MSK (IAM), ElastiCache (TLS), the argus/v3 Secrets Manager bundle and the argus-sa Pod Identity role, all from aws-data.
+# Runs next to v1 until Ascend is moved to v3 (its current image calls v1 directly); enabled with --defend-engine v3.
+phase_straiker_argus_v3() {
+  case "${DEFEND_ENGINE}" in
+    v1 | v3) ;;
+    *)
+      mark_phase_blocked "--defend-engine must be v1 or v3 (got '${DEFEND_ENGINE}')."
+      return
+      ;;
+  esac
+  if [[ "${DEFEND_ENGINE}" != "v3" ]]; then
+    log "Argus v3 is not selected (--defend-engine v1): skipping."
+    return
+  fi
+  require_command helm
+  require_command kubectl
+  require_command aws
+
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    mark_phase_blocked "Argus v3 needs --data-layer: it runs on MSK, ElastiCache and Secrets Manager (phase aws-data)."
+    return
+  fi
+
+  local infra_status
+  infra_status="$(helm status "${INFRA_RELEASE}" -n "${INFRA_NAMESPACE}" -o json 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("info",{}).get("status",""))' 2>/dev/null || true)"
+  if [[ "${infra_status}" != "deployed" ]]; then
+    mark_phase_blocked "Release '${INFRA_RELEASE}' in namespace '${INFRA_NAMESPACE}' is not healthy (status: '${infra_status:-not installed}'). Argus v3 needs it first."
+    return
+  fi
+
+  local ecr_registry redis_endpoint msk_arn grid_bucket
+  ecr_registry="$(get_metadata "ecr_registry")"
+  redis_endpoint="$(get_metadata "data_redis_endpoint")"
+  msk_arn="$(get_metadata "msk_cluster_arn")"
+  grid_bucket="$(get_metadata "grid_artifacts_bucket")"
+  if [[ -z "${ecr_registry}" || -z "${redis_endpoint}" || -z "${msk_arn}" || -z "${grid_bucket}" ]]; then
+    mark_phase_blocked "Missing ecr_registry / data_redis_endpoint / msk_cluster_arn / grid_artifacts_bucket in install state. Run phases 'aws-artifacts' and 'aws-data' first."
+    return
+  fi
+
+  local brokers
+  brokers="$(aws kafka get-bootstrap-brokers --cluster-arn "${msk_arn}" --region "${AWS_REGION}" \
+    --query 'BootstrapBrokerStringSaslIam' --output text 2>/dev/null || true)"
+  if [[ -z "${brokers}" || "${brokers}" == "None" ]]; then
+    mark_phase_blocked "Could not get SASL/IAM bootstrap brokers for ${msk_arn}."
+    return
+  fi
+
+  ensure_k8s_ready_for_charts || return
+  ensure_argus_v3_secret || return
+
+  local chart="${REPO_ROOT}/charts/straiker-argus-v3"
+  if [[ ! -f "${chart}/values-onprem.yaml" ]]; then
+    mark_phase_blocked "charts/straiker-argus-v3/values-onprem.yaml not found: this phase needs the in-workspace chart."
+    return
+  fi
+  local ns="${INFRA_NAMESPACE}" svc_suffix="svc.cluster.local"
+  local bedrock_region
+  bedrock_region="$(get_metadata "bedrock_region")"
+  bedrock_region="${bedrock_region:-${AWS_REGION}}"
+
+  local cmd=(
+    helm upgrade --install "${ARGUS_V3_RELEASE}" "${chart}"
+    --namespace "${ns}"
+    -f "${chart}/values-onprem.yaml"
+    --set-string "image.repository=$(docker_registry_with_prefix "${ecr_registry}")/straiker/argus"
+    --set-string "argus.secretManager.region=${AWS_REGION}"
+    --set-string "argus.secretManager.secretName=${CLUSTER_NAME}/${ARGUS_V3_SECRET}"
+    --set-string "argus.redis.url=rediss://${redis_endpoint}:6379"
+    --set-string "argus.compactor.bucket=${grid_bucket}"
+    --set-string "argus.compactor.region=${AWS_REGION}"
+    --set-string "argus.copilot.platformRegistryUrl=http://registry.${ns}.${svc_suffix}:80"
+    --set-string "argus.contextReview.region=${bedrock_region}"
+    --wait
+    --timeout "${HELM_TIMEOUT}"
+  )
+  # MSK (IAM): every producer/consumer block gets the same brokers and region.
+  local block
+  for block in agentConfig grid transcript metricsStream compactor; do
+    cmd+=(--set-string "argus.${block}.bootstrapServers=${brokers}" --set-string "argus.${block}.region=${AWS_REGION}")
+  done
+  # Model endpoints: only for the servers this install deploys. An unset endpoint leaves its controls "unavailable".
+  local models_deployed
+  models_deployed=" $(inference_models_for_products | tr '\n' ' ') "
+  if [[ "${models_deployed}" == *" vision "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.vision=http://inference-vision.${ns}.${svc_suffix}:8000/v1/chat/completions")
+  fi
+  if [[ "${models_deployed}" == *" wanda "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.imageDetection=http://inference-wanda.${ns}.${svc_suffix}:8000/v1/chat/completions")
+  fi
+  if [[ "${models_deployed}" == *" kev-agentic "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.kev=http://inference-kev-agentic.${ns}.${svc_suffix}:8000/v1/detect")
+  fi
+  # Prompt Kev needs a kev-server of its own (SaaS runs kev-lw-4b-prompt): sharing the agentic one queues ~100-token prompts
+  # behind trace chunks (seconds instead of ~0.1 s). None is deployed, so it is off.
+  cmd+=(--set "argus.llmEndpoints.kevPrompt=false")
+
+  "${cmd[@]}"
+}
+
 phase_straiker_defend() {
   require_command helm
   require_command kubectl
@@ -7700,6 +7818,7 @@ run_phase() {
     straiker-core) phase_straiker_core ;;
     straiker-inference) phase_straiker_inference ;;
     straiker-defend) phase_straiker_defend ;;
+    straiker-argus-v3) phase_straiker_argus_v3 ;;
     straiker-ascend) phase_straiker_ascend ;;
     tailscale-operator) phase_tailscale_operator ;;
     edge-infra) phase_edge_infra ;;
