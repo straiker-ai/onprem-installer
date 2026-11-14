@@ -188,6 +188,12 @@ modelSync:
       destPath: wanda
     - path: huggingface/vision/0bbfe0f2ff76
       destPath: vision
+    # Kev (published by the model-release v2026.11.13 run). The hash is sha256(Hugging Face repo id)[:12], so a new Kev
+    # version (a new repo id) means a new path here.
+    - path: huggingface/kev-agentic/d461aa544858
+      destPath: kev-agentic
+    - path: huggingface/kev-non-agentic/70177ff9de5d
+      destPath: kev-non-agentic
   image:
     repository: rclone/rclone
     tag: "1.68"

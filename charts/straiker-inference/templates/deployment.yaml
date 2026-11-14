@@ -36,11 +36,23 @@
 {{- $profile     := index $gpuProfiles $resolvedProfile | default dict }}
 {{- $gpuOverrides := get $mp "gpuOverrides" | default dict }}
 {{- $gpuSpecific  := get $gpuOverrides $resolvedProfile | default dict }}
-{{- $dtype        := coalesce (get $gpuSpecific "dtype")               (get $profile "dtype")               "half" }}
-{{- $maxModelLen  := coalesce .Values.inferenceService.max_model_len   (get $gpuSpecific "max_model_len")   (get $profile "max_model_len")   "16384" }}
-{{- $memFraction  := coalesce (get $gpuSpecific "mem_fraction_static") (get $profile "mem_fraction_static") "0.9" }}
-{{- $maxNumSeqs   := coalesce (get $gpuSpecific "max_num_seqs")       (get $profile "max_num_seqs")       "256" }}
-{{- $quantization := get $gpuSpecific "quantization" | default "" }}
+{{- /* Precedence for every serving setting: explicit inferenceService.* (the installer's GPU plan) > the model's own "serving"
+       values (what SaaS validated for it) > the GPU tier overrides > the GPU tier defaults. */ -}}
+{{- $svc          := .Values.inferenceService }}
+{{- $serving      := get $mp "serving" | default dict }}
+{{- $engine       := get $mp "engine" | default "vllm" }}
+{{- $kev          := get $mp "kev" | default dict }}
+{{- $extraArgs    := get $mp "extraArgs" | default list }}
+{{- $trustRemote  := true }}
+{{- if hasKey $mp "trustRemoteCode" }}{{- $trustRemote = get $mp "trustRemoteCode" }}{{- end }}
+{{- $dtype        := coalesce $svc.dtype (get $serving "dtype") (get $gpuSpecific "dtype") (get $profile "dtype") "half" }}
+{{- $maxModelLen  := coalesce $svc.max_model_len (get $serving "maxModelLen") (get $gpuSpecific "max_model_len") (get $profile "max_model_len") "16384" }}
+{{- $memFraction  := coalesce $svc.mem_fraction_static (get $serving "memFraction") (get $gpuSpecific "mem_fraction_static") (get $profile "mem_fraction_static") "0.9" }}
+{{- $maxNumSeqs   := coalesce $svc.max_num_seqs (get $serving "maxNumSeqs") (get $gpuSpecific "max_num_seqs") (get $profile "max_num_seqs") "256" }}
+{{- $quantization := coalesce $svc.quantization (get $gpuSpecific "quantization") "" }}
+{{- $kvCacheDtype := coalesce $svc.kv_cache_dtype (get $serving "kvCacheDtype") "" }}
+{{- $maxBatched   := coalesce $svc.max_num_batched_tokens (get $serving "maxNumBatchedTokens") "" }}
+{{- $gpuResource  := $svc.gpu_resource | default "nvidia.com/gpu" }}
 {{- $multimodal := get $mp "multimodal" | default dict }}
 {{- $enforceEager := get $mp "enforceEager" | default false }}
 {{- $defaultResources := dict "requests" (dict "cpu" "2" "memory" "8Gi") "limits" (dict "cpu" "4" "memory" "16Gi") }}
@@ -61,8 +73,17 @@ spec:
   # ever become ready, even though the pod itself goes on to succeed; `helm
   # upgrade --wait` then reports a false failure despite a healthy rollout.
   progressDeadlineSeconds: 1800
+  {{- if gt (int .Values.replicas) 1 }}
+  # GPUs are the scarce resource, so no surge pod: replace one replica at a time, the other keeps serving.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- else }}
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: {{ include "straiker-inference.fullname" . }}
@@ -73,6 +94,15 @@ spec:
         model: {{ .Values.modelProfile | quote }}
         engine: vllm
     spec:
+      {{- if gt (int .Values.replicas) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: {{ include "straiker-inference.fullname" . }}
+      {{- end }}
       serviceAccountName: {{ .Values.serviceAccountName }}
       restartPolicy: Always
       terminationGracePeriodSeconds: 180
@@ -180,6 +210,20 @@ spec:
                   - sleep 15
           ports:
             - containerPort: 8081
+          {{- if eq $engine "kev" }}
+          # kev-lw-server: its start.sh runs vLLM + llm2jev on loopback and kev-server on this port (SaaS passes the same args).
+          args:
+           - "--model"
+           - "/var/lib/models/model"
+           - "--served-model-name"
+           - {{ first ($servedNames | default (list .Values.modelProfile)) | quote }}
+           - "--port"
+           - "8081"
+           {{- with get $kev "threshold" }}
+           - "--threshold"
+           - {{ . | quote }}
+           {{- end }}
+          {{- else }}
           command:
            - "vllm"
            - "serve"
@@ -188,7 +232,9 @@ spec:
            {{- end }}
            - "--port"
            - "8081"
+           {{- if $trustRemote }}
            - "--trust-remote-code"
+           {{- end }}
            {{- if $enforceEager }}
            - "--enforce-eager"
            {{- end }}
@@ -200,6 +246,14 @@ spec:
            - {{ $memFraction | quote }}
            - "--max-num-seqs"
            - {{ $maxNumSeqs | quote }}
+           {{- if $maxBatched }}
+           - "--max-num-batched-tokens"
+           - {{ $maxBatched | quote }}
+           {{- end }}
+           {{- if $kvCacheDtype }}
+           - "--kv-cache-dtype"
+           - {{ $kvCacheDtype | quote }}
+           {{- end }}
            {{- if $quantization }}
            - "--quantization"
            - {{ $quantization | quote }}
@@ -216,6 +270,10 @@ spec:
            - {{ . | quote }}
            {{- end }}
            {{- end }}
+           {{- range $extraArgs }}
+           - {{ . | quote }}
+           {{- end }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "straiker-inference.secretName" . }}
@@ -229,6 +287,10 @@ spec:
               value: "dummy"
             - name: HF_HUB_OFFLINE
               value: "1"
+            {{- range $name, $value := (get $kev "env" | default dict) }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
           volumeMounts:
             - name: hf-cache
               mountPath: /tmp/.cache/huggingface
@@ -270,7 +332,7 @@ spec:
             limits:
               cpu: {{ $resources.limits.cpu | quote }}
               memory: {{ $resources.limits.memory | quote }}
-              nvidia.com/gpu: {{ .Values.inferenceService.gpu_count }}
+              {{ $gpuResource }}: {{ .Values.inferenceService.gpu_count }}
       {{- $profileNodeSelector := get $profile "nodeSelector" | default dict }}
       {{- $effectiveNodeSelector := merge (deepCopy .Values.nodeSelector) $profileNodeSelector }}
       {{- if $effectiveNodeSelector }}

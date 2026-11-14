@@ -82,6 +82,7 @@ spec:
               rclone sync \
                 "${source_remote}" \
                 "${dest_remote}" \
+                --exclude ".cache/**" \
                 --progress --transfers 8 --checkers 16
               {{- else }}
               echo "Skipping {{ $model.destPath }} (not in modelSync.enabledModels)."

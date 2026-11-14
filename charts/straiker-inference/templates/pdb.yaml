@@ -1,0 +1,14 @@
+{{- if gt (int .Values.replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "straiker-inference.fullname" . }}
+  namespace: {{ include "straiker-inference.namespace" . }}
+  labels:
+    {{- include "straiker-inference.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ include "straiker-inference.fullname" . }}
+{{- end }}

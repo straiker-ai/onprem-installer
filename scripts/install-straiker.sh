@@ -1163,8 +1163,8 @@ Installer phases:
                              straiker-system since frontend connects to that chart's
                              postgres/opensearch directly.
  11) straiker-inference   - install/upgrade one release per GPU model the selected products
-                             need (charts/straiker-inference — Defend's argus needs antman/
-                             hulk/quicksilver/thor/vision/wanda, Ascend's iris needs thanos).
+                             need (charts/straiker-inference — Defend's Argus v3 needs vision, wanda,
+                             kev-agentic and kev-non-agentic, Ascend's iris needs thanos).
                              Each model is its own release (named 'inference-<model>'), so one
                              model's GPU-capacity problem doesn't block the others. Skipped
                              entirely if no selected product needs a model.
@@ -1266,7 +1266,8 @@ show_cost_estimate() {
   while IFS= read -r model_line; do
     [[ -n "${model_line}" ]] && models+=("${model_line}")
   done < <(inference_models_for_products)
-  local gpu_node_count=${#models[@]}
+  # One GPU per replica, 2 replicas per model (charts/straiker-inference replicas): what the production profile needs.
+  local gpu_node_count=$(( ${#models[@]} * 2 ))
 
   # Same 1/2/3 progression as terraform/aws/eks's system_node_sizing and
   # terraform/gcp/gke's zone_count locals -- both the AZ/zone count and the
@@ -1341,8 +1342,8 @@ show_cost_estimate() {
     # design) -- g4dn.xlarge (AWS) / a T4-class equivalent (GKE), both
     # 16GB-tier, matching every current model's defaultGpuProfile: g4dn in
     # charts/straiker-inference.
-    line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 0.526 * h }')"
-    echo " GPU inference nodes (${gpu_node_count}x g4dn.xlarge-class, one per model: ${models[*]}): \$${line_cost}/mo"
+    line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 1.006 * h }')"
+    echo " GPU inference nodes (${gpu_node_count}x 24 GB-class GPU at ~\$1.01/h, 2 replicas of each of: ${models[*]}): \$${line_cost}/mo (A100 hardware costs more)"
     total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
     echo ""
   else
@@ -5744,11 +5745,9 @@ phase_straiker_core() {
 inference_models_for_products() {
   local models=()
   if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
-    # vision/wanda temporarily disabled (2026-08-16) -- re-add "vision"
-    # "wanda" here once ready. Argus's SYS__LLM_ENDPOINTS__VISION/
-    # IMAGE_DETECTION will just error for the categories that route to
-    # them until then.
-    models+=("antman" "hulk" "quicksilver" "thor")
+    # Argus v3's models (the manager's final list): vision/wanda (image checks) and the two Kev classifiers. antman, hulk,
+    # quicksilver and thor are not deployed: the v3 controls that used them are off on-prem, on purpose.
+    models+=("vision" "wanda" "kev-agentic" "kev-non-agentic")
   fi
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     models+=("thanos")
@@ -5844,7 +5843,7 @@ phase_straiker_inference() {
       release="inference-${model}"
       log "Installing inference model '${model}' as release '${release}'..."
       local cmd=(
-        helm upgrade --install "${release}" "${HELM_REPO_NAME}/${INFERENCE_CHART_NAME}"
+        helm upgrade --install "${release}" "$(chart_ref "${INFERENCE_CHART_NAME}")"
         --namespace "${INFRA_NAMESPACE}"
         --create-namespace
         --set "modelProfile=${model}"

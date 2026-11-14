@@ -25,7 +25,7 @@ The installer runs on an operator machine (laptop, jump host, CloudShell), not i
 | 8 | `shared-secrets` | Generates `straiker-secrets` (internal API keys, vLLM key, bootstrap admin password) | K8s |
 | 9 | `ai-provider-secrets` | (Ascend only) own-keys / bedrock / trial-key credentials into that Secret | K8s |
 | 10 | `straiker-core` | Frontend (console + migrate/bootstrap jobs), Dex (OIDC), Bifrost (LLM gateway) | K8s |
-| 11 | `straiker-inference` | One vLLM release per GPU model: antman, hulk, quicksilver, thor, vision, wanda (Defend) and thanos (Ascend) | K8s, GPU nodes |
+| 11 | `straiker-inference` | One release per GPU model, 2 replicas each (one GPU per replica): vision, wanda, kev-agentic, kev-non-agentic (Defend, Argus v3) and thanos (Ascend); vLLM, plus the kev-lw-server image for kev-agentic | K8s, GPU nodes |
 | 12 | `straiker-defend` | Argus (detection API) + settings-sync, HPA/PDB. Always installed, Ascend calls it too | K8s |
 | 13 | `straiker-ascend` | Iris: control-plane, probe-worker, probe-shadow, recon-worker, report-worker, db-migrate, cleanup CronJob | K8s |
 | 14-19 | edge (`--edge-type`) | `none` (default, bring your own ingress), `internal` (Caddy, self-signed), `tailscale` (Caddy + cert-manager + Route53 DNS-01 + Tailscale operator), `alb` (internal ALB), `xalb` (internet-facing ALB). Uses `terraform/aws/edge` for IAM, ACM cert, optional bastion | AWS + K8s |
@@ -102,8 +102,8 @@ OpenSearch, Postgres, Valkey, Benthos, Frontend, Dex, Bifrost, Caddy edge, Argus
 | Cluster name/account | Customer's account, `s6r-onprem` default | Straiker prod account, `prod-euc1-be` |
 
 Shared design ideas: EKS + Karpenter with arm64 general pools and GPU pools, EKS Pod Identity for IAM,
-ALB controller for ingress, the same Argus/Iris images and model set (antman, hulk, quicksilver, thor,
-vision, wanda, thanos).
+ALB controller for ingress, the same Argus/Iris images and model set (vision, wanda, kev-agentic,
+kev-non-agentic, thanos).
 
 ## 5. Takeaways for Frankfurt
 

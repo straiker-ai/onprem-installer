@@ -7,11 +7,17 @@ templates/secrets.yaml for the exact kubectl command). */}}
 {{/* vLLM image — Straiker's own build, mirrored by charts/straiker-artifact
 under onprem-base/straiker/vllm (same /straiker/ prefix as frontend). */}}
 {{- define "straiker-inference.image" -}}
+{{- /* Precedence: imageOverride (operator) > the model profile's own image (the version SaaS runs that model on) > image (default). */ -}}
+{{- $mp := index (include "straiker-inference.modelProfiles" . | fromYaml) (.Values.modelProfile | default "") | default dict -}}
+{{- $pi := get $mp "image" | default dict -}}
+{{- $ov := .Values.imageOverride | default dict -}}
+{{- $repo := coalesce (get $ov "repository") (get $pi "repository") .Values.image.repository -}}
+{{- $tag := coalesce (get $ov "tag") (get $pi "tag") .Values.image.tag -}}
 {{- $registry := .Values.global.dockerRegistry -}}
 {{- if $registry -}}
-{{- printf "%s/%s:%s" ($registry | trimSuffix "/") .Values.image.repository .Values.image.tag -}}
+{{- printf "%s/%s:%s" ($registry | trimSuffix "/") $repo $tag -}}
 {{- else -}}
-{{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+{{- printf "%s:%s" $repo $tag -}}
 {{- end -}}
 {{- end }}
 
@@ -94,20 +100,68 @@ thor:
   storagePrefix: thor
   servedNames: [thor]
   defaultGpuProfile: g4dn
+# vision / wanda: serving values are the ones SaaS runs (argus deploy/inference-server values/prod/aws): bf16, fp8 KV cache,
+# 4096 context, one image per request, vLLM 0.22.1 (the Qwen3-VL deepstack fix). They need bf16 + fp8, so g5 (A10G) at least.
 vision:
   storagePrefix: vision
   servedNames: [vision]
-  defaultGpuProfile: g4dn
+  defaultGpuProfile: g5
+  image: {tag: v0.22.1}
+  serving: {dtype: bfloat16, maxModelLen: "4096", memFraction: "0.75", kvCacheDtype: fp8}
   multimodal:
     limitImage: 1
     limitVideo: 0
 wanda:
   storagePrefix: wanda
   servedNames: [wanda]
-  defaultGpuProfile: g4dn
+  defaultGpuProfile: g5
+  image: {tag: v0.22.1}
+  serving: {dtype: bfloat16, maxModelLen: "4096", memFraction: "0.90", kvCacheDtype: fp8}
   multimodal:
     limitImage: 1
     limitVideo: 0
+# kev-non-agentic = kev-4b-19cat v2 (tag v2.0): stock vLLM in pooling/classify mode (POST /classify), same 19 labels as v1.
+# Flags are SaaS's, with v2's verified 32k context. No trust-remote-code, no prefix caching, eager (no CUDA graphs).
+kev-non-agentic:
+  storagePrefix: kev-non-agentic
+  servedNames: [kev-4b-19cat]
+  defaultGpuProfile: g5
+  image: {tag: v0.30.0}
+  trustRemoteCode: false
+  enforceEager: true
+  serving: {dtype: bfloat16, maxModelLen: "32768", memFraction: "0.90", maxNumSeqs: "256", maxNumBatchedTokens: "32768"}
+  extraArgs:
+    - --runner
+    - pooling
+    - --convert
+    - classify
+    - --hf-overrides
+    - '{"architectures":["Qwen3_5ForCausalLM"]}'
+    - --no-enable-prefix-caching
+# kev-agentic = kev-lw-4b-agentic: NOT served by vLLM directly. The kev-lw-server image's start.sh runs vLLM + llm2jev on
+# loopback and kev-server on the port (/v1/detect); it takes --model/--served-model-name/--port/--threshold and the KEV_* /
+# VLLM_* env below (SaaS values). Weights come from the node-local copy of the model bucket, not Hugging Face.
+kev-agentic:
+  engine: kev
+  storagePrefix: kev-agentic
+  servedNames: [kev-lw-4b-agentic]
+  defaultGpuProfile: g6e
+  image: {repository: straiker/kev-lw-server, tag: v0.2.2}
+  kev:
+    threshold: "0.5"
+    env:
+      KEV_MAX_INFLIGHT: "128"
+      KEV_HTTP_THREADS: "256"
+      KEV_MAX_QUEUE: "100000"
+      KEV_CACHE_SIZE: "20000"
+      KEV_QUEUE_WARN_SECONDS: "10"
+      KEV_BACKEND_WORKERS: "8"
+      KEV_MAX_CHUNKS: "2"
+      KEV_LW_BACKEND: direct
+      KEV_BACKEND_TIMEOUT: "120"
+      KEV_BACKEND_WAIT_S: "900"
+      VLLM_MAX_MODEL_LEN: "9216"
+      VLLM_GPU_MEMORY_UTILIZATION: "0.90"
 thanos:
   storagePrefix: thanos
   servedNames: [thanos]
