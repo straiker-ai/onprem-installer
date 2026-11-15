@@ -47,7 +47,10 @@ resource "aws_eks_addon" "cloudwatch_observability" {
     service_account = "cloudwatch-agent"
   }
 
+  # system-node-critical: the agents are per-node DaemonSets; on a node already full of workloads (a small Karpenter
+  # node) they would otherwise stay Pending and that node would have no metrics or logs.
   configuration_values = jsonencode({
+    priorityClassName  = "system-node-critical"
     containerLogs      = { enabled = true }
     applicationSignals = { enabled = false }
     manager = {
