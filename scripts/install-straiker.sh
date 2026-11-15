@@ -5316,6 +5316,13 @@ for j in items:
   log "All data-layer checks passed."
 }
 
+# The tag the artifact chart mirrors for <repo> (from charts/straiker-artifact/values.yaml): one source of truth, so a chart can never
+# ask for a tag the mirror does not carry.
+mirrored_image_tag() {
+  awk -v repo="onprem-base/$1" '$0 ~ "source:.*" repo "$" { found = 1; next } found && $1 == "tag:" { gsub(/"/, "", $2); print $2; exit }' \
+    "${REPO_ROOT}/charts/straiker-artifact/values.yaml"
+}
+
 # Installs the vendored platform service charts (opt-in via --data-layer). Images come
 # from the customer's ECR mirror; DSNs/brokers/keys from platform-secret (straiker-data).
 phase_platform_services() {
@@ -5353,7 +5360,12 @@ phase_platform_services() {
     case "${svc}" in
       foundation) extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}") ;;
       registry) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/") ;;
-      databridge) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/databridge/") ;;
+      databridge)
+        # The chart pins docker.redpanda.com/redpandadata/connect:<tag>, a public pull at runtime (breaks locked-down egress and the
+        # "every image from the customer's registry" rule): use the mirrored copy, at the tag the mirror list carries.
+        extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/databridge/"
+          --set-string "${key}.benthos.image=$(docker_registry_with_prefix "${ecr_registry}")/redpandadata/connect:$(mirrored_image_tag redpandadata/connect)")
+        ;;
       connect)
         extra+=(--set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/connect/" --set-string "${key}.email.region=${AWS_REGION}" --set-string "${key}.notify.bus.sasl.region=${AWS_REGION}")
         if [[ -n "$(get_metadata "ses_domain")" ]]; then
