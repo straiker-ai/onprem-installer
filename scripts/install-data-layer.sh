@@ -33,6 +33,7 @@ CERT_ARN=""
 ROUTE53=false
 ALARM_EMAILS=()
 GPU_FLEET=""
+GPU_INSTANCE_TYPE=""
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -77,6 +78,9 @@ Options:
                              fleet, pool up to 4; needs the EC2 P-instance quota). per-model: one g5/g6e-class node
                              per server (Straiker test installs). Unset: a new install gets p4d, an existing one
                              keeps what it runs
+  --gpu-instance-type TYPE   p4d fleet only: pack it onto this EC2 type instead of p4d.24xlarge (e.g. g6e.12xlarge,
+                             4x L40S) — a stand-in while A100/p4d capacity is being arranged; checked against
+                             whichever quota that type actually falls under
   --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
   --installer-arg ARG        extra argument for install-straiker.sh (repeatable)
   --timeout-minutes N        give up waiting after N minutes in total (default: 240)
@@ -107,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --certificate-arn) CERT_ARN="${2:-}"; shift 2 ;;
     --alarm-email) ALARM_EMAILS+=("${2:-}"); shift 2 ;;
     --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
+    --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -256,6 +261,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
   --straiker-customer-name "${CUSTOMER_NAME}" --products "${PRODUCTS}" --ai-provider-mode "${AI_PROVIDER_MODE}"
   --edge-type "${EDGE_TYPE}" --yes)
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
+[[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
 if [[ -n "${DOMAIN}" ]]; then
   run_args+=(--custom-domain "${DOMAIN}")
