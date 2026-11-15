@@ -29,6 +29,9 @@ alb.ingress.kubernetes.io/group.name: {{ required "xalb.groupName is required wh
 {{- if .Values.xalb.sslPolicy }}
 alb.ingress.kubernetes.io/ssl-policy: {{ .Values.xalb.sslPolicy | quote }}
 {{- end }}
+{{- if .Values.xalb.idleTimeoutSeconds }}
+alb.ingress.kubernetes.io/load-balancer-attributes: {{ printf "idle_timeout.timeout_seconds=%v" .Values.xalb.idleTimeoutSeconds | quote }}
+{{- end }}
 {{- if .Values.waf.webAclArn }}
 alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.waf.webAclArn | quote }}
 {{- end }}

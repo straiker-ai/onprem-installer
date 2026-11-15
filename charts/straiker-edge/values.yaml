@@ -95,6 +95,11 @@ xalb:
   # TLS policy of the HTTPS listener (TLS 1.2+ only; the controller's own
   # default still allows TLS 1.0).
   sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  # ALB idle timeout (seconds). The api-gateway waits up to 300s for an
+  # upstream (spring.cloud.gateway response-timeout), e.g. a Detect call with
+  # Bedrock context review or an MCP stream; the ALB default of 60s would cut
+  # those off. SaaS's NLB allows 350s.
+  idleTimeoutSeconds: 310
   # The platform api-gateway (SDKs, agents: the Detect API) on this same ALB,
   # as its own Ingress in the IngressGroup with its own certificate. Rendered
   # when api.host is set (install-straiker.sh sets it for --gateway-exposure
