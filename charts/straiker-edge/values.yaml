@@ -66,6 +66,11 @@ alb:
   # install uses a non-default one.
   ingressClassName: alb
 
+# AWS WAF Web ACL (terraform/aws/edge's waf.tf) attached to the ALB of
+# edgeType alb or xalb. Blank = no WAF.
+waf:
+  webAclArn: ""
+
 # Only used when edgeType: xalb. Same AWS Load Balancer Controller as alb.*
 # above (installed the same way), but internet-facing.
 xalb:
@@ -87,6 +92,23 @@ xalb:
   # IngressGroup name — lets future Ingress objects on this cluster share
   # this same external ALB instead of each provisioning their own.
   groupName: straiker-external
+  # TLS policy of the HTTPS listener (TLS 1.2+ only; the controller's own
+  # default still allows TLS 1.0).
+  sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+  # The platform api-gateway (SDKs, agents: the Detect API) on this same ALB,
+  # as its own Ingress in the IngressGroup with its own certificate. Rendered
+  # when api.host is set (install-straiker.sh sets it for --gateway-exposure
+  # public with edge type xalb; the gateway Service is then ClusterIP).
+  # ExternalDNS ignores this Ingress (the installer writes the record, since
+  # the gateway name may be outside xalb.domain).
+  api:
+    host: ""
+    certificateArn: ""
+    targetService: api-gateway
+    targetPort: 443
+    # Spring actuator on its own port: "/" on the API port answers 401.
+    healthcheckPath: /management/health/readiness
+    healthcheckPort: "9090"
   # IngressClass created by the AWS Load Balancer Controller. Default
   # matches its out-of-the-box name; override only if the customer's
   # install uses a non-default one.

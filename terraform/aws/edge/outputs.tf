@@ -27,3 +27,13 @@ output "route53_hosted_zone_id" {
   value       = var.enable_cert_manager_route53 ? data.aws_route53_zone.cert_manager[0].zone_id : ""
   description = "Route53 public hosted zone ID for var.domain -- feeds charts/straiker-edge's tailscale.hostedZoneId. Empty when enable_cert_manager_route53=false."
 }
+
+output "waf_web_acl_arn" {
+  value       = var.enable_waf ? aws_wafv2_web_acl.edge[0].arn : ""
+  description = "ARN of the edge WAF Web ACL (feeds charts/straiker-edge's waf.webAclArn). Empty when enable_waf=false."
+}
+
+output "waf_log_group_name" {
+  value       = var.enable_waf ? aws_cloudwatch_log_group.waf[0].name : ""
+  description = "CloudWatch log group with the WAF request logs. Empty when enable_waf=false."
+}

@@ -481,6 +481,10 @@ XALB_ROUTE53_AUTOMATION="${XALB_ROUTE53_AUTOMATION:-}"
 # Balancer Controller's subnet auto-discovery
 # (kubernetes.io/role/internal-elb=1 tag on private subnets).
 ALB_SUBNETS="${ALB_SUBNETS:-}"
+# AWS WAF on the edge ALB (edge types alb/xalb; terraform/aws/edge's waf.tf): always created for those edge types.
+# Requests per 5 minutes allowed from one source IP (rate-based rule); 0 turns the rate rule off (the managed rules
+# stay). Remembered in install state. Default: terraform/aws/edge's own (10000).
+WAF_RATE_LIMIT="${WAF_RATE_LIMIT:-}"
 # CIDR allowed to reach the ALB (e.g. the customer's corporate range, or a
 # narrower one like the subnets a WorkSpaces Secure Browser portal uses) —
 # required whenever EDGE_TYPE=alb, since the AWS Load Balancer Controller
@@ -690,11 +694,14 @@ Options:
                                    --phase aws-artifacts,ai-provider-secrets,straiker-core
                                    --rerun-phase. If omitted, you'll be prompted interactively
                                    the first time 'ascend' is selected.
-  --edge-type <internal|none|tailscale|alb>
+  --edge-type <internal|none|tailscale|alb|xalb>
                                    How straiker-edge exposes app/defend/ascend externally
-                                   (default: none). internal = Caddy reverse proxy with
+                                   (default on EKS: xalb = an internet-facing AWS Application
+                                   Load Balancer with an ACM certificate and AWS WAF, which
+                                   also carries the api-gateway (--gateway-domain, default
+                                   api.<--custom-domain>); default elsewhere: none). internal = Caddy reverse proxy with
                                    self-signed certs. none = install nothing; bring your own
-                                   ingress/LoadBalancer (current default). tailscale = same
+                                   ingress/LoadBalancer (default on GKE). tailscale = same
                                    Caddy as internal, but with a real cert-manager/Let's
                                    Encrypt certificate for your own domain (see
                                    --custom-domain/--tailscale-cluster-issuer-email) and its
@@ -838,6 +845,10 @@ Options:
                                    elsewhere (a different AWS account, a different DNS
                                    provider) — bring your own --alb-certificate-arn and point
                                    DNS at the ALB yourself instead.
+  --waf-rate-limit <n>             Edge types alb/xalb: requests per 5 minutes allowed from one
+                                   source IP before AWS WAF blocks it (default 10000; 0 = no
+                                   rate rule). WAF itself (AWS managed rules) is always on for
+                                   these edge types. Remembered.
   --internal-lb-source-ranges <cidr>
                                    Optional with --edge-type alb. CIDR allowed to reach the
                                    ALB — the AWS Load Balancer Controller has no restriction
@@ -1822,6 +1833,14 @@ parse_args() {
       --xalb-route53)
         XALB_ROUTE53_AUTOMATION=true
         shift
+        ;;
+      --waf-rate-limit)
+        WAF_RATE_LIMIT=${2:-}
+        if [[ ! "${WAF_RATE_LIMIT}" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: --waf-rate-limit must be a whole number (0 = no rate rule), got '${2:-}'." >&2
+          exit 1
+        fi
+        shift 2
         ;;
       --internal-lb-source-ranges)
         INTERNAL_LB_SOURCE_RANGES=${2:-}
@@ -4202,6 +4221,11 @@ remember_gateway_settings() {
       mark_phase_blocked "The gateway certificate must be in the cluster's region (${AWS_REGION}): a load balancer cannot use a certificate from another region."
       return 1
     fi
+    # Edge type xalb: the gateway rides the same ALB; its name defaults to api.<custom domain>.
+    if [[ -z "${cert}" && -z "${domain}" && "${EDGE_TYPE}" == "xalb" && -n "$(get_metadata "custom_domain")" ]]; then
+      domain="$(custom_domain_hostname api)"
+      log "api-gateway name defaults to ${domain} (edge type xalb; pass --gateway-domain for another name)."
+    fi
     if [[ -z "${cert}" && -z "${domain}" ]]; then
       mark_phase_blocked "The api-gateway is internet-facing by default and needs TLS. Pass --gateway-domain <name> (the installer then issues the certificate: fully automatic with a Route53 zone for it in this account), or --gateway-cert-arn <your ACM certificate>, or choose a private gateway with --gateway-exposure internal. It is never exposed to the internet without TLS."
       return 1
@@ -4216,6 +4240,12 @@ remember_gateway_settings() {
   set_metadata "gateway_domain" "${domain}"
   set_metadata "gateway_zone_id" "${zone}"
   set_metadata "gateway_allowed_cidrs" "${cidrs}"
+}
+
+# True when the public api-gateway is served by the edge ALB (edge type xalb) instead of its own NLB: its Service is
+# then ClusterIP and charts/straiker-edge adds the gateway's Ingress to the xalb IngressGroup (same ALB, same WAF).
+gateway_via_alb() {
+  [[ "${EDGE_TYPE}" == "xalb" && "$(get_metadata "gateway_exposure")" == "public" ]]
 }
 
 install_api_gateway() {
@@ -4288,8 +4318,10 @@ install_api_gateway() {
   client_secret="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-secret}' | base64 -d)"
 
   # Allowed source CIDRs -> straiker.apiGateway.service.sourceRanges[i] (public only; empty = none).
-  local gateway_cidr_args=() cidr_i=0 cidr_item
-  if [[ "$(get_metadata "gateway_exposure")" == "public" && -n "$(get_metadata "gateway_allowed_cidrs")" ]]; then
+  local gateway_cidr_args=() cidr_i=0 cidr_item service_exposure
+  service_exposure="$(get_metadata "gateway_exposure")"
+  gateway_via_alb && service_exposure=none
+  if [[ "${service_exposure}" == "public" && -n "$(get_metadata "gateway_allowed_cidrs")" ]]; then
     for cidr_item in $(printf '%s' "$(get_metadata "gateway_allowed_cidrs")" | tr ',' ' '); do
       gateway_cidr_args+=(--set-string "straiker.apiGateway.service.sourceRanges[${cidr_i}]=${cidr_item}")
       cidr_i=$((cidr_i + 1))
@@ -4298,13 +4330,17 @@ install_api_gateway() {
   # Which controller provisions the gateway's load balancer decides which Service annotations take effect.
   local gateway_lbc=false
   kubectl get deploy aws-load-balancer-controller -n kube-system >/dev/null 2>&1 && gateway_lbc=true
-  log "Installing platform service 'api-gateway' (${tag}, exposure $(get_metadata "gateway_exposure"))..."
+  if gateway_via_alb; then
+    log "Installing platform service 'api-gateway' (${tag}, public through the edge ALB: phase straiker-edge adds its route and DNS)..."
+  else
+    log "Installing platform service 'api-gateway' (${tag}, exposure $(get_metadata "gateway_exposure"))..."
+  fi
   helm upgrade --install api-gateway "${chart}" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
     -f "${chart}/values-onprem.yaml" \
     --set-string straiker.apiGateway.image.registry="$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
     --set-string straiker.apiGateway.image.version="${tag}" \
-    --set-string straiker.apiGateway.service.exposure="$(get_metadata "gateway_exposure")" \
+    --set-string straiker.apiGateway.service.exposure="${service_exposure}" \
     --set-string straiker.apiGateway.service.awsLoadBalancerController="${gateway_lbc}" \
     --set-string straiker.apiGateway.service.certificateArn="$(get_metadata "gateway_cert_arn")" \
     ${gateway_cidr_args[@]+"${gateway_cidr_args[@]}"} \
@@ -4315,6 +4351,7 @@ install_api_gateway() {
   local rc=$?
   rm -f "${key_file}"
   [[ ${rc} -eq 0 ]] || return ${rc}
+  gateway_via_alb && return 0
   verify_gateway_exposure || return 1
   gateway_dns_ensure
 }
@@ -4510,7 +4547,11 @@ gateway_dns_ensure() {
   local domain host zone lbzone
   domain="$(get_metadata "gateway_domain")"
   [[ -n "${domain}" && "$(get_metadata "gateway_exposure")" == "public" ]] || return 0
-  host="$(kubectl get svc api-gateway -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+  if gateway_via_alb; then
+    host="$(kubectl get ingress "${EDGE_RELEASE}-xalb-api" -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+  else
+    host="$(kubectl get svc api-gateway -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+  fi
   [[ -n "${host}" ]] || { log "WARNING: no load balancer address yet: point ${domain} at it (CNAME) once it exists."; return 0; }
   zone="$(gateway_find_zone "${domain}")"
   if [[ -z "${zone}" ]]; then
@@ -7133,6 +7174,39 @@ phase_edge_infra() {
   san_hostnames_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
     "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
 
+  # AWS WAF for the ALB edge types (waf.tf). Per-host source allowlists: the console hosts get
+  # --internal-lb-source-ranges, the api-gateway (when it rides the xalb ALB) gets --gateway-allowed-cidrs. One shared
+  # ALB has one security group, so per-host ranges can only be enforced here.
+  local enable_waf=false waf_args=() waf_hosts_json='{}'
+  if [[ "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ]]; then
+    enable_waf=true
+    [[ -n "${WAF_RATE_LIMIT}" ]] && set_metadata "waf_rate_limit" "${WAF_RATE_LIMIT}"
+    if [[ -n "$(get_metadata "waf_rate_limit")" ]]; then
+      waf_args+=(-var="waf_rate_limit=$(get_metadata "waf_rate_limit")")
+    fi
+    if [[ "${EDGE_TYPE}" == "xalb" ]]; then
+      local api_host="" api_cidrs=""
+      if gateway_via_alb; then
+        api_host="$(get_metadata "gateway_domain")"
+        api_cidrs="$(get_metadata "gateway_allowed_cidrs")"
+      fi
+      waf_hosts_json="$(CONSOLE_CIDRS="$(get_metadata "internal_lb_source_ranges")" API_HOST="${api_host}" API_CIDRS="${api_cidrs}" \
+        python3 -c '
+import json, os, sys
+split = lambda v: [c.strip() for c in v.split(",") if c.strip()]
+out = {}
+console = split(os.environ["CONSOLE_CIDRS"])
+if console:
+    for h in sys.argv[1:]:
+        out[h] = console
+api = split(os.environ["API_CIDRS"])
+if os.environ["API_HOST"] and api:
+    out[os.environ["API_HOST"]] = api
+print(json.dumps(out))
+' "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
+    fi
+  fi
+
   tofu_init "${EDGE_INFRA_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${EDGE_INFRA_DIR}" apply -auto-approve -input=false \
     -var="region=${AWS_REGION}" \
@@ -7150,7 +7224,14 @@ phase_edge_infra() {
     -var="external_dns_service_account_name=${EXTERNAL_DNS_SERVICE_ACCOUNT}" \
     -var="enable_cert_manager_route53=${enable_cert_manager}" \
     -var="cert_manager_namespace=${CERT_MANAGER_NAMESPACE}" \
-    -var="cert_manager_service_account_name=${CERT_MANAGER_SERVICE_ACCOUNT}"
+    -var="cert_manager_service_account_name=${CERT_MANAGER_SERVICE_ACCOUNT}" \
+    -var="enable_waf=${enable_waf}" \
+    -var="waf_host_allowlists=${waf_hosts_json}" \
+    ${waf_args[@]+"${waf_args[@]}"}
+
+  set_metadata "waf_web_acl_arn" "$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw waf_web_acl_arn 2>/dev/null || true)"
+  set_metadata "waf_log_group" "$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw waf_log_group_name 2>/dev/null || true)"
+  [[ -n "$(get_metadata "waf_web_acl_arn")" ]] && log "AWS WAF Web ACL: $(get_metadata "waf_web_acl_arn") (logs: CloudWatch $(get_metadata "waf_log_group"))."
 
   local controller_role_arn dns_cert_arn bastion_id external_dns_role_arn cert_manager_role_arn route53_zone_id
   controller_role_arn="$(tofu -chdir="${EDGE_INFRA_DIR}" output -raw alb_controller_role_arn)"
@@ -7310,10 +7391,19 @@ phase_straiker_edge() {
   helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
   helm repo update "${HELM_REPO_NAME}" >/dev/null
 
+  if [[ ( "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ) && -z "$(get_metadata "waf_web_acl_arn")" ]]; then
+    mark_phase_blocked "No AWS WAF Web ACL in install state for edge type ${EDGE_TYPE}. Re-run phase 'edge-infra' first (--phase edge-infra --rerun-phase)."
+    return
+  fi
+  if gateway_via_alb && [[ -z "$(get_metadata "gateway_domain")" || -z "$(get_metadata "gateway_cert_arn")" ]]; then
+    mark_phase_blocked "The api-gateway rides the xalb ALB but its name/certificate is not in install state. Pass --gateway-domain (or --gateway-cert-arn) and re-run phases gateway-cert, platform-services and straiker-edge."
+    return
+  fi
+
   local ecr_registry
   ecr_registry="$(get_metadata "ecr_registry")"
   local cmd=(
-    helm upgrade --install "${EDGE_RELEASE}" "${HELM_REPO_NAME}/${EDGE_CHART_NAME}"
+    helm upgrade --install "${EDGE_RELEASE}" "$(chart_ref "${EDGE_CHART_NAME}")"
     --namespace "${INFRA_NAMESPACE}"
     --create-namespace
     --wait
@@ -7329,20 +7419,37 @@ phase_straiker_edge() {
   if [[ "${EDGE_TYPE}" == "alb" ]]; then
     cmd+=(--set "alb.domain=$(get_metadata "custom_domain")")
     cmd+=(--set "alb.certificateArn=$(get_metadata "alb_certificate_arn")")
-    cmd+=(--set "alb.inboundCidrs=$(get_metadata "internal_lb_source_ranges")")
+    local alb_cidrs
+    alb_cidrs="$(get_metadata "internal_lb_source_ranges")"
+    cmd+=(--set-string "alb.inboundCidrs=${alb_cidrs//,/\\,}")
     local alb_subnets
     alb_subnets="$(get_metadata "alb_subnets")"
     if [[ -n "${alb_subnets}" ]]; then
       cmd+=(--set "alb.subnets=${alb_subnets}")
     fi
   fi
+  if [[ "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ]]; then
+    cmd+=(--set-string "waf.webAclArn=$(get_metadata "waf_web_acl_arn")")
+  fi
   if [[ "${EDGE_TYPE}" == "xalb" ]]; then
     cmd+=(--set "xalb.domain=$(get_metadata "custom_domain")")
     cmd+=(--set "xalb.certificateArn=$(get_metadata "alb_certificate_arn")")
-    local xalb_cidrs
+    # The ALB's security group admits the console ranges, plus the gateway's when it rides this ALB. Ranges for only one
+    # of the two cannot go here (they would shut the other out): WAF enforces them per host (phase edge-infra).
+    local xalb_cidrs gw_cidrs=""
     xalb_cidrs="$(get_metadata "internal_lb_source_ranges")"
+    if gateway_via_alb; then
+      gw_cidrs="$(get_metadata "gateway_allowed_cidrs")"
+      if [[ -n "${xalb_cidrs}" && -n "${gw_cidrs}" ]]; then
+        xalb_cidrs="${xalb_cidrs},${gw_cidrs}"
+      else
+        xalb_cidrs=""
+      fi
+      cmd+=(--set-string "xalb.api.host=$(get_metadata "gateway_domain")")
+      cmd+=(--set-string "xalb.api.certificateArn=$(get_metadata "gateway_cert_arn")")
+    fi
     if [[ -n "${xalb_cidrs}" ]]; then
-      cmd+=(--set "xalb.inboundCidrs=${xalb_cidrs}")
+      cmd+=(--set-string "xalb.inboundCidrs=${xalb_cidrs//,/\\,}")
     fi
   fi
   if [[ -n "${ecr_registry}" ]]; then
@@ -7359,7 +7466,23 @@ phase_straiker_edge() {
   for values_file in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do
     cmd+=(-f "${values_file}")
   done
-  "${cmd[@]}"
+  "${cmd[@]}" || return
+
+  # The api-gateway on the ALB: wait for the ALB's address, then point the gateway name at it.
+  if gateway_via_alb; then
+    local alb_host="" n
+    for n in $(seq 1 30); do
+      alb_host="$(kubectl get ingress "${EDGE_RELEASE}-xalb-api" -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+      [[ -n "${alb_host}" ]] && break
+      sleep 10
+    done
+    if [[ -z "${alb_host}" ]]; then
+      log "WARNING: the edge ALB has no address yet: check 'kubectl describe ingress ${EDGE_RELEASE}-xalb-api -n ${INFRA_NAMESPACE}', then re-run this phase to point $(get_metadata "gateway_domain") at it."
+      return
+    fi
+    log "api-gateway is served by the edge ALB ${alb_host} (AWS WAF $(get_metadata "waf_web_acl_arn"))."
+    gateway_dns_ensure
+  fi
 }
 
 # Called unconditionally at the end of a successful main() run — not just
@@ -7432,6 +7555,11 @@ show_access_info() {
     log "  Frontend : https://$(custom_domain_hostname straiker)/"
     log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
     log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    if gateway_via_alb; then
+      log "  API      : https://$(get_metadata "gateway_domain")/  (api-gateway: SDKs, agents, Detect API; same ALB)"
+    fi
+    log "AWS WAF  : $(get_metadata "waf_web_acl_arn")"
+    log "           request logs in CloudWatch Logs group $(get_metadata "waf_log_group")"
     log ""
     if [[ "$(get_metadata "xalb_route53_automation")" == "true" ]]; then
       log "Certificate is real and DNS-validated — no browser trust warning."
@@ -7652,7 +7780,7 @@ How should straiker-edge expose app/defend/ascend externally?
                           install.
   2) none               — install nothing; bring your own ingress/
                           LoadBalancer pointed at the frontend/defend/ascend
-                          Services directly (default).
+                          Services directly (default on GKE).
   3) tailscale          — same Caddy as internal, but with a real
                           cert-manager/Let's Encrypt certificate for your
                           own domain, and its Service exposed onto your own
@@ -7674,7 +7802,8 @@ How should straiker-edge expose app/defend/ascend externally?
                           self-signed fallback either way. The allowed CIDR
                           defaults to this cluster's own VPC unless you pass
                           --internal-lb-source-ranges.
-  5) xalb               — same as alb, but internet-facing and sharing an
+  5) xalb               — (default on EKS) same as alb, but internet-facing,
+                          behind AWS WAF, also carrying the api-gateway, and sharing an
                           ALB with other Ingresses on this cluster
                           (IngressGroup) instead of getting its own.
                           Requires --alb-certificate-arn by default, same as
@@ -7685,11 +7814,14 @@ How should straiker-edge expose app/defend/ascend externally?
                           real ACM certificate and keep the app hostnames
                           synced via ExternalDNS, with no ARN needed.
 EOF
-    local edge_type_answer
-    edge_type_answer="$(prompt_line 'Edge type [internal/none/tailscale/alb/xalb] (default: none): ' || true)"
+    # EKS default: xalb (an AWS ALB with ACM and WAF, the reference architecture). GKE has no ALB: none.
+    local edge_type_answer edge_type_default=none
+    [[ "${CLOUD_PROVIDER}" != "gke" ]] && edge_type_default=xalb
+    edge_type_answer="$(prompt_line "Edge type [internal/none/tailscale/alb/xalb] (default: ${edge_type_default}): " || true)"
+    [[ -z "${edge_type_answer}" ]] && edge_type_answer="${edge_type_default}"
     case "${edge_type_answer}" in
       1|internal) EDGE_TYPE=internal ;;
-      2|none|"") EDGE_TYPE=none ;;
+      2|none) EDGE_TYPE=none ;;
       3|tailscale) EDGE_TYPE=tailscale ;;
       4|alb) EDGE_TYPE=alb ;;
       5|xalb) EDGE_TYPE=xalb ;;

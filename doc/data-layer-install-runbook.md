@@ -17,9 +17,15 @@ Everything is created in **one AWS account and one region**.
 | ClickHouse | 1 shard x 2 replicas + 3-member Keeper | servers on the `straiker-clickhouse` pool (`r6g/r7g.2xlarge`) |
 | Platform services | foundation, registry, databridge, portico, grid, api-gateway, ingest | grid's ClickHouse migrations run as Replicated tables |
 | Products | frontend + dex + bifrost, 5 GPU inference models, Defend, Ascend | AI provider: Bedrock by default |
-| Edge | Caddy with self-signed certificates (`--edge-type internal`) | reached with a port-forward |
+| Edge | **One internet-facing Application Load Balancer** (`--edge-type xalb`, the default): ACM certificates, TLS 1.2+, **AWS WAF**. Hosts `straiker.<domain>`, `straiker-defend.<domain>`, `straiker-ascend.<domain>` and the api-gateway `api.<domain>` | `terraform/aws/edge` (WAF, IAM, certificate) + AWS Load Balancer Controller; Caddy (`--edge-type internal`) is for offline tests only |
 
-Not included: WAF, monitoring/alerting, a custom domain or real certificates (see `--edge-type tailscale|alb`).
+**AWS WAF** (`terraform/aws/edge/waf.tf`, Web ACL `<cluster>-edge`): AWS managed rule groups (IP reputation, Common, Known bad inputs), a
+per-IP rate limit (`--waf-rate-limit`, default 10000 requests / 5 minutes, `0` = off), and per-host source allowlists:
+`--internal-lb-source-ranges` for the console hosts, `--gateway-allowed-cidrs` for `api.<domain>`. Rules that inspect the **request body
+count instead of block**: the Detect API receives attack prompts by design, and blocking them would break the product. Request logs go to
+CloudWatch Logs `aws-waf-logs-<cluster>-edge` (30 days; `Authorization`, `Cookie` and `X-Api-Key` redacted).
+
+Not included: monitoring/alerting.
 
 ## 2. Before you run it
 
@@ -40,8 +46,12 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   G/VT instance already running in the account, so the installer subtracts those and stops in its first phase if too
   little is left. A100/H100 (p4d, p4de, p5) use a different quota, "Running On-Demand P instances" (`L-417A185B`),
   about 192 vCPUs for two p4d.24xlarge; those instance families are not enabled in the installer yet.
-- **A domain for the gateway** (`--gateway-domain api.customer.com`), unless you bring your own ACM certificate. The api-gateway is
-  internet-facing by default and always uses TLS; the installer issues the certificate from the domain:
+- **A domain** (`--domain customer.com`). The console hosts are `straiker.`, `straiker-defend.` and `straiker-ascend.<domain>`; the
+  api-gateway is `api.<domain>` (change it with `--installer-arg --gateway-domain --installer-arg <name>`). With `--route53` (the domain's
+  public zone is in this account) both certificates and every DNS record are automatic; `--domain` must then be the zone's own name. Otherwise
+  pass `--certificate-arn` (an ISSUED ACM certificate in the cluster's region covering the three console hosts) and add the DNS records
+  yourself (the console names as CNAMEs to the ALB). The api-gateway shares the ALB with the console; its certificate is issued by the
+  installer from the domain:
   - the domain (or its parent) is a public **Route53 zone in the same account**: nothing else to do, the installer adds the DNS
     validation record, waits for the certificate, and points the name at the gateway. One command.
   - the domain's DNS is **elsewhere** (Cloudflare, an on-prem DNS server, a Route53 zone in a *different* AWS account): **MANUAL STEP**, two
@@ -54,6 +64,8 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   - a private gateway needs none of this: `--gateway-exposure internal`.
   The installer's AWS identity needs `acm:RequestCertificate/DescribeCertificate/ListCertificates/ListTagsForCertificate/AddTagsToCertificate`,
   `route53:ListHostedZones/GetHostedZone/ChangeResourceRecordSets` and `elasticloadbalancing:DescribeLoadBalancers`.
+  For the edge it also needs `wafv2:*` on the Web ACL and IP sets, and `logs:CreateLogGroup/PutRetentionPolicy/DeleteLogGroup/TagResource`
+  plus `logs:CreateLogDelivery`/`logs:PutResourcePolicy`/`logs:DescribeResourcePolicies` for WAF logging.
 - Quota for ECR, Aurora and MSK (the defaults are normally enough).
 
 ### On Straiker's side (once per customer, once per release)
@@ -80,8 +92,11 @@ These live in the Straiker artifact account (631748089429, us-east-1) and are **
 scripts/install-data-layer.sh \
   --cluster-name <name> --region <region> --customer-name <customer> \
   --profile <aws-profile> --expect-account <account-id> \
+  --domain <customer.com> --route53 \
   [--customer-key-file ./key.txt]
 ```
+Without the zone in this account: `--certificate-arn <arn>` instead of `--route53`. Questions asked on the first run also include
+`--admin-email` (the first Cognito admin), passed with `--installer-arg --admin-email --installer-arg <address>`.
 
 `--expect-account` refuses to run in the wrong account. `--check` runs the pre-flight only; `--status` shows the phase
 status. The command prints what it is about to create and asks for confirmation (`--yes` skips that).
@@ -96,14 +111,16 @@ profile. Both are stored afterwards.
 Expect about 1.5-2 hours. Cost while it runs is roughly 6-8 USD/hour, dominated by the GPU nodes.
 
 ### Open the product
+`https://straiker.<domain>/` (the installer's access summary prints every URL, the WAF Web ACL and its log group). Sign in through
+Cognito as the first admin (`--admin-email`; password in Secrets Manager `<cluster>/cognito/main-admin`). SDKs and agents use
+`https://api.<domain>`.
+
+With `--edge-type internal` (offline tests only) it is a port-forward with a self-signed certificate:
 ```bash
 echo '127.0.0.1  app.straiker.internal defend.straiker.internal ascend.straiker.internal' | sudo tee -a /etc/hosts
 kubectl -n straiker port-forward svc/straiker-edge 8443:8443
-# https://app.straiker.internal:8443/  (self-signed certificate)
-kubectl get secret straiker-secrets -n straiker -o jsonpath='{.data.BOOTSTRAP_ADMIN_PASSWORD}' | base64 -d; echo
+# https://app.straiker.internal:8443/
 ```
-Log in as `admin@straiker.internal`, onboard a real admin, then disable the bootstrap login (see the installer's closing
-message).
 
 ### Verify
 `scripts/install-straiker.sh --data-layer --phase verify-data-layer --rerun-phase ...` (it is also the last data phase of the
@@ -183,8 +200,17 @@ Until then Ascend keeps grading through v1, which is safe.
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.
 - **ClickHouse sync hardening rollout** (existing installs): run `--phase aws-data --rerun-phase` (adds the `grid_sync` password to Secrets Manager), then `--phase clickhouse --rerun-phase` (pods restart to pick up the user and the RDS CA), then `--phase ch-sync --rerun-phase`. If the sync then fails with a TLS error, the Aurora endpoint is reached under a name the certificate does not cover: set `postgresSslMode: require` on the clickhouse chart.
+- **Gateway on the edge ALB.** With edge type `xalb` and `--gateway-exposure public` (both defaults), the api-gateway Service is ClusterIP
+  and its own Ingress (`straiker-edge-xalb-api`, same IngressGroup, same ALB and WAF, health check on the actuator port 9090) carries
+  `api.<domain>`; the installer points that name at the ALB in phase `straiker-edge`. ExternalDNS is told to leave this Ingress alone.
+  **Moving an existing install off its gateway NLB** (e.g. dl-test): re-run phases `edge-infra`, `platform-services` and `straiker-edge`
+  with `--edge-type xalb --custom-domain <domain>` and the same `--gateway-domain`. The Helm upgrade turns the Service into ClusterIP (the
+  controller deletes the NLB) and the DNS record is rewritten to the ALB; expect a few minutes without the API in between.
+  The ALB's security group is shared: when only one of `--internal-lb-source-ranges` / `--gateway-allowed-cidrs` is set, it stays open and
+  WAF enforces the ranges per host.
 - **Gateway exposure.** The api-gateway is internet-facing by default (`--gateway-exposure public`) and always over TLS: it needs
-  `--gateway-domain` (certificate issued by the installer, see section 2) or `--gateway-cert-arn`, and the install stops early without one.
+  `--gateway-domain` (certificate issued by the installer, see section 2; defaults to `api.<domain>` with edge type `xalb`) or
+  `--gateway-cert-arn`, and the install stops early without one.
   Restrict who can connect with `--gateway-allowed-cidrs`. Ask for a private one with `--gateway-exposure internal` (internal load balancer,
   VPC only, plain HTTP inside the VPC) or `none` (in-cluster only). The installer checks the load balancer's scheme against the choice and
   blocks on a mismatch. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud provider's own
@@ -195,6 +221,8 @@ Until then Ascend keeps grading through v1, which is safe.
   Load Balancer Controller (in-tree NLB with a certificate) has been rendered and tested offline only; check it on the first real install.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
-- **WAF, monitoring, ingress with real certificates** are not part of this install.
-- **Edge**: `--edge-type internal` is a port-forward with self-signed certificates.
+- **Monitoring/alerting** is not part of this install yet (WAF logs are the only CloudWatch logs besides EKS control plane).
+- **WAF tuning**: body rules only count. Review the counted matches in the WAF log after the first real traffic and decide per rule;
+  change them in `terraform/aws/edge` (`waf_managed_rule_groups`), then `--phase edge-infra --rerun-phase`.
+- **Edge**: `--edge-type internal` is a port-forward with self-signed certificates, for offline tests only.
 - Rotate the customer key after any test where it was pasted into a chat or a shell history.

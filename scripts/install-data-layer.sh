@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # One command for the whole AWS "data layer" install: EKS + Karpenter, ECR + image/model sync, Aurora, MSK,
-# ElastiCache, EFS, ClickHouse (2 replicas + Keeper), the platform services, Ascend and Defend, and the edge.
+# ElastiCache, EFS, ClickHouse (2 replicas + Keeper), the platform services, Ascend and Defend, and the edge: an
+# internet-facing ALB (ACM certificate, AWS WAF) for the console and the api-gateway.
 #
 #   scripts/install-data-layer.sh --cluster-name dl-test --region us-east-2 \
-#       --customer-name acme --profile my-aws-profile [--customer-key-file ./key.txt]
+#       --customer-name acme --profile my-aws-profile --domain acme.example.com --route53 \
+#       [--customer-key-file ./key.txt]
 #
 # It runs scripts/install-straiker.sh (all phases, in order) and re-runs it while a phase is only waiting on
 # something running in the cluster (image/model sync Jobs, node launches). It stops, printing the installer's own
@@ -25,7 +27,10 @@ CUSTOMER_NAME=""
 CUSTOMER_KEY_FILE=""
 NAMESPACE="straiker"
 PROVISION_STRATEGY="min"
-EDGE_TYPE="internal"
+EDGE_TYPE="xalb"
+DOMAIN=""
+CERT_ARN=""
+ROUTE53=false
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -54,7 +59,13 @@ Options:
   --expect-account ID        stop unless the AWS account is ID (guards against the wrong profile)
   --namespace NS             Kubernetes namespace (default: straiker)
   --provision-strategy S     min | ha | max (default: min)
-  --edge-type T              internal | none | tailscale | alb (default: internal = Caddy, self-signed)
+  --edge-type T              xalb | alb | internal | none | tailscale (default: xalb = internet-facing ALB with an ACM
+                             certificate and AWS WAF; the console and the api-gateway share it)
+  --domain D                 base domain for xalb/alb: straiker.D, straiker-defend.D, straiker-ascend.D and api.D
+  --route53                  the public Route53 zone for --domain is in this account: certificates and DNS records are
+                             created automatically
+  --certificate-arn ARN      without --route53: your ACM certificate (this region) covering the console hosts; the
+                             api.D certificate is still requested by the installer (it prints the DNS records to add)
   --products LIST            default: ascend,defend
   --ai-provider-mode M       own-keys | bedrock | trial-key (default: bedrock)
   --multiarch-override R=U   image whose copy in your ECR lacks arm64, as <repo>:<tag>=<upstream> (repeatable).
@@ -84,6 +95,9 @@ while [[ $# -gt 0 ]]; do
     --namespace) NAMESPACE="${2:-}"; shift 2 ;;
     --provision-strategy) PROVISION_STRATEGY="${2:-}"; shift 2 ;;
     --edge-type) EDGE_TYPE="${2:-}"; shift 2 ;;
+    --domain) DOMAIN="${2:-}"; shift 2 ;;
+    --route53) ROUTE53=true; shift ;;
+    --certificate-arn) CERT_ARN="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -117,6 +131,10 @@ fi
 [[ -n "${REGION}" ]] || die "--region is required"
 [[ -n "${CUSTOMER_NAME}" ]] || die "--customer-name is required"
 [[ "${PROVISION_STRATEGY}" =~ ^(min|ha|max)$ ]] || die "--provision-strategy must be min, ha or max"
+if [[ "${EDGE_TYPE}" == "xalb" || "${EDGE_TYPE}" == "alb" ]]; then
+  [[ -n "${DOMAIN}" ]] || die "--edge-type ${EDGE_TYPE} needs --domain (or pick another --edge-type)"
+  [[ "${ROUTE53}" == true || -n "${CERT_ARN}" ]] || die "--edge-type ${EDGE_TYPE} needs --route53 (zone in this account) or --certificate-arn"
+fi
 [[ "${TIMEOUT_MINUTES}" =~ ^[0-9]+$ && "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || die "--timeout-minutes and --poll-seconds must be numbers"
 if [[ -n "${CUSTOMER_KEY_FILE}" && ! -r "${CUSTOMER_KEY_FILE}" ]]; then die "cannot read --customer-key-file ${CUSTOMER_KEY_FILE}"; fi
 
@@ -190,9 +208,10 @@ report_plan() {
 
 About to install into AWS account ${ACCOUNT_ID}, region ${REGION}:
   cluster ........ ${CLUSTER_NAME} (namespace ${NAMESPACE}), strategy ${PROVISION_STRATEGY}
-  customer ....... ${CUSTOMER_NAME}, products ${PRODUCTS}, AI provider ${AI_PROVIDER_MODE}, edge ${EDGE_TYPE}
+  customer ....... ${CUSTOMER_NAME}, products ${PRODUCTS}, AI provider ${AI_PROVIDER_MODE}, edge ${EDGE_TYPE}${DOMAIN:+ (${DOMAIN})}
   creates ........ VPC + EKS + Karpenter, ECR, Aurora PostgreSQL, MSK, ElastiCache, EFS, ClickHouse (2 + Keeper),
-                   the platform services, Ascend and Defend, and GPU nodes for the inference models
+                   the platform services, Ascend and Defend, GPU nodes for the inference models, and
+                   for xalb/alb an Application Load Balancer with AWS WAF
   time / cost .... about 1.5-2 hours, and roughly 6-8 USD per hour while it runs (GPU nodes dominate)
 EOF
 }
@@ -222,6 +241,15 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
   --straiker-customer-name "${CUSTOMER_NAME}" --products "${PRODUCTS}" --ai-provider-mode "${AI_PROVIDER_MODE}"
   --edge-type "${EDGE_TYPE}" --yes)
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
+if [[ -n "${DOMAIN}" ]]; then
+  run_args+=(--custom-domain "${DOMAIN}")
+  [[ "${EDGE_TYPE}" == "xalb" ]] && run_args+=(--gateway-domain "api.${DOMAIN}")
+fi
+if [[ "${ROUTE53}" == true ]]; then
+  [[ "${EDGE_TYPE}" == "xalb" ]] && run_args+=(--xalb-route53)
+  [[ "${EDGE_TYPE}" == "alb" ]] && run_args+=(--alb-route53)
+fi
+[[ -n "${CERT_ARN}" ]] && run_args+=(--alb-certificate-arn "${CERT_ARN}")
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then run_args+=("${EXTRA_ARGS[@]}"); fi
 
 # The customer key is stored in the install state after the first pass, so only the first run needs it.
@@ -279,6 +307,10 @@ done
 
 echo
 "${INSTALLER}" "${base_args[@]}" --status || true
+if [[ "${EDGE_TYPE}" != "internal" ]]; then
+  echo "Done. The URLs are in the installer's access summary above."
+  exit 0
+fi
 cat <<EOF
 
 Done. To reach the product from this machine:

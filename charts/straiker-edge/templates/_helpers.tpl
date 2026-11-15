@@ -18,3 +18,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "edge.nodeSelector" -}}
 {{- .Values.nodeSelector | default .Values.global.sharedNodeSelector | toYaml -}}
 {{- end }}
+
+{{- /* xalb: listener/ALB-wide annotations shared by every Ingress of the IngressGroup. The controller requires the
+       same value on each member (or on one only), so templates/xalb-ingress.yaml renders them from here. */}}
+{{- define "edge.xalbGroupAnnotations" -}}
+alb.ingress.kubernetes.io/scheme: internet-facing
+alb.ingress.kubernetes.io/target-type: ip
+alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+alb.ingress.kubernetes.io/group.name: {{ required "xalb.groupName is required when edgeType=xalb" .Values.xalb.groupName | quote }}
+{{- if .Values.xalb.sslPolicy }}
+alb.ingress.kubernetes.io/ssl-policy: {{ .Values.xalb.sslPolicy | quote }}
+{{- end }}
+{{- if .Values.waf.webAclArn }}
+alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.waf.webAclArn | quote }}
+{{- end }}
+{{- end }}

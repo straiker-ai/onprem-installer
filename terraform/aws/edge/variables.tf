@@ -91,3 +91,67 @@ variable "cert_manager_service_account_name" {
   type        = string
   default     = "cert-manager"
 }
+
+variable "enable_waf" {
+  description = "Create the AWS WAF Web ACL for the edge ALB (waf.tf). Set by install-straiker.sh for edgeType=alb/xalb; charts/straiker-edge attaches it through the wafv2-acl-arn Ingress annotation."
+  type        = bool
+  default     = false
+}
+
+variable "waf_rate_limit" {
+  description = "Requests per 5 minutes allowed from one source IP before WAF blocks it (rate-based rule). 0 = no rate rule. The default (~33 requests/second sustained) leaves room for an AI app calling the Detect API from one NAT address; lower it for console-only exposure."
+  type        = number
+  default     = 10000
+
+  validation {
+    condition     = var.waf_rate_limit == 0 || (var.waf_rate_limit >= 10 && var.waf_rate_limit <= 2000000000)
+    error_message = "waf_rate_limit must be 0 (off) or between 10 and 2000000000."
+  }
+}
+
+variable "waf_host_allowlists" {
+  description = "Per-hostname source CIDRs, e.g. { \"api.acme.com\" = [\"203.0.113.0/24\"] }: a request for that host from any other address is blocked. Hosts not listed are open to every address (subject to the other rules)."
+  type        = map(list(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for cidrs in values(var.waf_host_allowlists) : length(cidrs) > 0 && alltrue([for c in cidrs : can(cidrnetmask(c))])])
+    error_message = "Each waf_host_allowlists entry needs at least one IPv4 CIDR (a.b.c.d/n)."
+  }
+}
+
+variable "waf_managed_rule_groups" {
+  description = <<-EOT
+    AWS managed rule groups on the Web ACL, keyed by rule group name. priority orders them among themselves;
+    count_rules are rules of that group switched from BLOCK to COUNT. The request-body rules are counted by default
+    because the Detect API receives prompts that are attack strings by design (see waf.tf).
+  EOT
+  type = map(object({
+    priority    = number
+    vendor      = optional(string, "AWS")
+    count_rules = optional(list(string), [])
+  }))
+  default = {
+    AWSManagedRulesAmazonIpReputationList = { priority = 0 }
+    AWSManagedRulesCommonRuleSet = {
+      priority = 1
+      count_rules = [
+        "SizeRestrictions_BODY",
+        "CrossSiteScripting_BODY",
+        "GenericRFI_BODY",
+        "GenericLFI_BODY",
+        "EC2MetaDataSSRF_BODY",
+      ]
+    }
+    AWSManagedRulesKnownBadInputsRuleSet = {
+      priority    = 2
+      count_rules = ["Log4JRCE_BODY", "JavaDeserializationRCE_BODY"]
+    }
+  }
+}
+
+variable "waf_log_retention_days" {
+  description = "Retention of the WAF log group (aws-waf-logs-<cluster>-edge) in days."
+  type        = number
+  default     = 30
+}

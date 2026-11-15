@@ -12,6 +12,9 @@ metadata:
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
     alb.ingress.kubernetes.io/certificate-arn: {{ required "alb.certificateArn is required when edgeType=alb" .Values.alb.certificateArn | quote }}
     alb.ingress.kubernetes.io/inbound-cidrs: {{ required "alb.inboundCidrs is required when edgeType=alb" .Values.alb.inboundCidrs | quote }}
+    {{- if .Values.waf.webAclArn }}
+    alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.waf.webAclArn | quote }}
+    {{- end }}
     {{- if .Values.alb.subnets }}
     alb.ingress.kubernetes.io/subnets: {{ .Values.alb.subnets | quote }}
     {{- end }}
