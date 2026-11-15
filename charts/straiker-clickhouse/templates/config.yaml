@@ -32,7 +32,9 @@ data:
   {{- end }}
   users.xml: |
     <clickhouse>
-      <profiles><readonly><readonly>1</readonly></readonly></profiles>
+      {{- /* readonly=2: no writes or DDL (the read users only hold SELECT grants anyway), but per-query settings are
+             allowed. grid sets max_execution_time on every query; readonly=1 rejects that (code 164). */}}
+      <profiles><readonly><readonly>2</readonly></readonly></profiles>
       <users>
         {{- /* grid's dictionaries use SOURCE(CLICKHOUSE(db 'grid' table '...')) with no credentials, so the
                server connects to itself as "default". Keep it, but local-host only (other pods are denied)

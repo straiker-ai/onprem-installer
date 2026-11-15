@@ -6,7 +6,7 @@ description: >
   (Secret clickhouse-credentials) and the grid database. Ingestion into it (the
   ClickPipes replacement: Postgres CDC + MSK topics) is NOT part of this chart.
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "25.8"
 maintainers:
   - name: Straiker Team
