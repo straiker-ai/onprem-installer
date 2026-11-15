@@ -61,6 +61,14 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   | **`p4d`** (default for a new install) | **customers** (the reference architecture) | `p4d.24xlarge` (8x A100 40 GB, 96 vCPU): **2 nodes** for the fleet, the pool grows to `--gpu-max-nodes` (default **4**) | "Running On-Demand P instances", `L-417A185B`: 96 vCPUs per node | **384 vCPUs** (4 nodes) |
   | `per-model` | Straiker test installs (dl-test) | one `g4dn/g5/g6/g6e` node per server, each model's validated tier | "Running On-Demand G and VT instances", `L-DB2E81BA` | 512 vCPUs |
 
+  **`--gpu-instance-type`** overrides which EC2 type the `p4d` (packed) fleet is pinned to, same "one server per GPU,
+  one pinned type" shape either way — a stand-in while A100/p4d capacity is being arranged, not a cost optimization.
+  Known types today: `p4d.24xlarge`/`p4de.24xlarge`/`p5.48xlarge` (P-instance quota) and `g6e.12xlarge`/`g6e.48xlarge`/
+  `g5.48xlarge`/`g6.48xlarge` (G-and-VT quota) — the installer checks the quota and region/AZ offering that actually
+  governs the chosen type, not always the P-instance one. Example: `--gpu-instance-type g6e.12xlarge` packs the
+  10-server fleet onto 3 nodes (4x L40S each) against the G-and-VT quota instead of 2x p4d.24xlarge against the
+  P-instance quota.
+
   `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-417A185B --desired-value 384 --region <region>`
   (approval takes minutes to days for P instances). The quota counts every instance of those families already running in
   the account, so the installer subtracts those and stops in its first phase if the fleet's nodes do not fit; for p4d it

@@ -265,6 +265,11 @@ GPU_NODE_VCPUS=8
 # to GPU_MAX_NODES. per-model: one small node per server on the tier each model is validated for (g4dn/g5/g6/g6e), for
 # Straiker's own test installs. An install whose models already run without a remembered choice keeps per-model.
 GPU_FLEET="${GPU_FLEET:-}"
+# Which EC2 type the "p4d" (packed) fleet uses — defaults to p4d.24xlarge (the reference architecture). Override with
+# --gpu-instance-type for a stand-in that is faster to get capacity for (e.g. g6e.12xlarge, 4x L40S) while A100/p4d
+# capacity is being arranged; same "one pinned type, pack servers onto its GPUs" shape either way. Must be a type
+# gpu_instance_spec() below (and scripts/gpu_planner.py's INSTANCE_GPUS) knows the GPU count of.
+GPU_INSTANCE_TYPE="${GPU_INSTANCE_TYPE:-}"
 GPU_MAX_NODES="${GPU_MAX_NODES:-}"
 # Optional EC2 Capacity Reservation(s) / Capacity Block(s) for the GPU nodes (comma-separated cr-... ids). Remembered.
 GPU_CAPACITY_RESERVATION="${GPU_CAPACITY_RESERVATION:-}"
@@ -769,11 +774,16 @@ Options:
                                    production (default): one model server per GPU, never shared or quantized, on the GPU
                                    tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
                                    that already exist and quantize thanos. NEVER use test for a customer. Remembered.
-  --gpu-fleet <p4d|per-model>      p4d (default; customer installs): every model server on p4d.24xlarge nodes (8x A100
-                                   40 GB), one server per GPU; the full fleet is 2 nodes and the pool grows to
-                                   --gpu-max-nodes. Needs the EC2 "Running On-Demand P instances" quota (96 vCPUs per
-                                   node). per-model: one g4dn/g5/g6/g6e node per server, each model's validated tier
-                                   (Straiker test installs). An existing install keeps what it runs. Remembered.
+  --gpu-fleet <p4d|per-model>      p4d (default; customer installs): every model server packed onto nodes of one
+                                   EC2 type (p4d.24xlarge, 8x A100 40 GB, unless --gpu-instance-type overrides it),
+                                   one server per GPU; the full fleet is however many nodes that takes (2 for
+                                   p4d.24xlarge) and the pool grows to --gpu-max-nodes. Needs the matching EC2 quota
+                                   (P-instance for p4d/p4de/p5; G-and-VT for g5/g6/g6e). per-model: one g4dn/g5/g6/g6e
+                                   node per server, each model's validated tier (Straiker test installs). An existing
+                                   install keeps what it runs. Remembered.
+  --gpu-instance-type <type>       p4d fleet only: the EC2 type to pack the fleet onto instead of p4d.24xlarge (e.g.
+                                   g6e.12xlarge, 4x L40S — a stand-in while A100 capacity is being arranged; same
+                                   packed shape, checked against the quota that type actually falls under). Remembered.
   --gpu-max-nodes <n>              p4d fleet: most GPU nodes the pool may grow to (default 4). Remembered.
   --gpu-capacity-reservation <ids> EC2 Capacity Reservation / Capacity Block id(s) (cr-..., comma-separated) the GPU
                                    nodes launch into first. Remembered.
@@ -1454,14 +1464,25 @@ show_cost_estimate() {
 
   if [[ "${gpu_node_count}" -gt 0 ]]; then
     if [[ "${CLOUD_PROVIDER}" != "gke" && "$(gpu_fleet)" == "p4d" ]]; then
-      # Customer fleet: p4d.24xlarge (8x A100 40 GB) at ~$32.77/h on-demand (us-east-1 list price), one server per GPU.
-      local p4d_nodes p4d_max p4d_max_cost
-      p4d_nodes="$(p4d_nodes_for "${gpu_node_count}")"
-      p4d_max="$(get_metadata "gpu_max_nodes")"
-      p4d_max="${p4d_max:-4}"
-      line_cost="$(awk -v n="${p4d_nodes}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 32.77 * h }')"
-      p4d_max_cost="$(awk -v n="${p4d_max}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 32.77 * h }')"
-      echo " GPU inference nodes (${p4d_nodes}x ${P4D_INSTANCE_TYPE} at ~\$32.77/h, ${gpu_node_count} model servers = 2 replicas of each of: ${models[*]}): \$${line_cost}/mo (\$${p4d_max_cost}/mo at the pool's ${p4d_max}-node maximum)"
+      # Customer (packed) fleet, one server per GPU on the chosen instance type. Rate: us-east-1 on-demand list price,
+      # only for types we actually have a figure for; otherwise the node count is shown with no $/hour guess.
+      local packed_itype packed_nodes packed_max packed_rate packed_max_cost
+      packed_itype="$(gpu_instance_type)"
+      packed_nodes="$(p4d_nodes_for "${gpu_node_count}")"
+      packed_max="$(get_metadata "gpu_max_nodes")"
+      packed_max="${packed_max:-4}"
+      case "${packed_itype}" in
+        p4d.24xlarge) packed_rate=32.77 ;;
+        g6e.12xlarge) packed_rate=10.17 ;;
+        *) packed_rate="" ;;
+      esac
+      if [[ -n "${packed_rate}" ]]; then
+        line_cost="$(awk -v n="${packed_nodes}" -v h="${hours_per_month}" -v r="${packed_rate}" 'BEGIN { printf "%.2f", n * r * h }')"
+        packed_max_cost="$(awk -v n="${packed_max}" -v h="${hours_per_month}" -v r="${packed_rate}" 'BEGIN { printf "%.2f", n * r * h }')"
+        echo " GPU inference nodes (${packed_nodes}x ${packed_itype} at ~\$${packed_rate}/h, ${gpu_node_count} model servers = 2 replicas of each of: ${models[*]}): \$${line_cost}/mo (\$${packed_max_cost}/mo at the pool's ${packed_max}-node maximum)"
+      else
+        echo " GPU inference nodes (${packed_nodes}x ${packed_itype}, ${gpu_node_count} model servers = 2 replicas of each of: ${models[*]}): check the AWS pricing calculator for this instance type (pool grows to ${packed_max} nodes)"
+      fi
     else
       # per-model fleet: one 24 GB-class GPU node per model server (thanos on g6e costs more).
       line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 1.006 * h }')"
@@ -1709,6 +1730,10 @@ parse_args() {
         ;;
       --gpu-fleet)
         GPU_FLEET=${2:-}
+        shift 2
+        ;;
+      --gpu-instance-type)
+        GPU_INSTANCE_TYPE=${2:-}
         shift 2
         ;;
       --gpu-max-nodes)
@@ -3770,15 +3795,19 @@ phase_straiker_system() {
     cmd+=(--set "karpenter.iris=null")
   fi
 
-  # GPU pool (EKS): the customer p4d fleet is p4d.24xlarge only, capped at --gpu-max-nodes, and never expired by age
-  # (replacing a node restarts up to 8 model servers and has to win scarce p4d capacity back). per-model keeps the
-  # chart's g4dn/g5/g6/g6e pool. A capacity reservation applies to either.
+  # GPU pool (EKS): the customer "p4d" (packed) fleet is pinned to one EC2 type only — p4d.24xlarge by default, or
+  # --gpu-instance-type's choice — capped at --gpu-max-nodes, and never expired by age (replacing a node restarts
+  # every model server on it and has to win scarce capacity back, worse the fewer, bigger nodes the fleet has).
+  # per-model keeps the chart's g4dn/g5/g6/g6e pool. A capacity reservation applies to either.
   if [[ "${CLOUD_PROVIDER}" != "gke" ]]; then
     if [[ "$(gpu_fleet)" == "p4d" ]]; then
+      local packed_itype
+      packed_itype="$(gpu_instance_type)"
+      gpu_instance_spec "${packed_itype}" || { mark_phase_blocked "Unknown --gpu-instance-type '${packed_itype}'."; return; }
       cmd+=(
-        --set "eks.gpu.instanceFamilies={p4d}"
-        --set "eks.gpu.instanceTypes={${P4D_INSTANCE_TYPE}}"
-        --set-string "karpenter.gpu.nodePool.limits.nvidia\\.com/gpu=$(( $(get_metadata "gpu_max_nodes") * P4D_GPUS_PER_NODE ))"
+        --set "eks.gpu.instanceFamilies={${packed_itype%%.*}}"
+        --set "eks.gpu.instanceTypes={${packed_itype}}"
+        --set-string "karpenter.gpu.nodePool.limits.nvidia\\.com/gpu=$(( $(get_metadata "gpu_max_nodes") * GPU_SPEC_GPUS ))"
         --set-string "karpenter.gpu.nodePool.expireAfter=Never"
       )
     fi
@@ -6403,9 +6432,44 @@ gpu_fleet() {
   fi
   printf '%s' "${v:-p4d}"
 }
-# GPU nodes the p4d fleet needs for N model servers (one per GPU).
+# --gpu-instance-type: flag > remembered > p4d.24xlarge. Only meaningful when gpu_fleet is "p4d" (packed).
+gpu_instance_type() {
+  local v="${GPU_INSTANCE_TYPE:-$(get_metadata "gpu_instance_type")}"
+  printf '%s' "${v:-${P4D_INSTANCE_TYPE}}"
+}
+# GPU count, vCPU count, and quota family for a packed-fleet instance type. Sets GPU_SPEC_GPUS/_VCPUS/_QUOTA_CODE/_QUOTA_NAME/
+# _FAMILY_RE as globals (bash 3.2 has no local-by-reference). Must stay in sync with scripts/gpu_planner.py's INSTANCE_GPUS
+# (the GPU count) — both read from AWS's own published instance specs. Unknown type: caller's mark_phase_blocked, not here.
+gpu_instance_spec() {
+  local itype=$1
+  case "${itype}" in
+    p4d.24xlarge | p4de.24xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=96 ;;
+    p5.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
+    g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 ;;
+    g6e.48xlarge | g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
+    *) return 1 ;;
+  esac
+  case "${itype}" in
+    p4d.* | p4de.* | p5.*) GPU_SPEC_QUOTA_CODE="${P_VCPU_QUOTA_CODE}" GPU_SPEC_QUOTA_NAME="Running On-Demand P instances" GPU_SPEC_FAMILY_RE='^p[0-9]' ;;
+    *) GPU_SPEC_QUOTA_CODE="${GPU_VCPU_QUOTA_CODE}" GPU_SPEC_QUOTA_NAME="Running On-Demand G and VT instances" GPU_SPEC_FAMILY_RE='^(g|vt)[0-9]' ;;
+  esac
+}
+# charts/straiker-inference's gpuProfiles key for a packed-fleet instance type (its nodeSelector is keyed by EC2
+# instance-family, not type): p4d.24xlarge's own "p4d" profile is tuned for it (A100 40GB, bf16, 32768 context); the
+# others map to the closest existing profile (reasonable, not individually tuned) until the chart gets one of its own.
+gpu_chart_profile_for_instance_type() {
+  case "$1" in
+    p4d.* | p4de.* | p5.*) printf 'p4d' ;;
+    g6e.*) printf 'g6e' ;;
+    g5.*) printf 'g5' ;;
+    g6.*) printf 'l4' ;; # matches the chart's existing g6->L4 mapping (GKE's accelerator label never matches an EKS node)
+    *) printf 'p4d' ;;
+  esac
+}
+# GPU nodes the packed fleet needs for N model servers (one per GPU), on the resolved instance type.
 p4d_nodes_for() {
-  printf '%s' $(( ($1 + P4D_GPUS_PER_NODE - 1) / P4D_GPUS_PER_NODE ))
+  gpu_instance_spec "$(gpu_instance_type)" || { echo 0; return 1; }
+  printf '%s' $(( ($1 + GPU_SPEC_GPUS - 1) / GPU_SPEC_GPUS ))
 }
 
 remember_inference_settings() {
@@ -6433,11 +6497,12 @@ remember_inference_settings() {
     done
     log "WARNING: --inference-models ${INFERENCE_MODELS}: only part of the fleet is deployed. For testing, never for a customer."
   fi
-  local fleet max_nodes crs
+  local fleet max_nodes crs itype
   fleet="$(gpu_fleet)"
   max_nodes="${GPU_MAX_NODES:-$(get_metadata "gpu_max_nodes")}"
   max_nodes="${max_nodes:-4}"
   crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
+  itype="$(gpu_instance_type)"
   case "${fleet}" in p4d | per-model) ;; *)
     echo "ERROR: --gpu-fleet must be 'p4d' or 'per-model', got '${fleet}'." >&2
     return 1
@@ -6451,7 +6516,12 @@ remember_inference_settings() {
     echo "ERROR: --gpu-capacity-reservation takes cr-... ids, comma-separated, got '${crs}'." >&2
     return 1
   fi
+  if [[ "${fleet}" == "p4d" ]] && ! gpu_instance_spec "${itype}"; then
+    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
+    return 1
+  fi
   set_metadata "gpu_fleet" "${fleet}"
+  set_metadata "gpu_instance_type" "${itype}"
   set_metadata "gpu_max_nodes" "${max_nodes}"
   set_metadata "gpu_capacity_reservation" "${crs}"
   set_metadata "inference_profile" "${profile}"
@@ -6469,10 +6539,11 @@ check_gpu_vcpu_quota() {
   local nodes=$1 needed quota used available quota_code quota_name family_re node_vcpus request
   [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
   if [[ "$(gpu_fleet)" == "p4d" ]]; then
-    quota_code="${P_VCPU_QUOTA_CODE}" quota_name="Running On-Demand P instances" family_re='^p[0-9]' node_vcpus=${P4D_NODE_VCPUS}
+    gpu_instance_spec "$(gpu_instance_type)" || { mark_phase_blocked "Unknown --gpu-instance-type '$(gpu_instance_type)'."; return 1; }
+    quota_code="${GPU_SPEC_QUOTA_CODE}" quota_name="${GPU_SPEC_QUOTA_NAME}" family_re="${GPU_SPEC_FAMILY_RE}" node_vcpus=${GPU_SPEC_VCPUS}
     local max_nodes
     max_nodes="$(get_metadata "gpu_max_nodes")"
-    request=$(( ${max_nodes:-4} * P4D_NODE_VCPUS ))
+    request=$(( ${max_nodes:-4} * GPU_SPEC_VCPUS ))
   else
     quota_code="${GPU_VCPU_QUOTA_CODE}" quota_name="Running On-Demand G and VT instances" family_re='^(g|vt)[0-9]' node_vcpus=${GPU_NODE_VCPUS}
     request=512
@@ -6500,32 +6571,33 @@ check_gpu_vcpu_quota() {
   fi
   log "EC2 '${quota_name}' quota OK: ${available} vCPUs free of ${quota} (${used:-0} in use), ${needed} needed for ${nodes} GPU nodes."
   if [[ "$(gpu_fleet)" == "p4d" ]] && awk -v a="${available}" -v r="${request}" -v u="${used:-0}" 'BEGIN { exit !(a + u < r) }'; then
-    log "WARNING: the P quota (${quota} vCPUs) does not cover the pool's maximum of $(( request / P4D_NODE_VCPUS )) p4d nodes (${request} vCPUs): the fleet runs, but cannot scale that far. Request ${request} (code ${quota_code})."
+    log "WARNING: the '${quota_name}' quota (${quota} vCPUs) does not cover the pool's maximum of $(( request / node_vcpus )) $(gpu_instance_type) nodes (${request} vCPUs): the fleet runs, but cannot scale that far. Request ${request} (code ${quota_code})."
   fi
 }
 
-# p4d.24xlarge is offered in some regions and AZs only. $1 = space-separated AZs the GPU nodes may use (empty = any AZ of the
-# region). Blocks when none of them offers it.
+# The packed fleet's instance type (default p4d.24xlarge; see gpu_instance_type) is offered in some regions and AZs only.
+# $1 = space-separated AZs the GPU nodes may use (empty = any AZ of the region). Blocks when none of them offers it.
 check_p4d_offered() {
-  local azs=$1 offered match="" az
+  local azs=$1 itype offered match="" az
+  itype="$(gpu_instance_type)"
   offered="$(aws ec2 describe-instance-type-offerings --region "${AWS_REGION}" --location-type availability-zone \
-    --filters "Name=instance-type,Values=${P4D_INSTANCE_TYPE}" --query 'InstanceTypeOfferings[].Location' --output text 2>/dev/null || true)"
+    --filters "Name=instance-type,Values=${itype}" --query 'InstanceTypeOfferings[].Location' --output text 2>/dev/null || true)"
   if [[ -z "${offered}" || "${offered}" == "None" ]]; then
-    mark_phase_blocked "${P4D_INSTANCE_TYPE} is not offered in ${AWS_REGION}. Install in a region that has it, or use --gpu-fleet per-model."
+    mark_phase_blocked "${itype} is not offered in ${AWS_REGION}. Install in a region that has it, pass --gpu-instance-type for one that does, or use --gpu-fleet per-model."
     return 1
   fi
   if [[ -z "${azs}" ]]; then
-    log "${P4D_INSTANCE_TYPE} is offered in ${AWS_REGION}: $(printf '%s' "${offered}" | tr '\t' ' ')."
+    log "${itype} is offered in ${AWS_REGION}: $(printf '%s' "${offered}" | tr '\t' ' ')."
     return 0
   fi
   for az in ${azs}; do
     [[ " $(printf '%s' "${offered}" | tr '\t' ' ') " == *" ${az} "* ]] && match+="${az} "
   done
   if [[ -z "${match}" ]]; then
-    mark_phase_blocked "${P4D_INSTANCE_TYPE} is not offered in the AZs the GPU nodes may use (${azs}); it is offered in: $(printf '%s' "${offered}" | tr '\t' ' '). Use --provision-strategy ha (more AZs) or subnets in one of those AZs."
+    mark_phase_blocked "${itype} is not offered in the AZs the GPU nodes may use (${azs}); it is offered in: $(printf '%s' "${offered}" | tr '\t' ' '). Use --provision-strategy ha (more AZs) or subnets in one of those AZs."
     return 1
   fi
-  log "${P4D_INSTANCE_TYPE} is offered in the GPU nodes' AZs: ${match}"
+  log "${itype} is offered in the GPU nodes' AZs: ${match}"
 }
 
 # Prerequisites check, run in the first phase (before any cluster is built). per-model: one GPU node per model server against
@@ -6577,7 +6649,7 @@ plan_inference_gpus() {
   [[ -n "${nodes_json}" ]] || nodes_json='{"items":[]}'
   INFERENCE_PLAN_FILE="$(mktemp)"
   local node_type_args=()
-  [[ "$(gpu_fleet)" == "p4d" ]] && node_type_args=(--node-type "${P4D_INSTANCE_TYPE}")
+  [[ "$(gpu_fleet)" == "p4d" ]] && node_type_args=(--node-type "$(gpu_instance_type)")
   printf '%s' "${nodes_json}" | python3 "${GPU_PLANNER}" --discover --profile "${profile}" --no-mig \
     --models "${GPU_MODELS_FILE}" --only "${models_csv}" ${node_type_args[@]+"${node_type_args[@]}"} >"${INFERENCE_PLAN_FILE}" || rc=$?
   if [[ ${rc} -ne 0 && ${rc} -ne 2 ]]; then
@@ -6600,17 +6672,18 @@ plan_inference_gpus() {
     done
     [[ ${running} -gt ${planned} ]] && running=${planned}
     if [[ "$(gpu_fleet)" == "p4d" ]]; then
-      # Whole p4d nodes: the plan's node count minus the p4d nodes already in the cluster.
-      local want have azs
-      want="$(python3 "${GPU_PLANNER}" --nodes-needed "${INFERENCE_PLAN_FILE}" | awk -v t="${P4D_INSTANCE_TYPE}" '$1 == t { print $2 }')"
-      have="$(kubectl get nodes -l "node.kubernetes.io/instance-type=${P4D_INSTANCE_TYPE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+      # Whole packed nodes: the plan's node count minus the ones already in the cluster of that type.
+      local want have azs itype
+      itype="$(gpu_instance_type)"
+      want="$(python3 "${GPU_PLANNER}" --nodes-needed "${INFERENCE_PLAN_FILE}" | awk -v t="${itype}" '$1 == t { print $2 }')"
+      have="$(kubectl get nodes -l "node.kubernetes.io/instance-type=${itype}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
       azs="$(aws ec2 describe-subnets --region "${AWS_REGION}" --filters "Name=tag:karpenter.sh/discovery,Values=${CLUSTER_NAME}" \
         --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null | tr '\t' '\n' | sort -u | tr '\n' ' ')"
       check_p4d_offered "${azs}" || return 1
       if [[ ${want:-0} -gt ${have:-0} ]]; then
         check_gpu_vcpu_quota $(( want - have )) || return 1
       else
-        log "The ${have} ${P4D_INSTANCE_TYPE} node(s) in the cluster hold the ${planned} model servers: no new GPU nodes needed."
+        log "The ${have} ${itype} node(s) in the cluster hold the ${planned} model servers: no new GPU nodes needed."
       fi
     elif [[ ${planned} -gt ${running} ]]; then
       check_gpu_vcpu_quota $((planned - running)) || return 1
@@ -6794,7 +6867,7 @@ phase_straiker_inference() {
       if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
         cmd+=(--set "cloudProvider=gke")
       elif [[ "$(gpu_fleet)" == "p4d" ]]; then
-        cmd+=(--set "gpuProfile=p4d") # A100 40 GB tier: nodeSelector p4d, bf16, the model's own p4d overrides
+        cmd+=(--set "gpuProfile=$(gpu_chart_profile_for_instance_type "$(gpu_instance_type)")") # the packed fleet's GPU tier
       fi
       if [[ -n "${CHART_VERSION}" ]]; then
         cmd+=(--version "${CHART_VERSION}")
