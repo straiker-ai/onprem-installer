@@ -42,7 +42,7 @@ tolerations: []
 topologySpread:
   enabled: true
   maxSkew: 1
-  minDomains: 1
+  minDomains: null # Kubernetes only accepts minDomains with whenUnsatisfiable=DoNotSchedule, and this is a soft preference
   topologyKey: kubernetes.io/hostname
   whenUnsatisfiable: ScheduleAnyway
 
