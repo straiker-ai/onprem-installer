@@ -172,6 +172,27 @@ SHARED_SECRET_PROPS="INTERNAL_API_KEY SYS__FOUNDATION_API_KEY VLLM_API_KEY SYS__
 export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${TF_WORK_ROOT}/plugin-cache}"
 mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
+# tofu init with one automatic repair: macOS clears old files from /tmp, which can leave the provider cache half-deleted, and init then
+# stops with "existing cached package ... does not match". Rebuild the installer's own cache (never one you pointed it at) and retry once.
+tofu_init() {
+  local dir=$1 out rc=0
+  shift
+  out="$(tofu -chdir="${dir}" init "$@" 2>&1)" || rc=$?
+  printf '%s\n' "${out}"
+  if [[ ${rc} -ne 0 && "${out}" == *"existing cached package"* ]]; then
+    if [[ "${TF_PLUGIN_CACHE_DIR}" == "${TF_WORK_ROOT}"/* ]]; then
+      echo "[*] The OpenTofu provider cache is inconsistent (${TF_PLUGIN_CACHE_DIR}); rebuilding it and retrying once." >&2
+      rm -rf "${TF_PLUGIN_CACHE_DIR:?}"/*
+      mkdir -p "${TF_PLUGIN_CACHE_DIR}"
+      rc=0
+      tofu -chdir="${dir}" init "$@" || rc=$?
+    else
+      echo "[*] The OpenTofu provider cache ${TF_PLUGIN_CACHE_DIR} is inconsistent: empty it and re-run." >&2
+    fi
+  fi
+  return ${rc}
+}
+
 HELM_REPO_NAME="straiker"
 HELM_REPO_URL="https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist"
 INFRA_RELEASE="straiker-system"
@@ -2207,7 +2228,7 @@ phase_eks_tfbe() {
   require_terraform_dir "${TFBE_SRC}" || return
   sync_terraform_workdir "${TFBE_SRC}" "${TFBE_DIR}"
 
-  tofu -chdir="${TFBE_DIR}" init -upgrade -input=false
+  tofu_init "${TFBE_DIR}" -upgrade -input=false
 
   # tfbe's state is local-only (bootstrapping the state bucket can't itself use
   # a remote backend), so a fresh run has no memory of a bucket a prior run
@@ -2242,7 +2263,7 @@ phase_eks_tfbe_gke() {
   require_terraform_dir "${GCP_TFBE_SRC}" || return
   sync_terraform_workdir "${GCP_TFBE_SRC}" "${GCP_TFBE_DIR}"
 
-  tofu -chdir="${GCP_TFBE_DIR}" init -upgrade -input=false
+  tofu_init "${GCP_TFBE_DIR}" -upgrade -input=false
 
   local bucket_name="${TF_PREFIX}-tfstate-${GCP_REGION}-${GCP_PROJECT_OPT}"
   if gcloud storage buckets describe "gs://${bucket_name}" >/dev/null 2>&1; then
@@ -2421,7 +2442,7 @@ then re-run this phase."
     fi
   fi
 
-  tofu -chdir="${EKS_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${EKS_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${EKS_DIR}" apply -auto-approve -input=false
 
   local cluster_name cluster_endpoint node_role_arn queue_name
@@ -2484,7 +2505,7 @@ phase_eks_cluster_gke() {
 
   write_gke_backend_config "${bucket_name}" "${GKE_DIR}" "gke"
 
-  tofu -chdir="${GKE_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${GKE_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${GKE_DIR}" apply -auto-approve -input=false \
     -var="region=${GCP_REGION}" -var="project_id=${GCP_PROJECT_OPT}" -var="cluster_name=${CLUSTER_NAME}" \
     -var="provision_strategy=${PROVISION_STRATEGY}"
@@ -2554,7 +2575,7 @@ phase_karpenter() {
     fi
 
     write_eks_backend_config "${bucket_name}"
-    tofu -chdir="${EKS_DIR}" init -upgrade -input=false -migrate-state -force-copy
+    tofu_init "${EKS_DIR}" -upgrade -input=false -migrate-state -force-copy
 
     cluster_name="$(tofu -chdir="${EKS_DIR}" output -raw cluster_name 2>/dev/null || echo "")"
     queue_name="$(tofu -chdir="${EKS_DIR}" output -raw karpenter_queue_name 2>/dev/null || echo "")"
@@ -2622,7 +2643,7 @@ phase_karpenter_gke() {
     fi
 
     write_gke_backend_config "${bucket_name}" "${GKE_DIR}" "gke"
-    tofu -chdir="${GKE_DIR}" init -upgrade -input=false -migrate-state -force-copy
+    tofu_init "${GKE_DIR}" -upgrade -input=false -migrate-state -force-copy
 
     cluster_name="$(tofu -chdir="${GKE_DIR}" output -raw cluster_name 2>/dev/null || echo "")"
     karpenter_sa="$(tofu -chdir="${GKE_DIR}" output -raw karpenter_service_account_email 2>/dev/null || echo "")"
@@ -2814,7 +2835,7 @@ phase_aws_artifacts() {
 
   write_artifacts_backend_config "${bucket_name}"
 
-  tofu -chdir="${ARTIFACTS_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${ARTIFACTS_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${ARTIFACTS_DIR}" apply -auto-approve -input=false \
     -var="region=${AWS_REGION}" \
     -var="prefix=${TF_PREFIX}" \
@@ -3075,7 +3096,7 @@ EOF
       -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
   }
 
-  tofu -chdir="${DATA_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${DATA_DIR}" -upgrade -input=false -migrate-state -force-copy
   local use_ses=false
   ses_identity_verified && use_ses=true
   data_apply "${use_ses}"
@@ -3208,7 +3229,7 @@ phase_aws_artifacts_gke() {
 
   write_gke_backend_config "${bucket_name}" "${GCP_ARTIFACTS_DIR}" "artifacts"
 
-  tofu -chdir="${GCP_ARTIFACTS_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${GCP_ARTIFACTS_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${GCP_ARTIFACTS_DIR}" apply -auto-approve -input=false \
     -var="region=${GCP_REGION}" \
     -var="project_id=${GCP_PROJECT_OPT}" \
@@ -7112,7 +7133,7 @@ phase_edge_infra() {
   san_hostnames_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
     "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
 
-  tofu -chdir="${EDGE_INFRA_DIR}" init -upgrade -input=false -migrate-state -force-copy
+  tofu_init "${EDGE_INFRA_DIR}" -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${EDGE_INFRA_DIR}" apply -auto-approve -input=false \
     -var="region=${AWS_REGION}" \
     -var="prefix=${TF_PREFIX}" \
