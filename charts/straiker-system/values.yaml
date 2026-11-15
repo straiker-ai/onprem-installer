@@ -170,8 +170,16 @@ eks:
     # charts/straiker-inference's gpuProfiles) — verified against Straiker's
     # own production config, not just the older g5+bitsandbytes assumption.
     instanceFamilies: ["g4dn", "g5", "g6", "g6e"]
+    # Exact instance types (node.kubernetes.io/instance-type), on top of the families. Empty = any size of those
+    # families. The customer GPU pool sets ["p4d.24xlarge"] with instanceFamilies ["p4d"] (install-straiker.sh
+    # --gpu-fleet p4d); test installs keep the per-model g4dn/g5/g6/g6e tiers.
+    instanceTypes: []
     nodeClass:
       name: straiker-gpu
+      # EC2 On-Demand Capacity Reservations / Capacity Blocks the GPU nodes may launch into (Karpenter
+      # capacityReservationSelectorTerms, e.g. [{id: cr-0123...}]). Set: the pool also accepts capacity type
+      # "reserved" and Karpenter uses the reservation first. p4d capacity is scarce in most regions.
+      capacityReservationSelectorTerms: []
       amiSelectorTerms:
         - alias: al2023@latest
       subnetSelectorTags: {}

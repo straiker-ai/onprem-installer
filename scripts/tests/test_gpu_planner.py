@@ -199,5 +199,38 @@ class Discovery(unittest.TestCase):
         self.assertEqual(gp.nodes_from_kubectl(doc), [])
 
 
+class CustomerP4dPool(unittest.TestCase):
+    """Customer installs: the whole fleet on p4d.24xlarge (8x A100 40 GB), one server per GPU."""
+
+    def test_full_fleet_needs_two_p4d_nodes(self):
+        nodes = gp.project_inventory(MODELS, node_type="p4d.24xlarge")
+        self.assertEqual(len(nodes), 2)  # 5 models x 2 replicas = 10 servers -> ceil(10 / 8)
+        out = gp.plan(MODELS, nodes)
+        self.assertTrue(out["feasible"], out)
+        self.assertEqual(out["sharing"], "none")
+        self.assertEqual(out["gpus_used"], 10)
+        self.assertTrue(all(p["gpu_product"] == "A100-SXM4-40GB" for p in out["placements"]))
+
+    def test_thanos_unquantized_on_a100(self):
+        out = gp.plan(MODELS, gp.project_inventory(MODELS, node_type="p4d.24xlarge"))
+        thanos = [p for p in out["placements"] if p["model"] == "thanos"]
+        self.assertEqual(len(thanos), 2)
+        self.assertTrue(all("quantization" not in p["vllm"] for p in thanos))
+
+    def test_nodes_needed_from_saved_plan(self):
+        nodes = gp.project_inventory(MODELS, node_type="p4d.24xlarge")
+        doc = {**gp.plan(MODELS, nodes), "source": "projected", "projected_nodes": nodes}
+        self.assertEqual(gp.projected_nodes(doc), {"p4d.24xlarge": 2})
+        self.assertIn("2 x p4d.24xlarge", gp.summary(doc))
+
+    def test_one_model_fits_one_node(self):
+        doc = {**MODELS, "models": [m for m in MODELS["models"] if m["name"] == "thanos"]}
+        self.assertEqual(len(gp.project_inventory(doc, node_type="p4d.24xlarge")), 1)
+
+    def test_unknown_node_type_is_refused(self):
+        with self.assertRaises(ValueError):
+            gp.project_inventory(MODELS, node_type="p9.huge")
+
+
 if __name__ == "__main__":
     unittest.main()

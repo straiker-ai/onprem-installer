@@ -16,7 +16,8 @@ Everything is created in **one AWS account and one region**.
 | MSK Serverless, ElastiCache Serverless (TLS), EFS, DynamoDB, Secrets Manager | data services | models volume is EFS |
 | ClickHouse | 1 shard x 2 replicas + 3-member Keeper | servers on the `straiker-clickhouse` pool (`r6g/r7g.2xlarge`) |
 | Platform services | foundation, registry, databridge, portico, grid, api-gateway, ingest | grid's ClickHouse migrations run as Replicated tables |
-| Products | frontend + dex + bifrost, 5 GPU inference models, Defend, Ascend | AI provider: Bedrock by default |
+| Products | frontend + dex + bifrost, 5 GPU inference models (x2 replicas), Defend, Ascend | AI provider: Bedrock by default |
+| GPU nodes | customers: **2 x p4d.24xlarge** (pool grows to 4, never expired by age); test installs: one g5/g6e-class node per model server (`--gpu-fleet per-model`) | see "GPU fleet" in section 2 |
 | Edge | **One internet-facing Application Load Balancer** (`--edge-type xalb`, the default): ACM certificates, TLS 1.2+, **AWS WAF**. Hosts `straiker.<domain>`, `straiker-defend.<domain>`, `straiker-ascend.<domain>` and the api-gateway `api.<domain>` | `terraform/aws/edge` (WAF, IAM, certificate) + AWS Load Balancer Controller; Caddy (`--edge-type internal`) is for offline tests only |
 
 **AWS WAF** (`terraform/aws/edge/waf.tf`, Web ACL `<cluster>-edge`): AWS managed rule groups (IP reputation, Common, Known bad inputs), a
@@ -51,14 +52,23 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
 - Bedrock model access for `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`
   (Bedrock console > Model access; **console only, one time per account**). The installer's preflight blocks with a
   clear message if it is missing.
-- **GPU quota, requested before the install** (a new account usually has 0-8 vCPUs, and the models cannot start without it).
-  The fleet is 10 model servers, one GPU node each, so about **80 vCPUs** of "Running On-Demand G and VT instances"
-  (quota code `L-DB2E81BA`, per region). Ask for **512 vCPUs** (Straiker's standard request; it leaves room for upgrades, extra replicas and larger GPU nodes):
-  `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-DB2E81BA --desired-value 512`
-  (approval takes minutes to hours; check with `aws service-quotas get-service-quota ...`). The quota counts every
-  G/VT instance already running in the account, so the installer subtracts those and stops in its first phase if too
-  little is left. A100/H100 (p4d, p4de, p5) use a different quota, "Running On-Demand P instances" (`L-417A185B`),
-  about 192 vCPUs for two p4d.24xlarge; those instance families are not enabled in the installer yet.
+- **GPU fleet and its quota, requested before the install** (a new account usually has 0-8 vCPUs, and the models cannot
+  start without it). The fleet is 10 model servers (5 models x 2 replicas), one GPU each. Two shapes (`--gpu-fleet`,
+  remembered):
+
+  | `--gpu-fleet` | For | Nodes | EC2 quota (per region) | Ask for |
+  |---|---|---|---|---|
+  | **`p4d`** (default for a new install) | **customers** (the reference architecture) | `p4d.24xlarge` (8x A100 40 GB, 96 vCPU): **2 nodes** for the fleet, the pool grows to `--gpu-max-nodes` (default **4**) | "Running On-Demand P instances", `L-417A185B`: 96 vCPUs per node | **384 vCPUs** (4 nodes) |
+  | `per-model` | Straiker test installs (dl-test) | one `g4dn/g5/g6/g6e` node per server, each model's validated tier | "Running On-Demand G and VT instances", `L-DB2E81BA` | 512 vCPUs |
+
+  `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-417A185B --desired-value 384 --region <region>`
+  (approval takes minutes to days for P instances). The quota counts every instance of those families already running in
+  the account, so the installer subtracts those and stops in its first phase if the fleet's nodes do not fit; for p4d it
+  only warns when the quota covers the 2 nodes but not the pool's maximum. **p4d.24xlarge is offered in some regions and
+  AZs only**: the first phase stops if the region has none, and the inference phase stops if none of the GPU nodes' AZs
+  offers it (`min` strategy uses one AZ: pick `ha`, or subnets in an AZ that has it). p4d On-Demand capacity is often
+  short: reserve it (EC2 Capacity Reservation or Capacity Block) and pass `--gpu-capacity-reservation cr-...` so Karpenter
+  launches into it first. An install that already runs its models keeps `per-model` until `--gpu-fleet p4d` is passed.
 - **A domain** (`--domain customer.com`). The console hosts are `straiker.`, `straiker-defend.` and `straiker-ascend.<domain>`; the
   api-gateway is `api.<domain>` (change it with `--installer-arg --gateway-domain --installer-arg <name>`). With `--route53` (the domain's
   public zone is in this account) both certificates and every DNS record are automatic; `--domain` must then be the zone's own name. Otherwise
@@ -107,8 +117,10 @@ scripts/install-data-layer.sh \
   --profile <aws-profile> --expect-account <account-id> \
   --domain <customer.com> --route53 \
   --alarm-email <ops@customer.com> \
+  [--gpu-fleet per-model] \
   [--customer-key-file ./key.txt]
 ```
+`--gpu-fleet per-model` is for Straiker test installs only; customers keep the p4d default.
 Without the zone in this account: `--certificate-arn <arn>` instead of `--route53`. Questions asked on the first run also include
 `--admin-email` (the first Cognito admin), passed with `--installer-arg --admin-email --installer-arg <address>`.
 
@@ -234,7 +246,12 @@ Until then Ascend keeps grading through v1, which is safe.
   Route53 records the installer wrote stay behind: delete them by hand after an uninstall. The TLS-on-the-load-balancer path without the AWS
   Load Balancer Controller (in-tree NLB with a certificate) has been rendered and tested offline only; check it on the first real install.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
-- **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
+- **GPU sizing**: customers run the p4d fleet (all models unquantized on A100 40 GB, thanos at 32k context); Straiker's test
+  installs run `--gpu-fleet per-model` (vision/wanda/kev-non-agentic on g5, kev-agentic on g6, thanos on g6e; the SaaS regions
+  also use g6e). Switching an install between the two: `--gpu-fleet <shape> --phase straiker-system,straiker-inference --rerun-phase`;
+  the model servers move to the new nodes and Karpenter removes the empty old ones after an hour.
+- **thanos model profile restored.** It was dropped from `charts/straiker-inference` on 2026-11-13 (commit `1cff360`), so a new or
+  re-run `inference-thanos` rendered with no model path. dl-test kept running only because its release predates that change.
 - **Dashboards and tracing** (Grafana, OpenTelemetry, Argo CD from the reference architecture) are not part of this install; CloudWatch
   covers metrics, logs and alarms. Re-run `--phase observability --rerun-phase` after changing the edge (the ALB alarms follow the
   ALB) or adding an Aurora cluster.

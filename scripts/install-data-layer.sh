@@ -32,6 +32,7 @@ DOMAIN=""
 CERT_ARN=""
 ROUTE53=false
 ALARM_EMAILS=()
+GPU_FLEET=""
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -72,6 +73,10 @@ Options:
   --multiarch-override R=U   image whose copy in your ECR lacks arm64, as <repo>:<tag>=<upstream> (repeatable).
                              Default: maximhq/bifrost at the tag pinned in charts/straiker-artifact, from Docker Hub.
                              Pass --multiarch-override none to disable.
+  --gpu-fleet F              p4d (default for a new install, customers): the model servers on p4d.24xlarge nodes (2 for the full
+                             fleet, pool up to 4; needs the EC2 P-instance quota). per-model: one g5/g6e-class node
+                             per server (Straiker test installs). Unset: a new install gets p4d, an existing one
+                             keeps what it runs
   --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
   --installer-arg ARG        extra argument for install-straiker.sh (repeatable)
   --timeout-minutes N        give up waiting after N minutes in total (default: 240)
@@ -101,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --route53) ROUTE53=true; shift ;;
     --certificate-arn) CERT_ARN="${2:-}"; shift 2 ;;
     --alarm-email) ALARM_EMAILS+=("${2:-}"); shift 2 ;;
+    --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -216,7 +222,12 @@ About to install into AWS account ${ACCOUNT_ID}, region ${REGION}:
                    the platform services, Ascend and Defend, GPU nodes for the inference models, and
                    for xalb/alb an Application Load Balancer with AWS WAF, and CloudWatch (Container
                    Insights, container logs, alarms)
-  time / cost .... about 1.5-2 hours, and roughly 6-8 USD per hour while it runs (GPU nodes dominate)
+  GPU fleet ...... $(case "${GPU_FLEET}" in
+                       per-model) echo "per-model (one g5/g6e-class node per model server)" ;;
+                       p4d) echo "p4d (2x p4d.24xlarge, ~66 USD/hour; pool grows to 4)" ;;
+                       *) echo "p4d for a new install (2x p4d.24xlarge, ~66 USD/hour); an existing install keeps its fleet" ;;
+                     esac)
+  time / cost .... about 1.5-2 hours; roughly $([[ "${GPU_FLEET}" == per-model ]] && echo "6-8" || echo "70-75") USD per hour while it runs (GPU nodes dominate)
 EOF
 }
 
@@ -244,6 +255,7 @@ while IFS= read -r l; do base_args+=("$l"); done < <(installer_base_args)
 run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${PROVISION_STRATEGY}"
   --straiker-customer-name "${CUSTOMER_NAME}" --products "${PRODUCTS}" --ai-provider-mode "${AI_PROVIDER_MODE}"
   --edge-type "${EDGE_TYPE}" --yes)
+[[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
 if [[ -n "${DOMAIN}" ]]; then
   run_args+=(--custom-domain "${DOMAIN}")

@@ -165,6 +165,19 @@ kev-agentic:
       KEV_BACKEND_WAIT_S: "900"
       VLLM_MAX_MODEL_LEN: "9216"
       VLLM_GPU_MEMORY_UTILIZATION: "0.90"
+# thanos (Ascend's attack model). Unquantized bf16 needs ~30 GB: g6e (L40S 48 GB, the SaaS tier) or p4d/a100 (A100 40 GB,
+# the customer GPU pool). g5/l4 (24 GB) only fit it quantized with bitsandbytes (the image ships vllm-bnb-plugin): the
+# test profile's choice, never production's.
+thanos:
+  storagePrefix: thanos
+  servedNames: [thanos]
+  defaultGpuProfile: g6e
+  gpuOverrides:
+    g6e:  {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.90"}
+    p4d:  {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.95"}
+    a100: {dtype: bfloat16, max_model_len: "32768", mem_fraction_static: "0.95"}
+    g5:   {dtype: bfloat16, max_model_len: "16384", mem_fraction_static: "0.90", quantization: bitsandbytes}
+    l4:   {dtype: bfloat16, max_model_len: "16384", mem_fraction_static: "0.90", quantization: bitsandbytes}
 {{- end }}
 
 {{/*
@@ -192,6 +205,8 @@ g5:
     requests: {cpu: "4", memory: 16Gi}
     limits: {cpu: "8", memory: 24Gi}
 p4d:
+  # p4d.24xlarge: 8x A100 40 GB, 96 vCPU, 1152 GiB per node; one server per GPU, up to 8 servers per node (the
+  # customer GPU pool). 8 servers x these requests (64 vCPU, 256 GiB) leave room for the node's own daemons.
   dtype: bfloat16
   max_model_len: "65536"
   mem_fraction_static: "0.9"

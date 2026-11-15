@@ -260,6 +260,19 @@ GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
 # EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one server needs about 4.2 vCPUs, so Karpenter picks a .2xlarge node (8 vCPUs).
 GPU_VCPU_QUOTA_CODE="L-DB2E81BA"
 GPU_NODE_VCPUS=8
+# GPU fleet shape (remembered): p4d (default; customer installs, the reference architecture) packs every model server onto
+# p4d.24xlarge nodes, 8x A100 40 GB each, one server per GPU: the full fleet (10 servers) is 2 nodes and the pool may grow
+# to GPU_MAX_NODES. per-model: one small node per server on the tier each model is validated for (g4dn/g5/g6/g6e), for
+# Straiker's own test installs. An install whose models already run without a remembered choice keeps per-model.
+GPU_FLEET="${GPU_FLEET:-}"
+GPU_MAX_NODES="${GPU_MAX_NODES:-}"
+# Optional EC2 Capacity Reservation(s) / Capacity Block(s) for the GPU nodes (comma-separated cr-... ids). Remembered.
+GPU_CAPACITY_RESERVATION="${GPU_CAPACITY_RESERVATION:-}"
+P4D_INSTANCE_TYPE="p4d.24xlarge"
+P4D_GPUS_PER_NODE=8
+P4D_NODE_VCPUS=96
+# EC2 service quota "Running On-Demand P instances" (vCPUs): p4d/p4de/p5 count here, not in the G/VT quota.
+P_VCPU_QUOTA_CODE="L-417A185B"
 DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
 # Bedrock inference profiles Argus v3 may invoke (space-separated), as SaaS grants its argus pods: sol is the engine's context
@@ -756,6 +769,14 @@ Options:
                                    production (default): one model server per GPU, never shared or quantized, on the GPU
                                    tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
                                    that already exist and quantize thanos. NEVER use test for a customer. Remembered.
+  --gpu-fleet <p4d|per-model>      p4d (default; customer installs): every model server on p4d.24xlarge nodes (8x A100
+                                   40 GB), one server per GPU; the full fleet is 2 nodes and the pool grows to
+                                   --gpu-max-nodes. Needs the EC2 "Running On-Demand P instances" quota (96 vCPUs per
+                                   node). per-model: one g4dn/g5/g6/g6e node per server, each model's validated tier
+                                   (Straiker test installs). An existing install keeps what it runs. Remembered.
+  --gpu-max-nodes <n>              p4d fleet: most GPU nodes the pool may grow to (default 4). Remembered.
+  --gpu-capacity-reservation <ids> EC2 Capacity Reservation / Capacity Block id(s) (cr-..., comma-separated) the GPU
+                                   nodes launch into first. Remembered.
   --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
                                    fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
                                    use --ai-provider-mode bedrock for Ascend). Remembered.
@@ -1432,13 +1453,20 @@ show_cost_estimate() {
   fi
 
   if [[ "${gpu_node_count}" -gt 0 ]]; then
-    # One dedicated GPU node per model regardless of cloud (each inference
-    # model is its own Karpenter-provisioned node in this installer's
-    # design) -- g4dn.xlarge (AWS) / a T4-class equivalent (GKE), both
-    # 16GB-tier, matching every current model's defaultGpuProfile: g4dn in
-    # charts/straiker-inference.
-    line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 1.006 * h }')"
-    echo " GPU inference nodes (${gpu_node_count}x 24 GB-class GPU at ~\$1.01/h, 2 replicas of each of: ${models[*]}): \$${line_cost}/mo (A100 hardware costs more)"
+    if [[ "${CLOUD_PROVIDER}" != "gke" && "$(gpu_fleet)" == "p4d" ]]; then
+      # Customer fleet: p4d.24xlarge (8x A100 40 GB) at ~$32.77/h on-demand (us-east-1 list price), one server per GPU.
+      local p4d_nodes p4d_max p4d_max_cost
+      p4d_nodes="$(p4d_nodes_for "${gpu_node_count}")"
+      p4d_max="$(get_metadata "gpu_max_nodes")"
+      p4d_max="${p4d_max:-4}"
+      line_cost="$(awk -v n="${p4d_nodes}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 32.77 * h }')"
+      p4d_max_cost="$(awk -v n="${p4d_max}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 32.77 * h }')"
+      echo " GPU inference nodes (${p4d_nodes}x ${P4D_INSTANCE_TYPE} at ~\$32.77/h, ${gpu_node_count} model servers = 2 replicas of each of: ${models[*]}): \$${line_cost}/mo (\$${p4d_max_cost}/mo at the pool's ${p4d_max}-node maximum)"
+    else
+      # per-model fleet: one 24 GB-class GPU node per model server (thanos on g6e costs more).
+      line_cost="$(awk -v n="${gpu_node_count}" -v h="${hours_per_month}" 'BEGIN { printf "%.2f", n * 1.006 * h }')"
+      echo " GPU inference nodes (${gpu_node_count}x 24 GB-class GPU at ~\$1.01/h, 2 replicas of each of: ${models[*]}): \$${line_cost}/mo"
+    fi
     total="$(awk -v t="${total}" -v l="${line_cost}" 'BEGIN { printf "%.2f", t + l }')"
     echo ""
   else
@@ -1677,6 +1705,18 @@ parse_args() {
         ;;
       --inference-profile)
         INFERENCE_PROFILE=${2:-}
+        shift 2
+        ;;
+      --gpu-fleet)
+        GPU_FLEET=${2:-}
+        shift 2
+        ;;
+      --gpu-max-nodes)
+        GPU_MAX_NODES=${2:-}
+        shift 2
+        ;;
+      --gpu-capacity-reservation)
+        GPU_CAPACITY_RESERVATION=${2:-}
         shift 2
         ;;
       --inference-mode)
@@ -3728,6 +3768,25 @@ phase_straiker_system() {
   # gated by product selection at all.
   if [[ ",${PRODUCTS_OPT}," != *",ascend,"* ]]; then
     cmd+=(--set "karpenter.iris=null")
+  fi
+
+  # GPU pool (EKS): the customer p4d fleet is p4d.24xlarge only, capped at --gpu-max-nodes, and never expired by age
+  # (replacing a node restarts up to 8 model servers and has to win scarce p4d capacity back). per-model keeps the
+  # chart's g4dn/g5/g6/g6e pool. A capacity reservation applies to either.
+  if [[ "${CLOUD_PROVIDER}" != "gke" ]]; then
+    if [[ "$(gpu_fleet)" == "p4d" ]]; then
+      cmd+=(
+        --set "eks.gpu.instanceFamilies={p4d}"
+        --set "eks.gpu.instanceTypes={${P4D_INSTANCE_TYPE}}"
+        --set-string "karpenter.gpu.nodePool.limits.nvidia\\.com/gpu=$(( $(get_metadata "gpu_max_nodes") * P4D_GPUS_PER_NODE ))"
+        --set-string "karpenter.gpu.nodePool.expireAfter=Never"
+      )
+    fi
+    local cr cr_i=0
+    for cr in $(printf '%s' "$(get_metadata "gpu_capacity_reservation")" | tr ',' ' '); do
+      cmd+=(--set-string "eks.gpu.nodeClass.capacityReservationSelectorTerms[${cr_i}].id=${cr}")
+      cr_i=$((cr_i + 1))
+    done
   fi
 
   local values_file
@@ -6237,6 +6296,19 @@ inference_mode() {
   local v="${INFERENCE_MODE:-$(get_metadata "inference_mode")}"
   printf '%s' "${v:-vllm}"
 }
+# --gpu-fleet: flag > remembered > per-model for an install whose inference phase already ran (it keeps the nodes it has;
+# switch it explicitly) > p4d.
+gpu_fleet() {
+  local v="${GPU_FLEET:-$(get_metadata "gpu_fleet")}"
+  if [[ -z "${v}" && "$(get_phase_status "straiker-inference")" == "done" ]]; then
+    v="per-model"
+  fi
+  printf '%s' "${v:-p4d}"
+}
+# GPU nodes the p4d fleet needs for N model servers (one per GPU).
+p4d_nodes_for() {
+  printf '%s' $(( ($1 + P4D_GPUS_PER_NODE - 1) / P4D_GPUS_PER_NODE ))
+}
 
 remember_inference_settings() {
   local profile mode
@@ -6263,6 +6335,27 @@ remember_inference_settings() {
     done
     log "WARNING: --inference-models ${INFERENCE_MODELS}: only part of the fleet is deployed. For testing, never for a customer."
   fi
+  local fleet max_nodes crs
+  fleet="$(gpu_fleet)"
+  max_nodes="${GPU_MAX_NODES:-$(get_metadata "gpu_max_nodes")}"
+  max_nodes="${max_nodes:-4}"
+  crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
+  case "${fleet}" in p4d | per-model) ;; *)
+    echo "ERROR: --gpu-fleet must be 'p4d' or 'per-model', got '${fleet}'." >&2
+    return 1
+    ;;
+  esac
+  if [[ ! "${max_nodes}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --gpu-max-nodes must be a positive whole number, got '${max_nodes}'." >&2
+    return 1
+  fi
+  if [[ -n "${crs}" && ! "${crs}" =~ ^cr-[0-9a-f]+(,cr-[0-9a-f]+)*$ ]]; then
+    echo "ERROR: --gpu-capacity-reservation takes cr-... ids, comma-separated, got '${crs}'." >&2
+    return 1
+  fi
+  set_metadata "gpu_fleet" "${fleet}"
+  set_metadata "gpu_max_nodes" "${max_nodes}"
+  set_metadata "gpu_capacity_reservation" "${crs}"
   set_metadata "inference_profile" "${profile}"
   set_metadata "inference_mode" "${mode}"
   if [[ "${profile}" == "test" ]]; then
@@ -6275,34 +6368,71 @@ remember_inference_settings() {
 
 # The G/VT vCPU quota gates how many GPU nodes Karpenter can start: too low and servers sit Pending forever, so say so up front.
 check_gpu_vcpu_quota() {
-  local nodes=$1 needed quota used available
+  local nodes=$1 needed quota used available quota_code quota_name family_re node_vcpus request
   [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
-  needed=$((nodes * GPU_NODE_VCPUS))
-  if ! quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code "${GPU_VCPU_QUOTA_CODE}" \
+  if [[ "$(gpu_fleet)" == "p4d" ]]; then
+    quota_code="${P_VCPU_QUOTA_CODE}" quota_name="Running On-Demand P instances" family_re='^p[0-9]' node_vcpus=${P4D_NODE_VCPUS}
+    local max_nodes
+    max_nodes="$(get_metadata "gpu_max_nodes")"
+    request=$(( ${max_nodes:-4} * P4D_NODE_VCPUS ))
+  else
+    quota_code="${GPU_VCPU_QUOTA_CODE}" quota_name="Running On-Demand G and VT instances" family_re='^(g|vt)[0-9]' node_vcpus=${GPU_NODE_VCPUS}
+    request=512
+  fi
+  needed=$((nodes * node_vcpus))
+  if ! quota="$(aws service-quotas get-service-quota --service-code ec2 --quota-code "${quota_code}" \
       --region "${AWS_REGION}" --query 'Quota.Value' --output text 2>/dev/null)"; then
-    log "WARNING: could not read the EC2 'Running On-Demand G and VT instances' quota; ${needed} vCPUs are needed for ${nodes} GPU nodes."
+    log "WARNING: could not read the EC2 '${quota_name}' quota; ${needed} vCPUs are needed for ${nodes} GPU nodes."
     return 0
   fi
-  # The quota counts every G/VT instance already running in the account (older model nodes, other teams), not just ours.
+  # The quota counts every instance of those families already running in the account (older model nodes, other teams).
   used="$(aws ec2 describe-instances --region "${AWS_REGION}" --filters Name=instance-state-name,Values=pending,running \
     --query 'Reservations[].Instances[].[InstanceType,CpuOptions.CoreCount,CpuOptions.ThreadsPerCore]' --output text 2>/dev/null \
-    | awk '$1 ~ /^(g|vt)[0-9]/ { n += $2 * $3 } END { print n + 0 }')"
+    | awk -v re="${family_re}" '$1 ~ re { n += $2 * $3 } END { print n + 0 }')"
   available="$(awk -v q="${quota}" -v u="${used:-0}" 'BEGIN { printf "%d", q - u }')"
   if [[ "${available}" -lt "${needed}" && -n "${INFERENCE_MODELS}" ]]; then
     # --inference-models is the deliberate partial test: servers that do not fit simply wait (Pending) for quota.
-    log "WARNING: EC2 G/VT quota leaves ${available} of the ${needed} vCPUs the missing GPU nodes need (${used:-0} of ${quota} in use); those servers will stay Pending until the quota is raised."
+    log "WARNING: EC2 '${quota_name}' quota leaves ${available} of the ${needed} vCPUs the missing GPU nodes need (${used:-0} of ${quota} in use); those servers will stay Pending until the quota is raised."
     INFERENCE_NO_WAIT=true # helm must not wait for pods that cannot get a node
     return 0
   fi
   if [[ "${available}" -lt "${needed}" ]]; then
-    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase to 512 vCPUs (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}), then re-run this phase."
+    mark_phase_blocked "EC2 quota '${quota_name}' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase to ${request} vCPUs (Service Quotas, code ${quota_code}: aws service-quotas request-service-quota-increase --service-code ec2 --quota-code ${quota_code} --desired-value ${request} --region ${AWS_REGION}), then re-run this phase."
     return 1
   fi
-  log "EC2 G/VT vCPU quota OK: ${available} free of ${quota} (${used:-0} in use), ${needed} needed for ${nodes} GPU nodes."
+  log "EC2 '${quota_name}' quota OK: ${available} vCPUs free of ${quota} (${used:-0} in use), ${needed} needed for ${nodes} GPU nodes."
+  if [[ "$(gpu_fleet)" == "p4d" ]] && awk -v a="${available}" -v r="${request}" -v u="${used:-0}" 'BEGIN { exit !(a + u < r) }'; then
+    log "WARNING: the P quota (${quota} vCPUs) does not cover the pool's maximum of $(( request / P4D_NODE_VCPUS )) p4d nodes (${request} vCPUs): the fleet runs, but cannot scale that far. Request ${request} (code ${quota_code})."
+  fi
 }
 
-# Prerequisites check, run in the first phase (before any cluster is built): production needs one GPU node per model server, and a
-# new AWS account usually has a G/VT quota of 0-8 vCPUs, so the fleet cannot start until the customer raises it.
+# p4d.24xlarge is offered in some regions and AZs only. $1 = space-separated AZs the GPU nodes may use (empty = any AZ of the
+# region). Blocks when none of them offers it.
+check_p4d_offered() {
+  local azs=$1 offered match="" az
+  offered="$(aws ec2 describe-instance-type-offerings --region "${AWS_REGION}" --location-type availability-zone \
+    --filters "Name=instance-type,Values=${P4D_INSTANCE_TYPE}" --query 'InstanceTypeOfferings[].Location' --output text 2>/dev/null || true)"
+  if [[ -z "${offered}" || "${offered}" == "None" ]]; then
+    mark_phase_blocked "${P4D_INSTANCE_TYPE} is not offered in ${AWS_REGION}. Install in a region that has it, or use --gpu-fleet per-model."
+    return 1
+  fi
+  if [[ -z "${azs}" ]]; then
+    log "${P4D_INSTANCE_TYPE} is offered in ${AWS_REGION}: $(printf '%s' "${offered}" | tr '\t' ' ')."
+    return 0
+  fi
+  for az in ${azs}; do
+    [[ " $(printf '%s' "${offered}" | tr '\t' ' ') " == *" ${az} "* ]] && match+="${az} "
+  done
+  if [[ -z "${match}" ]]; then
+    mark_phase_blocked "${P4D_INSTANCE_TYPE} is not offered in the AZs the GPU nodes may use (${azs}); it is offered in: $(printf '%s' "${offered}" | tr '\t' ' '). Use --provision-strategy ha (more AZs) or subnets in one of those AZs."
+    return 1
+  fi
+  log "${P4D_INSTANCE_TYPE} is offered in the GPU nodes' AZs: ${match}"
+}
+
+# Prerequisites check, run in the first phase (before any cluster is built). per-model: one GPU node per model server against
+# the G/VT quota. p4d: 8 servers per node against the P quota. A new AWS account usually has 0-8 vCPUs of either, so the
+# fleet cannot start until the customer raises it.
 preflight_gpu_quota() {
   [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
   [[ "$(inference_mode)" == "vllm" && "$(inference_profile)" == "production" ]] || return 0
@@ -6312,7 +6442,12 @@ preflight_gpu_quota() {
   done < <(inference_models_for_products)
   [[ ${count} -gt 0 ]] || return 0
   require_command aws
-  check_gpu_vcpu_quota $((count * 2))
+  if [[ "$(gpu_fleet)" == "p4d" ]]; then
+    check_p4d_offered "" || return 1
+    check_gpu_vcpu_quota "$(p4d_nodes_for $((count * 2)))"
+  else
+    check_gpu_vcpu_quota $((count * 2))
+  fi
 }
 
 # Advertise each GPU N times (test profile time-slicing) by upgrading straiker-system's device plugin; 0 turns it off.
@@ -6343,8 +6478,10 @@ plan_inference_gpus() {
   nodes_json="$(kubectl get nodes -o json 2>/dev/null || true)"
   [[ -n "${nodes_json}" ]] || nodes_json='{"items":[]}'
   INFERENCE_PLAN_FILE="$(mktemp)"
+  local node_type_args=()
+  [[ "$(gpu_fleet)" == "p4d" ]] && node_type_args=(--node-type "${P4D_INSTANCE_TYPE}")
   printf '%s' "${nodes_json}" | python3 "${GPU_PLANNER}" --discover --profile "${profile}" --no-mig \
-    --models "${GPU_MODELS_FILE}" --only "${models_csv}" >"${INFERENCE_PLAN_FILE}" || rc=$?
+    --models "${GPU_MODELS_FILE}" --only "${models_csv}" ${node_type_args[@]+"${node_type_args[@]}"} >"${INFERENCE_PLAN_FILE}" || rc=$?
   if [[ ${rc} -ne 0 && ${rc} -ne 2 ]]; then
     mark_phase_blocked "The GPU planner failed (exit ${rc}); see its error above."
     return 1
@@ -6364,7 +6501,20 @@ plan_inference_gpus() {
         | grep -c "^pod/inference-${m}-" || true)))
     done
     [[ ${running} -gt ${planned} ]] && running=${planned}
-    if [[ ${planned} -gt ${running} ]]; then
+    if [[ "$(gpu_fleet)" == "p4d" ]]; then
+      # Whole p4d nodes: the plan's node count minus the p4d nodes already in the cluster.
+      local want have azs
+      want="$(python3 "${GPU_PLANNER}" --nodes-needed "${INFERENCE_PLAN_FILE}" | awk -v t="${P4D_INSTANCE_TYPE}" '$1 == t { print $2 }')"
+      have="$(kubectl get nodes -l "node.kubernetes.io/instance-type=${P4D_INSTANCE_TYPE}" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+      azs="$(aws ec2 describe-subnets --region "${AWS_REGION}" --filters "Name=tag:karpenter.sh/discovery,Values=${CLUSTER_NAME}" \
+        --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null | tr '\t' '\n' | sort -u | tr '\n' ' ')"
+      check_p4d_offered "${azs}" || return 1
+      if [[ ${want:-0} -gt ${have:-0} ]]; then
+        check_gpu_vcpu_quota $(( want - have )) || return 1
+      else
+        log "The ${have} ${P4D_INSTANCE_TYPE} node(s) in the cluster hold the ${planned} model servers: no new GPU nodes needed."
+      fi
+    elif [[ ${planned} -gt ${running} ]]; then
       check_gpu_vcpu_quota $((planned - running)) || return 1
     else
       log "All ${planned} model servers already run: no new GPU nodes needed."
@@ -6545,6 +6695,8 @@ phase_straiker_inference() {
       fi
       if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
         cmd+=(--set "cloudProvider=gke")
+      elif [[ "$(gpu_fleet)" == "p4d" ]]; then
+        cmd+=(--set "gpuProfile=p4d") # A100 40 GB tier: nodeSelector p4d, bf16, the model's own p4d overrides
       fi
       if [[ -n "${CHART_VERSION}" ]]; then
         cmd+=(--version "${CHART_VERSION}")

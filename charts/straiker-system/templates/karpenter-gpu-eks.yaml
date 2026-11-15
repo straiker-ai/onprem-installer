@@ -9,16 +9,31 @@
 {{- $eks     := .Values.eks }}
 {{- $role    := required "eks.nodeRole is required when cloudProvider=eks" $eks.nodeRole }}
 {{- $nc      := $eks.gpu.nodeClass }}
+{{- $extra   := list (dict "key" "karpenter.k8s.aws/instance-family" "operator" "In" "values" $eks.gpu.instanceFamilies) }}
+{{- with $eks.gpu.instanceTypes }}
+{{- $extra = append $extra (dict "key" "node.kubernetes.io/instance-type" "operator" "In" "values" .) }}
+{{- end }}
+{{- $pool := deepCopy $gpu.nodePool }}
+{{- if $nc.capacityReservationSelectorTerms }}
+{{- /* A reservation: capacity type "reserved" next to on-demand (Karpenter launches into the reservation first). */ -}}
+{{- $reqs := list }}
+{{- range $pool.requirements }}
+{{- if eq .key "karpenter.sh/capacity-type" }}
+{{- $reqs = append $reqs (dict "key" .key "operator" "In" "values" (uniq (concat .values (list "reserved")))) }}
+{{- else }}
+{{- $reqs = append $reqs . }}
+{{- end }}
+{{- end }}
+{{- $_ := set $pool "requirements" $reqs }}
+{{- end }}
 
 {{- include "infra.karpenterNodePool" (dict
       "root" $
-      "pool" $gpu.nodePool
+      "pool" $pool
       "nodeClassGroup" "karpenter.k8s.aws"
       "nodeClassKind" "EC2NodeClass"
       "nodeClassName" $nc.name
-      "extraRequirements" (list
-        (dict "key" "karpenter.k8s.aws/instance-family" "operator" "In" "values" $eks.gpu.instanceFamilies)
-      )
+      "extraRequirements" $extra
     ) }}
 
 ---
@@ -44,6 +59,10 @@ spec:
         {{- range $k, $v := $nc.securityGroupSelectorTags }}
         {{ $k }}: {{ $v | quote }}
         {{- end }}
+  {{- with $nc.capacityReservationSelectorTerms }}
+  capacityReservationSelectorTerms:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   blockDeviceMappings:
     {{- toYaml $nc.blockDeviceMappings | nindent 4 }}
   metadataOptions:

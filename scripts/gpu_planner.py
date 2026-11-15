@@ -222,14 +222,32 @@ def _placement(pod: Pod, gpu: Gpu, sharing: str, mig_profile, need: float, quant
 PROFILES = ("production", "test")
 
 
-def project_inventory(models_doc: dict, replicas: int | None = None) -> list[dict]:
-    """The inventory Karpenter will create when no GPU node exists yet: one single-GPU node per server, of the model's
-    default tier. Only valid for exclusive placement (nothing is shared on a node that does not exist)."""
+def project_inventory(models_doc: dict, replicas: int | None = None, node_type: str | None = None) -> list[dict]:
+    """The inventory Karpenter will create when no GPU node exists yet. Without node_type: one single-GPU node per
+    server, of the model's default tier (test installs). With node_type (a multi-GPU EC2 type such as p4d.24xlarge,
+    the customer GPU pool): as many of those nodes as the servers need, one server per GPU. Only valid for exclusive
+    placement (nothing is shared on a node that does not exist)."""
+    pods = pods_for(models_doc["models"], replicas, models_doc.get("default_replicas", 2))
+    if node_type:
+        if node_type not in INSTANCE_GPUS:
+            raise ValueError(f"unknown GPU node type {node_type!r} (known: {', '.join(sorted(INSTANCE_GPUS))})")
+        product, per_node = INSTANCE_GPUS[node_type]
+        return [{"name": f"projected-{node_type}-{i + 1}", "product": product, "count": per_node, "memory_gb": None,
+                 "instance_type": node_type} for i in range(math.ceil(len(pods) / per_node))]
     nodes = []
-    for pod in pods_for(models_doc["models"], replicas, models_doc.get("default_replicas", 2)):
+    for pod in pods:
         nodes.append({"name": f"projected-{pod.name}", "product": pod.model.get("default_gpu", "A10G"), "count": 1,
                       "memory_gb": None})
     return nodes
+
+
+def projected_nodes(plan_doc: dict) -> dict:
+    """{instance type: nodes} the plan's projected inventory needs (multi-GPU pools only; empty otherwise)."""
+    out: dict = {}
+    for n in plan_doc.get("projected_nodes", []):
+        if n.get("instance_type"):
+            out[n["instance_type"]] = out.get(n["instance_type"], 0) + 1
+    return out
 
 
 def plan(models_doc: dict, nodes: list[dict], sharing: str = "auto", replicas: int | None = None,
@@ -308,6 +326,9 @@ def summary(plan_doc: dict) -> str:
     if plan_doc.get("discovered"):
         found = ", ".join(f"{n['name']}: {n['count']}x {n['product']}" for n in plan_doc["discovered"])
         lines.append(f"  GPU nodes found: {found}")
+    elif plan_doc["source"] == "projected" and projected_nodes(plan_doc):
+        made = ", ".join(f"{n} x {t} ({INSTANCE_GPUS[t][1]} GPUs each)" for t, n in projected_nodes(plan_doc).items())
+        lines.append(f"  Karpenter creates {made}: one server per GPU")
     elif plan_doc["source"] == "projected":
         lines.append("  No GPU node is needed yet: Karpenter creates one per server, on the tier each model is validated for")
     by_model: dict = {}
@@ -370,6 +391,10 @@ def main(argv=None) -> int:
     ap.add_argument("--summary", metavar="PLAN_JSON", help="print a short readable summary of a saved plan")
     ap.add_argument("--slices", metavar="PLAN_JSON", help="print the time-slicing replica count a saved plan needs")
     ap.add_argument("--only", help="comma-separated model names to plan (default: the whole fleet)")
+    ap.add_argument("--node-type", help="production projection on this multi-GPU EC2 type (e.g. p4d.24xlarge, the "
+                                        "customer GPU pool) instead of one node per server on each model's default tier")
+    ap.add_argument("--nodes-needed", metavar="PLAN_JSON",
+                    help="print '<instance type> <nodes>' per multi-GPU type a saved projected plan needs")
     a = ap.parse_args(argv)
     if a.helm_sets:
         print("\n".join(helm_sets(json.loads(Path(a.helm_sets[0]).read_text()), a.helm_sets[1])))
@@ -380,18 +405,26 @@ def main(argv=None) -> int:
     if a.slices:
         print(slices_needed(json.loads(Path(a.slices).read_text())))
         return 0
+    if a.nodes_needed:
+        for t, n in projected_nodes(json.loads(Path(a.nodes_needed).read_text())).items():
+            print(f"{t} {n}")
+        return 0
     models_doc = json.loads(Path(a.models).read_text())
     if a.only:
         wanted = set(a.only.split(","))
         models_doc["models"] = [m for m in models_doc["models"] if m["name"] in wanted]
     discovered, source = [], "inventory"
+    if a.node_type and a.node_type not in INSTANCE_GPUS:
+        print(f"error: unknown GPU node type {a.node_type!r} (known: {', '.join(sorted(INSTANCE_GPUS))})", file=sys.stderr)
+        return 1
     if a.discover:
         discovered = nodes_from_kubectl(json.load(sys.stdin))
         # production never shares, and Karpenter adds nodes as servers are scheduled, so existing nodes do not bound it
         use_cluster = a.profile == "test" and discovered
-        nodes, source = (discovered, "cluster") if use_cluster else (project_inventory(models_doc, a.replicas), "projected")
+        nodes, source = ((discovered, "cluster") if use_cluster
+                         else (project_inventory(models_doc, a.replicas, a.node_type), "projected"))
     elif a.projected:
-        nodes, source = project_inventory(models_doc, a.replicas), "projected"
+        nodes, source = project_inventory(models_doc, a.replicas, a.node_type), "projected"
     else:
         nodes = nodes_from_kubectl(json.load(sys.stdin)) if a.from_kubectl else json.loads(Path(a.inventory).read_text())
     try:
@@ -401,6 +434,8 @@ def main(argv=None) -> int:
         return 1
     result["source"] = source
     result["discovered"] = discovered
+    if source == "projected":
+        result["projected_nodes"] = nodes
     json.dump(result, sys.stdout, indent=2)
     print()
     return 0 if result["feasible"] else 2
