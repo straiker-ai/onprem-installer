@@ -126,6 +126,10 @@ SAAS_FRONTEND="${SAAS_FRONTEND:-false}"
 # cluster's region): the gateway is never internet-facing without TLS.
 GATEWAY_EXPOSURE="${GATEWAY_EXPOSURE:-}"
 GATEWAY_CERT_ARN="${GATEWAY_CERT_ARN:-}"
+# The gateway's hostname (e.g. api.customer.com). With it the installer requests the ACM certificate itself (DNS validation, fully
+# automatic when a public Route53 zone for the domain is in the same account) and points the name at the load balancer.
+GATEWAY_DOMAIN="${GATEWAY_DOMAIN:-}"
+GATEWAY_ZONE_ID="${GATEWAY_ZONE_ID:-}"
 GATEWAY_ALLOWED_CIDRS="${GATEWAY_ALLOWED_CIDRS:-}"
 
 # --data-layer: the customer's identity provider, federated into the Cognito pool ("Sign in with SSO"). One per install.
@@ -514,7 +518,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
+declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -729,7 +733,13 @@ Options:
                                    private network only (choose it explicitly). none: in-cluster only (ClusterIP).
                                    Remembered. Without --gateway-cert-arn the default stops and asks for a certificate
                                    or --gateway-exposure internal: API keys never cross the internet in clear text.
-  --gateway-cert-arn <arn>         ACM certificate for the gateway's TLS listener (required for --gateway-exposure public).
+  --gateway-domain <fqdn>          The gateway's hostname, e.g. api.customer.com (the default internet-facing gateway needs this or
+                                   --gateway-cert-arn). The installer requests the ACM certificate (DNS validation) and, when a public
+                                   Route53 zone for the domain is in this account, adds the validation record, waits for the
+                                   certificate and points the name at the load balancer: no manual step. DNS elsewhere: it prints the
+                                   validation record to add (early, while the rest installs) and the final record for the name.
+  --gateway-zone-id <id>           Route53 hosted zone to use for --gateway-domain (default: found by the domain's name).
+  --gateway-cert-arn <arn>         Your own ACM certificate for the gateway's TLS listener (same region); used as is, no issuing.
   --gateway-allowed-cidrs <list>   Comma-separated source CIDRs allowed to reach a public gateway (default: any).
   --sso-type <type>                With --data-layer: the customer's identity provider for "Sign in with SSO",
                                    federated into the Cognito pool (one per install; all need --sso-domains):
@@ -1637,6 +1647,14 @@ parse_args() {
         ;;
       --gateway-cert-arn)
         GATEWAY_CERT_ARN=${2:-}
+        shift 2
+        ;;
+      --gateway-domain)
+        GATEWAY_DOMAIN=${2:-}
+        shift 2
+        ;;
+      --gateway-zone-id)
+        GATEWAY_ZONE_ID=${2:-}
         shift 2
         ;;
       --gateway-allowed-cidrs)
@@ -4144,10 +4162,27 @@ remember_gateway_settings() {
     ;;
   esac
   local cert="${GATEWAY_CERT_ARN:-$(get_metadata "gateway_cert_arn")}"
+  local domain="${GATEWAY_DOMAIN:-$(get_metadata "gateway_domain")}"
+  local zone="${GATEWAY_ZONE_ID:-$(get_metadata "gateway_zone_id")}"
   local cidrs="${GATEWAY_ALLOWED_CIDRS:-$(get_metadata "gateway_allowed_cidrs")}"
+  local source
+  source="$(get_metadata "gateway_cert_source")"
+  [[ -n "${GATEWAY_CERT_ARN}" ]] && source="own"
+  if [[ -n "${domain}" && ! "${domain}" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+    mark_phase_blocked "--gateway-domain must be a lower-case host name such as api.customer.com (got '${domain}')."
+    return 1
+  fi
   if [[ "${mode}" == "public" ]]; then
-    if [[ ! "${cert}" =~ ^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$ ]]; then
-      mark_phase_blocked "The api-gateway is internet-facing by default and needs TLS: pass --gateway-cert-arn <ACM certificate ARN> (and preferably --gateway-allowed-cidrs), or choose a private gateway with --gateway-exposure internal. It is never exposed to the internet without TLS."
+    if [[ -n "${cert}" && ! "${cert}" =~ ^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$ ]]; then
+      mark_phase_blocked "--gateway-cert-arn must be an ACM certificate ARN (got '${cert}')."
+      return 1
+    fi
+    if [[ -n "${cert}" && "${cert}" != *":acm:${AWS_REGION}:"* ]]; then
+      mark_phase_blocked "The gateway certificate must be in the cluster's region (${AWS_REGION}): a load balancer cannot use a certificate from another region."
+      return 1
+    fi
+    if [[ -z "${cert}" && -z "${domain}" ]]; then
+      mark_phase_blocked "The api-gateway is internet-facing by default and needs TLS. Pass --gateway-domain <name> (the installer then issues the certificate: fully automatic with a Route53 zone for it in this account), or --gateway-cert-arn <your ACM certificate>, or choose a private gateway with --gateway-exposure internal. It is never exposed to the internet without TLS."
       return 1
     fi
     if [[ -z "${cidrs}" ]]; then
@@ -4156,6 +4191,9 @@ remember_gateway_settings() {
   fi
   set_metadata "gateway_exposure" "${mode}"
   set_metadata "gateway_cert_arn" "${cert}"
+  set_metadata "gateway_cert_source" "${source}"
+  set_metadata "gateway_domain" "${domain}"
+  set_metadata "gateway_zone_id" "${zone}"
   set_metadata "gateway_allowed_cidrs" "${cidrs}"
 }
 
@@ -4163,6 +4201,7 @@ install_api_gateway() {
   local ecr_registry=$1 chart="${REPO_ROOT}/charts/platform-api-gateway" tag tmp table
   require_command openssl
   remember_gateway_settings || return 1
+  gateway_cert_require_issued || return 1
   tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${chart}/Chart.yaml")"
   table="$(get_metadata "dynamodb_environment_table")"
 
@@ -4255,7 +4294,178 @@ install_api_gateway() {
   local rc=$?
   rm -f "${key_file}"
   [[ ${rc} -eq 0 ]] || return ${rc}
-  verify_gateway_exposure
+  verify_gateway_exposure || return 1
+  gateway_dns_ensure
+}
+
+# ---- Gateway TLS certificate: issued by the installer when --gateway-domain is given -----------------------------------------------
+# Needs (installer identity): acm:RequestCertificate/DescribeCertificate/ListCertificates/ListTagsForCertificate/AddTagsToCertificate,
+# route53:ListHostedZones/ChangeResourceRecordSets, elasticloadbalancing:DescribeLoadBalancers.
+
+# "<zone id>" of the public Route53 zone whose name is the longest suffix of the domain (or the --gateway-zone-id override); empty if none.
+gateway_find_zone() {
+  local domain=$1 override
+  override="$(get_metadata "gateway_zone_id")"
+  if [[ -n "${override}" ]]; then printf '%s' "${override}"; return 0; fi
+  aws route53 list-hosted-zones --query 'HostedZones[?Config.PrivateZone==`false`].[Id,Name]' --output text 2>/dev/null \
+    | DOMAIN="${domain}" python3 -c '
+import os, sys
+d = os.environ["DOMAIN"].rstrip(".") + "."
+best = ("", "")
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) != 2:
+        continue
+    zid, name = parts
+    if (d == name or d.endswith("." + name)) and len(name) > len(best[1]):
+        best = (zid.rsplit("/", 1)[-1], name)
+print(best[0], end="")
+'
+}
+
+# ARN of this cluster's certificate for the domain that is still usable (ISSUED or PENDING_VALIDATION); empty if none.
+gateway_cert_find() {
+  local domain=$1 arn tag
+  for arn in $(aws acm list-certificates --region "${AWS_REGION}" --certificate-statuses ISSUED PENDING_VALIDATION \
+      --query "CertificateSummaryList[?DomainName=='${domain}'].CertificateArn" --output text 2>/dev/null); do
+    tag="$(aws acm list-tags-for-certificate --region "${AWS_REGION}" --certificate-arn "${arn}" \
+      --query "Tags[?Key=='straiker:cluster'].Value | [0]" --output text 2>/dev/null)"
+    if [[ "${tag}" == "${CLUSTER_NAME}" ]]; then printf '%s' "${arn}"; return 0; fi
+  done
+}
+
+gateway_cert_status() {
+  aws acm describe-certificate --region "${AWS_REGION}" --certificate-arn "$1" --query Certificate.Status --output text 2>/dev/null
+}
+
+# "name type value" of the DNS validation record ACM asks for (it appears a few seconds after the request); empty if not yet.
+gateway_cert_validation_record() {
+  local arn=$1 n rec=""
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    rec="$(aws acm describe-certificate --region "${AWS_REGION}" --certificate-arn "${arn}" \
+      --query 'Certificate.DomainValidationOptions[0].ResourceRecord.[Name,Type,Value]' --output text 2>/dev/null)"
+    [[ -n "${rec}" && "${rec}" != "None" && "${rec}" != *"None"* ]] && break
+    rec=""
+    sleep 5
+  done
+  printf '%s' "${rec}"
+}
+
+# route53_upsert <zone id> <name> <type> <value>
+route53_upsert() {
+  local batch
+  batch="$(NAME="$2" TYPE="$3" VALUE="$4" python3 -c '
+import json, os
+print(json.dumps({"Changes": [{"Action": "UPSERT", "ResourceRecordSet": {"Name": os.environ["NAME"], "Type": os.environ["TYPE"], "TTL": 300,
+      "ResourceRecords": [{"Value": os.environ["VALUE"]}]}}]}))')"
+  aws route53 change-resource-record-sets --hosted-zone-id "$1" --change-batch "${batch}" >/dev/null
+}
+
+# Phase: request the gateway certificate early so DNS validation overlaps with the rest of the install. A Route53 zone in this account:
+# the validation record is written here. DNS elsewhere: the record to add is printed now and again when the gateway needs the certificate.
+phase_gateway_cert() {
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
+    return
+  fi
+  remember_gateway_settings || return
+  if [[ "$(get_metadata "gateway_exposure")" != "public" ]]; then
+    log "Gateway exposure is '$(get_metadata "gateway_exposure")': no certificate needed."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "gateway not internet-facing."
+    return
+  fi
+  require_command aws
+  local domain cert zone rec rname rtype rvalue status
+  domain="$(get_metadata "gateway_domain")"
+  cert="$(get_metadata "gateway_cert_arn")"
+  if [[ "$(get_metadata "gateway_cert_source")" == "own" ]]; then
+    status="$(gateway_cert_status "${cert}")"
+    if [[ "${status}" == "ISSUED" ]]; then
+      log "Using your ACM certificate ${cert} (issued)."
+    else
+      log "WARNING: your ACM certificate ${cert} is '${status:-not readable}', not ISSUED: the gateway's TLS listener will not work until it is."
+    fi
+    return
+  fi
+
+  # Issue (or reuse) the certificate for --gateway-domain.
+  if [[ -z "${cert}" ]]; then cert="$(gateway_cert_find "${domain}")"; fi
+  if [[ -z "${cert}" ]]; then
+    cert="$(aws acm request-certificate --region "${AWS_REGION}" --domain-name "${domain}" --validation-method DNS \
+      --tags "Key=straiker:cluster,Value=${CLUSTER_NAME}" "Key=managed_by,Value=straiker-installer" \
+      --query CertificateArn --output text)" || { mark_phase_blocked "Could not request an ACM certificate for ${domain}."; return; }
+    log "Requested ACM certificate for ${domain}: ${cert}"
+  else
+    log "Reusing ACM certificate for ${domain}: ${cert}"
+  fi
+  set_metadata "gateway_cert_arn" "${cert}"
+  set_metadata "gateway_cert_source" "issued"
+
+  status="$(gateway_cert_status "${cert}")"
+  [[ "${status}" == "ISSUED" ]] && { log "The certificate is already issued."; return; }
+
+  rec="$(gateway_cert_validation_record "${cert}")"
+  if [[ -z "${rec}" ]]; then
+    log "WARNING: ACM has not published the validation record yet; the gateway step will look again."
+    return
+  fi
+  read -r rname rtype rvalue <<<"${rec}"
+  set_metadata "gateway_cert_validation" "${rname} ${rtype} ${rvalue}"
+  zone="$(gateway_find_zone "${domain}")"
+  if [[ -n "${zone}" ]]; then
+    route53_upsert "${zone}" "${rname}" "${rtype}" "${rvalue}" \
+      || { mark_phase_blocked "Could not write the validation record to Route53 zone ${zone} (needs route53:ChangeResourceRecordSets)."; return; }
+    log "Wrote the DNS validation record to Route53 zone ${zone}; ACM validates it in a few minutes while the install continues."
+  else
+    log "No public Route53 zone for ${domain} in this account. ADD THIS DNS RECORD where ${domain} is hosted (the install continues; the gateway step waits for it):"
+    log "    ${rname}  ${rtype}  ${rvalue}"
+  fi
+}
+
+# Before the gateway chart: the certificate must be ISSUED. Waits for DNS validation; blocks with the record to add if it does not arrive.
+gateway_cert_require_issued() {
+  [[ "$(get_metadata "gateway_exposure")" == "public" ]] || return 0
+  local cert status n rec waits=60
+  cert="$(get_metadata "gateway_cert_arn")"
+  [[ -n "${cert}" ]] || { mark_phase_blocked "No gateway certificate: run phase gateway-cert."; return 1; }
+  [[ -n "$(gateway_find_zone "$(get_metadata "gateway_domain")")" ]] || waits=20 # a person has to add the record: do not wait as long
+  for n in $(seq 1 "${waits}"); do
+    status="$(gateway_cert_status "${cert}")"
+    [[ "${status}" == "ISSUED" ]] && { log "Gateway certificate is issued."; return 0; }
+    [[ "${status}" == "FAILED" || "${status}" == "VALIDATION_TIMED_OUT" || "${status}" == "REVOKED" || "${status}" == "EXPIRED" ]] && break
+    sleep 15
+  done
+  rec="$(get_metadata "gateway_cert_validation")"
+  mark_phase_blocked "The gateway certificate ${cert} is '${status:-unknown}', not ISSUED. DNS validation needs this record where $(get_metadata "gateway_domain") is hosted: ${rec:-(run phase gateway-cert to print it)}. Add it, wait a few minutes, then re-run this phase."
+  return 1
+}
+
+# After the gateway is up: point the name at the load balancer (Route53 zone in this account), or print the record to add.
+gateway_dns_ensure() {
+  local domain host zone lbzone
+  domain="$(get_metadata "gateway_domain")"
+  [[ -n "${domain}" && "$(get_metadata "gateway_exposure")" == "public" ]] || return 0
+  host="$(kubectl get svc api-gateway -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+  [[ -n "${host}" ]] || { log "WARNING: no load balancer address yet: point ${domain} at it (CNAME) once it exists."; return 0; }
+  zone="$(gateway_find_zone "${domain}")"
+  if [[ -z "${zone}" ]]; then
+    log "ADD THIS DNS RECORD where ${domain} is hosted:  ${domain}  CNAME  ${host}"
+    set_metadata "gateway_dns_record" "${domain} CNAME ${host}"
+    return 0
+  fi
+  # A CNAME is not allowed at a zone apex: use an alias to the load balancer there.
+  if [[ "$(aws route53 get-hosted-zone --id "${zone}" --query HostedZone.Name --output text 2>/dev/null)" == "${domain}." ]]; then
+    lbzone="$(aws elbv2 describe-load-balancers --region "${AWS_REGION}" --query "LoadBalancers[?DNSName=='${host}'].CanonicalHostedZoneId | [0]" --output text 2>/dev/null)"
+    if [[ -z "${lbzone}" || "${lbzone}" == "None" ]]; then
+      log "ADD THIS DNS RECORD (an alias, ${domain} is the zone apex):  ${domain}  A ALIAS ${host}"; return 0
+    fi
+    aws route53 change-resource-record-sets --hosted-zone-id "${zone}" --change-batch \
+      "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"${domain}\",\"Type\":\"A\",\"AliasTarget\":{\"HostedZoneId\":\"${lbzone}\",\"DNSName\":\"${host}\",\"EvaluateTargetHealth\":false}}}]}" >/dev/null \
+      || { log "WARNING: could not write the alias record for ${domain}."; return 0; }
+  else
+    route53_upsert "${zone}" "${domain}" CNAME "${host}" || { log "WARNING: could not write the DNS record for ${domain} (needs route53:ChangeResourceRecordSets)."; return 0; }
+  fi
+  log "Pointed ${domain} at the gateway load balancer (Route53 zone ${zone}). Gateway URL: https://${domain}"
 }
 
 # The gateway must never be internet-facing unless --gateway-exposure public was chosen (with TLS and, ideally, source ranges). Looks
@@ -7234,6 +7444,11 @@ show_access_info() {
   log "    -H \"Content-Type: application/json\" \\"
   log "    -H \"Straiker-Debug: true\" \\"
   log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
+  if [[ -n "$(get_metadata "gateway_domain")" && "$(get_metadata "gateway_exposure")" == "public" ]]; then
+    log ""
+    log "API gateway (SDK / agents): https://$(get_metadata "gateway_domain")   (TLS: $(get_metadata "gateway_cert_source" | sed 's/own/your ACM certificate/;s/issued/ACM certificate issued by the installer/'))"
+    [[ -n "$(get_metadata "gateway_dns_record")" ]] && log "  DNS still to add: $(get_metadata "gateway_dns_record")"
+  fi
 }
 
 # Reminder printed at the end of every successful run — the bootstrap admin
@@ -8148,6 +8363,7 @@ run_phase() {
     karpenter) phase_karpenter ;;
     k8s-preflight) phase_k8s_preflight ;;
     aws-artifacts) phase_aws_artifacts ;;
+    gateway-cert) phase_gateway_cert ;;
     aws-data) phase_aws_data ;;
     external-secrets) phase_external_secrets ;;
     artifacts-sync) phase_artifacts_sync ;;
@@ -8275,6 +8491,10 @@ main() {
 
   capture_install_config
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
+  # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).
+  if [[ "${DATA_LAYER}" == "true" ]]; then
+    ( mark_phase_blocked() { echo "ERROR: $1" >&2; return 1; }; set_metadata() { :; }; remember_gateway_settings ) || exit 1
+  fi
   require_resource_ack
   build_phase_list
   set_install_status "in_progress" "Installer started."

@@ -40,6 +40,17 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   G/VT instance already running in the account, so the installer subtracts those and stops in its first phase if too
   little is left. A100/H100 (p4d, p4de, p5) use a different quota, "Running On-Demand P instances" (`L-417A185B`),
   about 192 vCPUs for two p4d.24xlarge; those instance families are not enabled in the installer yet.
+- **A domain for the gateway** (`--gateway-domain api.customer.com`), unless you bring your own ACM certificate. The api-gateway is
+  internet-facing by default and always uses TLS; the installer issues the certificate from the domain:
+  - the domain (or its parent) is a public **Route53 zone in the same account**: nothing else to do, the installer adds the DNS
+    validation record, waits for the certificate, and points the name at the gateway. One command.
+  - the domain's DNS is **elsewhere** (Cloudflare, an on-prem DNS server, another account): the installer prints one validation record early
+    (add it while the rest installs) and, once the gateway exists, the record for the name itself. If the first record is not in place
+    when the gateway is installed, the step stops with the record and continues on the next run.
+  - **your own certificate**: `--gateway-cert-arn` (ISSUED, in the cluster's region); used as is. You add the DNS record for the name.
+  - a private gateway needs none of this: `--gateway-exposure internal`.
+  The installer's AWS identity needs `acm:RequestCertificate/DescribeCertificate/ListCertificates/ListTagsForCertificate/AddTagsToCertificate`,
+  `route53:ListHostedZones/GetHostedZone/ChangeResourceRecordSets` and `elasticloadbalancing:DescribeLoadBalancers`.
 - Quota for ECR, Aurora and MSK (the defaults are normally enough).
 
 ### On Straiker's side (once per customer, once per release)
@@ -169,13 +180,16 @@ Until then Ascend keeps grading through v1, which is safe.
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.
 - **ClickHouse sync hardening rollout** (existing installs): run `--phase aws-data --rerun-phase` (adds the `grid_sync` password to Secrets Manager), then `--phase clickhouse --rerun-phase` (pods restart to pick up the user and the RDS CA), then `--phase ch-sync --rerun-phase`. If the sync then fails with a TLS error, the Aurora endpoint is reached under a name the certificate does not cover: set `postgresSslMode: require` on the clickhouse chart.
-- **Gateway exposure.** The api-gateway is internet-facing by default (`--gateway-exposure public`) and then needs an ACM certificate
-  (`--gateway-cert-arn`); restrict who can connect with `--gateway-allowed-cidrs`. Ask for a private one with `--gateway-exposure internal`
-  (internal load balancer, VPC only, plain HTTP inside the VPC) or `none` (in-cluster only). Without a certificate the default stops and
-  says so: API keys never cross the internet in clear text. The installer checks the load balancer's scheme against the choice and blocks on a
-  mismatch. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud provider's own annotations. A load
-  balancer's scheme cannot change in place: to switch an existing install, `kubectl delete svc api-gateway -n straiker` and re-run
-  `--phase platform-services` with the exposure you want. The choice is remembered.
+- **Gateway exposure.** The api-gateway is internet-facing by default (`--gateway-exposure public`) and always over TLS: it needs
+  `--gateway-domain` (certificate issued by the installer, see section 2) or `--gateway-cert-arn`, and the install stops early without one.
+  Restrict who can connect with `--gateway-allowed-cidrs`. Ask for a private one with `--gateway-exposure internal` (internal load balancer,
+  VPC only, plain HTTP inside the VPC) or `none` (in-cluster only). The installer checks the load balancer's scheme against the choice and
+  blocks on a mismatch. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud provider's own
+  annotations. A load balancer's scheme cannot change in place: to switch an existing install, `kubectl delete svc api-gateway -n straiker`
+  and re-run `--phase platform-services` with the exposure you want. The choice is remembered.
+- **Gateway certificate and DNS records are not removed by teardown.** The ACM certificate (tagged `straiker:cluster=<name>`, free) and the
+  Route53 records the installer wrote stay behind: delete them by hand after an uninstall. The TLS-on-the-load-balancer path without the AWS
+  Load Balancer Controller (in-tree NLB with a certificate) has been rendered and tested offline only; check it on the first real install.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
 - **WAF, monitoring, ingress with real certificates** are not part of this install.

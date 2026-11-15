@@ -639,6 +639,16 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
         <li><code>tailscale</code> edge type needs a Route53 zone for the custom domain in the same account (cert-manager writes DNS-01 challenge records there), plus manual DNS records the customer adds after install, pointed at the assigned Tailscale IP.</li>
       </ul>
 
+      <h3 id="sec2-4b">2.4b Domain and TLS for the API gateway</h3>
+      <p>The API gateway (what the SDK and agents call) is internet-facing by default and always uses TLS, so the customer needs a hostname for it, for example <code>api.customer.com</code> (<code>--gateway-domain</code>). A private gateway (<code>--gateway-exposure internal</code>) needs neither.</p>
+      <ul class="bullets">
+        <li><b>Public Route53 zone for the domain in the same AWS account:</b> fully automatic. The installer requests the ACM certificate, writes the DNS validation record, waits for it, and points the name at the gateway.</li>
+        <li><b>DNS hosted elsewhere:</b> the installer prints one validation record early (the customer adds it while the install continues) and the record for the name itself once the gateway exists.</li>
+        <li><b>The customer's own ACM certificate</b> (<code>--gateway-cert-arn</code>, issued, in the cluster's region): used as is.</li>
+        <li>The installer's AWS identity needs ACM request/describe/list/tag, Route53 list/change-record, and ELB describe permissions. Limit who can connect with <code>--gateway-allowed-cidrs</code>.</li>
+      </ul>
+      <div class="callout flag"><b>Flag for SE/FDE:</b> Ask for the gateway hostname and where its DNS lives during scoping. It is the one DNS dependency on the critical path, and a customer whose DNS team is slow will stall the install at the gateway step.</div>
+
       <h3 id="sec2-5">2.5 Secrets &amp; credentials to have on hand</h3>
       <ul class="bullets">
         <li>Straiker customer name + customer key — required; gates image mirroring and model sync via Straiker's artifact broker, and resolves the account's product SKU.</li>
