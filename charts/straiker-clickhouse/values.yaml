@@ -4,9 +4,11 @@ image:
   tag: "25.8"
   pullPolicy: IfNotPresent
 
-# libpq TLS mode for the postgresql() table function (ch-sync -> Aurora). Aurora requires TLS; "require" does not
-# verify the certificate, so no CA bundle is needed.
-postgresSslMode: require
+# libpq TLS mode for the postgresql() table function (ch-sync -> Aurora). verify-full checks the server certificate and its
+# hostname against the RDS CA bundle (files/rds-global-bundle.pem, mounted into the pods; refresh with scripts/update-rds-ca.sh).
+# It needs the Aurora endpoint's own hostname (postgres.host of ch-sync). "require" encrypts without verifying: only for an
+# endpoint reached under a name the certificate does not cover (an alias, a port-forward).
+postgresSslMode: verify-full
 
 # Native protocol (plain, in-cluster) is what grid/registry dial; no TLS inside the cluster.
 ports: { native: 9000, http: 8123 }
@@ -57,6 +59,9 @@ users:
   grid_query_ro: { grants: ["GRANT SELECT ON *.*"], readonly: true }                         # grid + registry read path
   grid_ingest:   { grants: ["GRANT INSERT ON grid.*"] }                                      # Kafka -> landing tables (chart straiker-ingest)
   grid_purge:    { grants: ["GRANT ALTER DELETE, SYSTEM VIEWS, SELECT ON *.*"] }            # registry agent purge
+  # ch-sync CronJob (charts/straiker-ch-sync): copies registry tables from Aurora via postgresql() into grid.*. Only what a cycle
+  # runs: read and insert on grid, OPTIMIZE for the hourly merge, and the PostgreSQL table function. No DDL, no access management.
+  grid_sync:     { grants: ["GRANT SELECT, INSERT, OPTIMIZE ON grid.*", "GRANT POSTGRES ON *.*"] }
 
 # Dedicated, tainted pool created by chart straiker-system (karpenter.clickhouse). Set both to {} / []
 # to run on any node instead.

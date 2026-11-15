@@ -59,7 +59,8 @@ B1 mechanics (CronJob running `clickhouse-client`, one script, idempotent):
 - `grid_cdc`: read-only Postgres role on `registry` (SELECT on existing + future tables of owner `registry`), created by chart `straiker-data`.
 - Grid overlay now has `migrations.enabled: true` (DDL creds from `GRID_CH_MIGRATE_*`); `grid-migrations` image added to the mirror.
 - Tested in Docker (Postgres 16, ClickHouse 25.8): insert, update, delete (tombstone), re-add, JSONB -> String, repeat runs, skip of missing tables; `grid_cdc` read-only and covers tables created later. Not tested: Aurora SSL path, real registry schema, grid migrations.
-- Caveats: the PG password is in the `postgresql()` call text (visible in ClickHouse `query_log`); the sync uses the ClickHouse `admin` user; full copy per cycle (move to incremental/PeerDB for large estates).
+- Hardening (done): the CronJob runs as the least-privilege ClickHouse user `grid_sync` (`SELECT, INSERT, OPTIMIZE ON grid.*` and the PostgreSQL table function; no DDL), only the init Job that creates the tables uses `admin`. The Aurora password is NOT visible in ClickHouse logs: 25.8 masks the secret arguments of `postgresql()` (checked on dl-test across days of sync statements: `query_log` and `text_log` contain no occurrence). The Aurora connection verifies the server certificate and hostname (`PGSSLMODE=verify-full` with the RDS CA bundle mounted into the ClickHouse pods; `postgresSslMode: require` is the fallback for an endpoint reached under a name the certificate does not cover).
+- Caveats: full copy per cycle (move to incremental/PeerDB for large estates).
 
 ## Order of operations in the installer
 

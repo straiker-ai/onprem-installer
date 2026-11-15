@@ -13,6 +13,8 @@ clickhouse:
   # created with Replicated* engines. All statements go to replica 0 (ddlHost), so an INSERT and the
   # tombstone SELECT that follows it always see the same data.
   replicated: false
+  # ClickHouse user of the CronJob (least privilege; the init Job that creates the tables uses admin).
+  syncUser: grid_sync
 
 postgres:
   host: ""                                    # Aurora writer endpoint, set by the installer

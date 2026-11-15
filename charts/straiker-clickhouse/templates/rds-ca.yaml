@@ -1,0 +1,9 @@
+{{- if has .Values.postgresSslMode (list "verify-ca" "verify-full") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ch.fullname" . }}-rds-ca
+data:
+  global-bundle.pem: |
+{{ .Files.Get "files/rds-global-bundle.pem" | indent 4 }}
+{{- end }}

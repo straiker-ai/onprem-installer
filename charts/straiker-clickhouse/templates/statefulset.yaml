@@ -13,6 +13,7 @@ spec:
       labels: { app: {{ include "ch.fullname" . }} }
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        checksum/rds-ca: {{ include (print $.Template.BasePath "/rds-ca.yaml") . | sha256sum }}
     spec:
       {{- with .Values.nodeSelector }}
       nodeSelector: {{ toYaml . | nindent 8 }}
@@ -52,6 +53,9 @@ spec:
             # an unencrypted connection, and Aurora rejects that. A readable HOME plus an explicit TLS mode fixes it.
             - { name: HOME, value: /var/lib/clickhouse }
             - { name: PGSSLMODE, value: {{ .Values.postgresSslMode | quote }} }
+            {{- if has .Values.postgresSslMode (list "verify-ca" "verify-full") }}
+            - { name: PGSSLROOTCERT, value: /etc/clickhouse-server/rds-ca/global-bundle.pem }
+            {{- end }}
             - name: CH_POD_FQDN
               value: "$(POD_NAME).{{ include "ch.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
             {{- range $u, $_ := .Values.users }}
@@ -73,9 +77,16 @@ spec:
             - { name: config, mountPath: /etc/clickhouse-server/config.d/cluster.xml, subPath: cluster.xml }
             {{- end }}
             - { name: config, mountPath: /etc/clickhouse-server/users.d/users.xml, subPath: users.xml }
+            {{- if has .Values.postgresSslMode (list "verify-ca" "verify-full") }}
+            - { name: rds-ca, mountPath: /etc/clickhouse-server/rds-ca, readOnly: true }
+            {{- end }}
       volumes:
         - name: config
           configMap: { name: {{ include "ch.fullname" . }}-config }
+        {{- if has .Values.postgresSslMode (list "verify-ca" "verify-full") }}
+        - name: rds-ca
+          configMap: { name: {{ include "ch.fullname" . }}-rds-ca }
+        {{- end }}
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:

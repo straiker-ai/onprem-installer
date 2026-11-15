@@ -158,7 +158,7 @@ SES_CONFIGURATION_SET="${SES_CONFIGURATION_SET:-}"
 # Aurora roles whose passwords live in Secrets Manager "<cluster>/db/passwords" (charts/straiker-data databases + readers).
 DB_PASSWORD_ROLES="foundation registry databridge connect notify frontend iris bifrost grid_cdc"
 # ClickHouse users (chart straiker-clickhouse `users`) whose passwords live in "<cluster>/clickhouse/credentials".
-CLICKHOUSE_PASSWORD_USERS="admin grid_query_ro grid_ingest grid_purge"
+CLICKHOUSE_PASSWORD_USERS="admin grid_query_ro grid_ingest grid_purge grid_sync"
 # Keys of Secret straiker-secrets (SHARED_SECRETS_NAME) kept in Secrets Manager "<cluster>/platform/shared".
 SHARED_SECRET_PROPS="INTERNAL_API_KEY SYS__FOUNDATION_API_KEY VLLM_API_KEY SYS__INFERENCE_API_KEY IRIS_ADMIN_API_KEY BOOTSTRAP_ADMIN_PASSWORD BOOTSTRAP_ADMIN_PASSWORD_HASH"
 
@@ -3739,6 +3739,7 @@ phase_clickhouse() {
     set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
     return
   fi
+  require_command aws
   require_command kubectl
   require_command helm
   ensure_k8s_ready_for_charts || return
@@ -3747,6 +3748,15 @@ phase_clickhouse() {
   ecr_registry="$(get_metadata "ecr_registry")"
   if [[ -z "${ecr_registry}" ]]; then
     mark_phase_blocked "No ECR registry in state. Run phase 'aws-artifacts' first."
+    return
+  fi
+  # The grid_sync password (ch-sync's least-privilege user) is created by aws-data. An install that predates it needs aws-data
+  # re-run first: say so here rather than failing later inside External Secrets.
+  local ch_secret
+  ch_secret="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/clickhouse/credentials" --region "${AWS_REGION}" \
+    --query SecretString --output text 2>/dev/null || true)"
+  if [[ -n "${ch_secret}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if "grid_sync" in json.loads(sys.argv[1]) else 1)' "${ch_secret}" 2>/dev/null; then
+    mark_phase_blocked "Secrets Manager '${CLUSTER_NAME}/clickhouse/credentials' has no grid_sync password yet. Run phase aws-data first (--phase aws-data --rerun-phase --data-layer), then this phase."
     return
   fi
   ensure_clickhouse_passwords_secret || return

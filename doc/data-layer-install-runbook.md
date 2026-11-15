@@ -162,6 +162,7 @@ Until then Ascend keeps grading through v1, which is safe.
 - **Private subnet size.** The `min` layout uses one `/24`. The CNI setting keeps it workable, but GPU plus ClickHouse
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.
+- **ClickHouse sync hardening rollout** (existing installs): run `--phase aws-data --rerun-phase` (adds the `grid_sync` password to Secrets Manager), then `--phase clickhouse --rerun-phase` (pods restart to pick up the user and the RDS CA), then `--phase ch-sync --rerun-phase`. If the sync then fails with a TLS error, the Aurora endpoint is reached under a name the certificate does not cover: set `postgresSslMode: require` on the clickhouse chart.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
 - **WAF, monitoring, ingress with real certificates** are not part of this install.

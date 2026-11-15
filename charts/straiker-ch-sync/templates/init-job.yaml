@@ -17,7 +17,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            {{- include "chsync.env" . | nindent 12 }}
+            {{- include "chsync.env" (dict "root" . "user" "admin") | nindent 12 }}
           command: ["/bin/bash", "-c", "/config/init.sh && /config/sync.sh"]
           volumeMounts:
             - { name: config, mountPath: /config }
