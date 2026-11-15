@@ -190,16 +190,20 @@ service:
 # their own conventions unchanged).
 routes:
   - name: frontend
+    # ALB health check (xalb): a path the service answers 200 without a session.
+    albHealthcheckPath: /login # /api/health redirects to /login without a session
     subdomain: app
     albSubdomain: straiker
     targetService: straiker-frontend-service
     targetPort: 80
   - name: defend-api
+    albHealthcheckPath: /api/v1/private/ping
     subdomain: defend
     albSubdomain: straiker-defend
     targetService: straiker-defend
     targetPort: 80
   - name: ascend-api
+    albHealthcheckPath: /api/v1/public/ping
     subdomain: ascend
     albSubdomain: straiker-ascend
     # charts/straiker-ascend's control-plane Service - matches its own

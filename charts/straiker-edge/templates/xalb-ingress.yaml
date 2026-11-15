@@ -1,32 +1,41 @@
 {{- if eq .Values.edgeType "xalb" }}
+{{- /* One Ingress per route, all in the same IngressGroup (one ALB): the ALB health check is per Ingress, and each
+       service has its own health path (routes[].albHealthcheckPath). */}}
+{{- range $i, $r := .Values.routes }}
+{{- if $i }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ .Release.Name }}-xalb
-  namespace: {{ include "edge.namespace" . }}
+  name: {{ $.Release.Name }}-xalb-{{ $r.name }}
+  namespace: {{ include "edge.namespace" $ }}
   labels:
-    {{- include "edge.labels" . | nindent 4 }}
+    {{- include "edge.labels" $ | nindent 4 }}
   annotations:
-    {{- include "edge.xalbGroupAnnotations" . | nindent 4 }}
-    alb.ingress.kubernetes.io/certificate-arn: {{ required "xalb.certificateArn is required when edgeType=xalb" .Values.xalb.certificateArn | quote }}
-    {{- if .Values.xalb.inboundCidrs }}
-    alb.ingress.kubernetes.io/inbound-cidrs: {{ .Values.xalb.inboundCidrs | quote }}
+    {{- include "edge.xalbGroupAnnotations" $ | nindent 4 }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ required "xalb.certificateArn is required when edgeType=xalb" $.Values.xalb.certificateArn | quote }}
+    {{- if $.Values.xalb.inboundCidrs }}
+    alb.ingress.kubernetes.io/inbound-cidrs: {{ $.Values.xalb.inboundCidrs | quote }}
+    {{- end }}
+    {{- with $r.albHealthcheckPath }}
+    alb.ingress.kubernetes.io/healthcheck-path: {{ . | quote }}
+    alb.ingress.kubernetes.io/success-codes: "200"
     {{- end }}
 spec:
-  ingressClassName: {{ .Values.xalb.ingressClassName }}
+  ingressClassName: {{ $.Values.xalb.ingressClassName }}
   rules:
-    {{- range .Values.routes }}
-    - host: {{ printf "%s.%s" .albSubdomain $.Values.xalb.domain | quote }}
+    - host: {{ printf "%s.%s" $r.albSubdomain $.Values.xalb.domain | quote }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ .targetService }}
+                name: {{ $r.targetService }}
                 port:
-                  number: {{ .targetPort }}
-    {{- end }}
+                  number: {{ $r.targetPort }}
+{{- end }}
 {{- with .Values.xalb.api }}
 {{- if .host }}
 ---

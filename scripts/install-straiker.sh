@@ -7732,7 +7732,7 @@ phase_observability() {
   # The edge ALB (alb/xalb), found by its Ingress's address.
   local alb_suffix="" ingress="" alb_dns alb_arn
   case "${EDGE_TYPE}" in
-    xalb) ingress="${EDGE_RELEASE}-xalb" ;;
+    xalb) ingress="${EDGE_RELEASE}-xalb-frontend" ;;
     alb) ingress="${EDGE_RELEASE}-alb" ;;
   esac
   if [[ -n "${ingress}" ]]; then
@@ -7883,7 +7883,7 @@ show_access_info() {
       log "Using the certificate from --alb-certificate-arn. Point ${custom_domain}'s"
       log "DNS at the ALB yourself (Route53 ALIAS record, or however you manage that"
       log "zone). Find its DNS name with:"
-      log "  kubectl get ingress -n ${INFRA_NAMESPACE} ${EDGE_RELEASE}-xalb"
+      log "  kubectl get ingress -n ${INFRA_NAMESPACE} ${EDGE_RELEASE}-xalb-frontend"
     fi
     return
   fi
