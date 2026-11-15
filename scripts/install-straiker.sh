@@ -5860,6 +5860,7 @@ check_gpu_vcpu_quota() {
   if [[ "${available}" -lt "${needed}" && -n "${INFERENCE_MODELS}" ]]; then
     # --inference-models is the deliberate partial test: servers that do not fit simply wait (Pending) for quota.
     log "WARNING: EC2 G/VT quota leaves ${available} of the ${needed} vCPUs the missing GPU nodes need (${used:-0} of ${quota} in use); those servers will stay Pending until the quota is raised."
+    INFERENCE_NO_WAIT=true # helm must not wait for pods that cannot get a node
     return 0
   fi
   if [[ "${available}" -lt "${needed}" ]]; then
@@ -5903,6 +5904,7 @@ apply_gpu_time_slicing() {
 # the plan in INFERENCE_PLAN_FILE. production: one server per GPU on each model's validated tier (what Karpenter creates).
 # test: the GPU nodes that exist now, shared if needed; with none, the same exclusive plan as production.
 INFERENCE_PLAN_FILE=""
+INFERENCE_NO_WAIT=false
 plan_inference_gpus() {
   local models_csv=$1 profile nodes_json rc=0 sharing
   profile="$(inference_profile)"
@@ -6105,9 +6107,11 @@ phase_straiker_inference() {
         --set "modelProfile=${model}"
         --set "global.dockerRegistry=${ecr_registry_prefixed}"
         --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
-        --wait
         --timeout "${HELM_TIMEOUT}"
       )
+      if [[ "${INFERENCE_NO_WAIT}" != true ]]; then
+        cmd+=(--wait)
+      fi
       if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
         cmd+=(--set "cloudProvider=gke")
       fi
