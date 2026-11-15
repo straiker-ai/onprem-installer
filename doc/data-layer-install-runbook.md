@@ -169,10 +169,13 @@ Until then Ascend keeps grading through v1, which is safe.
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.
 - **ClickHouse sync hardening rollout** (existing installs): run `--phase aws-data --rerun-phase` (adds the `grid_sync` password to Secrets Manager), then `--phase clickhouse --rerun-phase` (pods restart to pick up the user and the RDS CA), then `--phase ch-sync --rerun-phase`. If the sync then fails with a TLS error, the Aurora endpoint is reached under a name the certificate does not cover: set `postgresSslMode: require` on the clickhouse chart.
-- **Gateway exposure.** `--gateway-exposure internal` (default) puts the api-gateway on an internal load balancer; the installer checks the
-  result and blocks if it came up internet-facing. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud
-  provider's own annotations (an internal NLB). A load balancer's scheme cannot change in place: an install made before this check can still
-  have an internet-facing one, fix it with `kubectl delete svc api-gateway -n straiker` and re-running `--phase platform-services`.
+- **Gateway exposure.** The api-gateway is internet-facing by default (`--gateway-exposure public`) and then needs an ACM certificate
+  (`--gateway-cert-arn`); restrict who can connect with `--gateway-allowed-cidrs`. Ask for a private one with `--gateway-exposure internal`
+  (internal load balancer, VPC only, plain HTTP inside the VPC) or `none` (in-cluster only). Without a certificate the default stops and
+  says so: API keys never cross the internet in clear text. The installer checks the load balancer's scheme against the choice and blocks on a
+  mismatch. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud provider's own annotations. A load
+  balancer's scheme cannot change in place: to switch an existing install, `kubectl delete svc api-gateway -n straiker` and re-run
+  `--phase platform-services` with the exposure you want. The choice is remembered.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
 - **WAF, monitoring, ingress with real certificates** are not part of this install.

@@ -121,8 +121,9 @@ RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 # frontend IAM via Pod Identity). Remembered in install state; once on it stays on (--saas-frontend is a one-way switch).
 SAAS_FRONTEND="${SAAS_FRONTEND:-false}"
 
-# Platform api-gateway exposure: internal (default; internal NLB), public (internet-facing NLB with TLS), none (ClusterIP).
-# Remembered in install state. public needs --gateway-cert-arn (ACM certificate in the cluster's region).
+# Platform api-gateway exposure: public (default; internet-facing NLB with TLS), internal (internal NLB, VPC only: ask for it with
+# --gateway-exposure internal), none (ClusterIP). Remembered in install state. public needs --gateway-cert-arn (ACM certificate in the
+# cluster's region): the gateway is never internet-facing without TLS.
 GATEWAY_EXPOSURE="${GATEWAY_EXPOSURE:-}"
 GATEWAY_CERT_ARN="${GATEWAY_CERT_ARN:-}"
 GATEWAY_ALLOWED_CIDRS="${GATEWAY_ALLOWED_CIDRS:-}"
@@ -723,9 +724,11 @@ Options:
                                    that the selected products use), for a run where GPU quota covers part of the fleet. Not
                                    remembered: pass it only with --phase straiker-inference, never for a customer install.
   --gateway-exposure <mode>        Who can reach the platform api-gateway (the API behind the console and SDK calls):
-                                   internal (default): internal load balancer, VPC / private network only.
-                                   public: internet-facing, TLS required (--gateway-cert-arn), optionally limited
-                                   with --gateway-allowed-cidrs. none: in-cluster only (ClusterIP). Remembered.
+                                   public (default): internet-facing load balancer, TLS required (--gateway-cert-arn),
+                                   best limited with --gateway-allowed-cidrs. internal: internal load balancer, VPC /
+                                   private network only (choose it explicitly). none: in-cluster only (ClusterIP).
+                                   Remembered. Without --gateway-cert-arn the default stops and asks for a certificate
+                                   or --gateway-exposure internal: API keys never cross the internet in clear text.
   --gateway-cert-arn <arn>         ACM certificate for the gateway's TLS listener (required for --gateway-exposure public).
   --gateway-allowed-cidrs <list>   Comma-separated source CIDRs allowed to reach a public gateway (default: any).
   --sso-type <type>                With --data-layer: the customer's identity provider for "Sign in with SSO",
@@ -4130,11 +4133,11 @@ phase_ingest() {
 # environment ConfigMap, no AWS services). OAuth and PAT stay in-memory in both (Cognito is not part of the
 # on-prem stack yet). Generated once and kept in K8s Secrets: OAuth signing key + client ('api-gateway-oauth')
 # and the first environment's API key ('api-gateway-env').
-# Gateway exposure: flag > remembered > internal. public needs a certificate: the gateway is never put on the
+# Gateway exposure: flag > remembered > public. public needs a certificate: the gateway is never put on the
 # internet without TLS.
 remember_gateway_settings() {
   local mode="${GATEWAY_EXPOSURE:-$(get_metadata "gateway_exposure")}"
-  mode="${mode:-internal}"
+  mode="${mode:-public}"
   case "${mode}" in internal | public | none) ;; *)
     mark_phase_blocked "--gateway-exposure must be internal, public or none (got '${mode}')."
     return 1
@@ -4144,7 +4147,7 @@ remember_gateway_settings() {
   local cidrs="${GATEWAY_ALLOWED_CIDRS:-$(get_metadata "gateway_allowed_cidrs")}"
   if [[ "${mode}" == "public" ]]; then
     if [[ ! "${cert}" =~ ^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$ ]]; then
-      mark_phase_blocked "--gateway-exposure public needs --gateway-cert-arn <ACM certificate ARN> (the gateway is never exposed without TLS)."
+      mark_phase_blocked "The api-gateway is internet-facing by default and needs TLS: pass --gateway-cert-arn <ACM certificate ARN> (and preferably --gateway-allowed-cidrs), or choose a private gateway with --gateway-exposure internal. It is never exposed to the internet without TLS."
       return 1
     fi
     if [[ -z "${cidrs}" ]]; then
