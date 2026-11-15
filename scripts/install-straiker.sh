@@ -6327,7 +6327,62 @@ phase_straiker_core() {
   for values_file in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do
     cmd+=(-f "${values_file}")
   done
-  "${cmd[@]}"
+  "${cmd[@]}" || return
+  if gateway_accepts_console_session && helm status foundation -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    ensure_platform_tenant || return
+  fi
+}
+
+# The console's platform-API views read the organization's record from foundation (tenant_directory, keyed by straiker_id);
+# without it the console shows "no tenant record was found for your organization". SaaS creates the record when a tenant
+# is onboarded (operator API). On-prem there is one organization: the console's first customers row (getOnpremStraikerId),
+# created by the console's bootstrap in this phase. Copy its id into foundation's directory (named after the customer),
+# once; an existing record is left as it is. Runs in-cluster with the same postgres image as the data checks.
+ensure_platform_tenant() {
+  local ecr_registry registry_prefixed aurora_host pg_port name overrides result
+  ecr_registry="$(get_metadata "ecr_registry")"
+  registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
+  aurora_host="$(get_metadata "aurora_endpoint")"
+  pg_port="$(get_metadata "aurora_port")"
+  name="${STRAIKER_CUSTOMER_NAME:-$(get_metadata "straiker_customer_name")}"
+  name="${name:-Straiker}"
+  # One pod: read the console's tenant id (frontend DB, frontend role), upsert it into foundation's directory (foundation
+  # DSN). Values reach psql as variables (-v), never spliced into the SQL text.
+  local script
+  script="$(cat <<'SCRIPT'
+set -e
+sid=$(psql "host=$PGHOST port=$PGPORT dbname=frontend user=frontend sslmode=require" -tAc "select min(id) from customers")
+[ -n "$sid" ] || { echo "NO_CUSTOMER"; exit 0; }
+psql "$FOUNDATION_DATABASE_CONNECTION_STRING" -v ON_ERROR_STOP=1 -v sid="$sid" -v name="$TENANT_NAME" -tA <<"SQL"
+insert into tenant_directory (straiker_id, name) values (:sid, :'name') on conflict (straiker_id) do nothing;
+select setval(pg_get_serial_sequence('tenant_directory', 'straiker_id'), greatest((select max(straiker_id) from tenant_directory), 1));
+select 'TENANT ' || straiker_id || ' ' || name from tenant_directory where straiker_id = :sid;
+SQL
+SCRIPT
+)"
+  overrides="$(SCRIPT="${script}" REG="${registry_prefixed}" HOST="${aurora_host}" PORT="${pg_port:-5432}" NAME="${name}" python3 -c '
+import json, os
+env = [
+    {"name": "PGHOST", "value": os.environ["HOST"]},
+    {"name": "PGPORT", "value": os.environ["PORT"]},
+    {"name": "TENANT_NAME", "value": os.environ["NAME"]},
+    {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "straiker-db-dsn", "key": "PASSWORD_frontend"}}},
+    {"name": "FOUNDATION_DATABASE_CONNECTION_STRING",
+     "valueFrom": {"secretKeyRef": {"name": "platform-secret", "key": "FOUNDATION_DATABASE_CONNECTION_STRING"}}},
+]
+print(json.dumps({"spec": {"containers": [{"name": "platform-tenant", "image": os.environ["REG"] + "/library/postgres:16-alpine",
+    "stdin": True, "command": ["/bin/sh", "-c", os.environ["SCRIPT"]], "env": env}]}}))')"
+  kubectl delete pod platform-tenant -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  result="$(kubectl run platform-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+    --restart=Never --rm -i --quiet --overrides="${overrides}" </dev/null 2>&1 || true)"
+  if printf '%s\n' "${result}" | grep -q '^TENANT '; then
+    log "Platform tenant record: $(printf '%s\n' "${result}" | grep '^TENANT ' | head -1 | cut -d' ' -f2-)"
+  elif printf '%s\n' "${result}" | grep -q 'NO_CUSTOMER'; then
+    log "WARNING: the console has no organization yet (customers table empty); re-run phase straiker-core after its bootstrap."
+  else
+    mark_phase_blocked "Could not create the platform tenant record in foundation: ${result}"
+    return 1
+  fi
 }
 
 # --inference-profile / --inference-mode: flag > remembered in install state > default.
