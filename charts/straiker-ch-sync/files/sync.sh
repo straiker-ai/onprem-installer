@@ -4,7 +4,16 @@
 set -euo pipefail
 
 CH=(clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user "$CH_USER" --password "$CH_PASSWORD")
-q() { "${CH[@]}" --query "$1"; }
+# clickhouse-client echoes the failing statement on error, and these statements carry the Aurora password: keep stdout as the
+# data (callers capture it) and print stderr with the password masked.
+q() {
+  local err rc=0 msg
+  err="$(mktemp)"
+  "${CH[@]}" --query "$1" 2>"${err}" || rc=$?
+  if [[ -s "${err}" ]]; then msg="$(cat "${err}")"; echo "${msg//"${PG_PASSWORD}"/********}" >&2; fi
+  rm -f "${err}"
+  return "${rc}"
+}
 
 # Monotonic per cycle (microseconds); newer cycle always wins over older rows.
 V=$(( $(date +%s) * 1000000 ))

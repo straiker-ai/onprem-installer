@@ -60,8 +60,8 @@ users:
   grid_ingest:   { grants: ["GRANT INSERT ON grid.*"] }                                      # Kafka -> landing tables (chart straiker-ingest)
   grid_purge:    { grants: ["GRANT ALTER DELETE, SYSTEM VIEWS, SELECT ON *.*"] }            # registry agent purge
   # ch-sync CronJob (charts/straiker-ch-sync): copies registry tables from Aurora via postgresql() into grid.*. Only what a cycle
-  # runs: read and insert on grid, OPTIMIZE for the hourly merge, and the PostgreSQL table function. No DDL, no access management.
-  grid_sync:     { grants: ["GRANT SELECT, INSERT, OPTIMIZE ON grid.*", "GRANT POSTGRES ON *.*"] }
+  # runs: read and insert on grid, OPTIMIZE for the hourly merge, the PostgreSQL table function and the temporary tables it reads through. No DDL, no access management.
+  grid_sync:     { grants: ["GRANT SELECT, INSERT, OPTIMIZE ON grid.*", "GRANT POSTGRES ON *.*", "GRANT CREATE TEMPORARY TABLE ON *.*"] }
 
 # Dedicated, tainted pool created by chart straiker-system (karpenter.clickhouse). Set both to {} / []
 # to run on any node instead.
