@@ -124,7 +124,38 @@ Teardown: `nuke-eks.sh` removes the cluster but **not** the data, artifacts and 
 protection if the strategy was `ha`/`max`, then `tofu destroy` the data stack, delete the final snapshot
 (`<cluster>-aurora-final`) by hand, and retry on `BucketNotEmpty`.
 
-## 6. Known gaps and manual steps
+## 6. Defend v3 (Argus v3): what it can detect, and Ascend on v3
+
+Install with `--defend-engine v3`. The gateway sends `/api/v1/detect`, `/api/v3/detect` and the integration detect paths to
+`argus-service` (Argus v3). `straiker-defend` (v1) still runs next to it: the console's `argusEndpoint` and, until the key
+below exists, Ascend use it.
+
+**What Defend v3 can and cannot detect** (the model fleet is vision, wanda, kev-agentic, kev-non-agentic, thanos; 2 replicas each):
+
+| Detector | Needs | State on-prem |
+|---|---|---|
+| context-review | Bedrock (`global.openai.gpt-5.6-sol/-terra`) | on |
+| image-content, image-text | wanda, vision | on |
+| agentic-kev | kev-agentic | on once that model runs |
+| text-classifier (the content classifier) | antman, thor, quicksilver | **unavailable**: not deployed, and nothing in Argus calls `kev-4b-19cat` yet |
+| prompt-kev | a dedicated prompt Kev | **unavailable** by decision |
+| judge, groundedness, insecure-output, topic-relevance | the other dropped models | **unavailable** |
+
+An unavailable detector is reported as such by the engine, not as a failure. Regression expectations must treat those controls
+as off.
+
+**Smoke test:** `DETECT_API_KEY=sk_agt_... scripts/smoke-test-detect.sh` checks the gateway path (wrong key refused, real key
+gets a well-formed verdict). The key is an agent key: in the console create an agent, then mint a key for it.
+
+**Ascend on Argus v3 (optional).** Iris's graders switch from v1 to `/api/v3/detect` only when two things exist: the endpoint
+(set by the installer with `--defend-engine v3`) and an `sk_agt_` key of an agent named `iris-grader`, stored as
+`ARGUS_V3_API_KEY` in `straiker-secrets`. Steps (manual: agent creation is a console step):
+1. In the console create an agent named `iris-grader` (chat assistant) and mint an API key for it (shown once).
+2. Re-run `--phase straiker-ascend --rerun-phase --defend-engine v3` with `ARGUS_V3_GRADER_KEY=sk_agt_...` in the environment.
+3. Check `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
+Until then Ascend keeps grading through v1, which is safe.
+
+## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).
 - **Bedrock model access** is console-only.
