@@ -44,9 +44,12 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   internet-facing by default and always uses TLS; the installer issues the certificate from the domain:
   - the domain (or its parent) is a public **Route53 zone in the same account**: nothing else to do, the installer adds the DNS
     validation record, waits for the certificate, and points the name at the gateway. One command.
-  - the domain's DNS is **elsewhere** (Cloudflare, an on-prem DNS server, another account): the installer prints one validation record early
-    (add it while the rest installs) and, once the gateway exists, the record for the name itself. If the first record is not in place
-    when the gateway is installed, the step stops with the record and continues on the next run.
+  - the domain's DNS is **elsewhere** (Cloudflare, an on-prem DNS server, a Route53 zone in a *different* AWS account): **MANUAL STEP**, two
+    DNS records added by whoever manages that DNS. The installer prints the first (certificate validation) early, so it can be added
+    while the rest installs, and the second (the gateway name, a CNAME to the load balancer) once the gateway exists. Both are written to
+    `~/.straiker/gateway-dns-handoff-<cluster>.md`, a no-secrets sheet to send to the DNS admin. If the first record is not in place when
+    the gateway is installed, that step stops with the record and continues on the next run. Only a public Route53 zone in the installer's
+    own AWS account is automated.
   - **your own certificate**: `--gateway-cert-arn` (ISSUED, in the cluster's region); used as is. You add the DNS record for the name.
   - a private gateway needs none of this: `--gateway-exposure internal`.
   The installer's AWS identity needs `acm:RequestCertificate/DescribeCertificate/ListCertificates/ListTagsForCertificate/AddTagsToCertificate`,

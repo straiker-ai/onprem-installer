@@ -4361,6 +4361,49 @@ print(json.dumps({"Changes": [{"Action": "UPSERT", "ResourceRecordSet": {"Name":
   aws route53 change-resource-record-sets --hosted-zone-id "$1" --change-batch "${batch}" >/dev/null
 }
 
+# The manual DNS step (domain not in a Route53 zone of this account) as a sheet for the customer's DNS admin: no secrets, written
+# whenever a record becomes known and rewritten as the second one (the gateway name) appears.
+gateway_dns_handoff() {
+  local domain valid record file
+  domain="$(get_metadata "gateway_domain")"
+  valid="$(get_metadata "gateway_cert_validation")"
+  record="$(get_metadata "gateway_dns_record")"
+  [[ -n "${domain}" && -n "${valid}${record}" ]] || return 0
+  file="${HOME}/.straiker/gateway-dns-handoff-${CLUSTER_NAME}.md"
+  mkdir -p "${HOME}/.straiker"
+  {
+    echo "# DNS records for the Straiker API gateway: ${domain}"
+    echo
+    echo "Add these where **${domain}** is hosted (no secrets in this sheet; cluster ${CLUSTER_NAME})."
+    echo
+    echo "## 1. Certificate validation: add this first"
+    if [[ -n "${valid}" ]]; then
+      read -r vname vtype vvalue <<<"${valid}"
+      echo
+      echo "| Name | Type | Value |"
+      echo "|---|---|---|"
+      echo "| \`${vname}\` | ${vtype} | \`${vvalue}\` |"
+      echo
+      echo "AWS then issues the TLS certificate, usually within minutes. Keep the record: it renews the certificate automatically."
+    else
+      echo
+      echo "Not published yet; re-run the installer and this sheet is updated."
+    fi
+    echo
+    echo "## 2. The gateway name: add this once the installer prints it"
+    echo
+    if [[ -n "${record}" ]]; then
+      read -r dname dtype dvalue <<<"${record}"
+      echo "| Name | Type | Value |"
+      echo "|---|---|---|"
+      echo "| \`${dname}\` | ${dtype} | \`${dvalue}\` |"
+    else
+      echo "Created after the gateway's load balancer exists (late in the install). The installer prints it and updates this sheet."
+    fi
+  } >"${file}"
+  log "MANUAL STEP: DNS records for ${domain} are in ${file} (send it to whoever manages that DNS)."
+}
+
 # Phase: request the gateway certificate early so DNS validation overlaps with the rest of the install. A Route53 zone in this account:
 # the validation record is written here. DNS elsewhere: the record to add is printed now and again when the gateway needs the certificate.
 phase_gateway_cert() {
@@ -4419,6 +4462,7 @@ phase_gateway_cert() {
   else
     log "No public Route53 zone for ${domain} in this account. ADD THIS DNS RECORD where ${domain} is hosted (the install continues; the gateway step waits for it):"
     log "    ${rname}  ${rtype}  ${rvalue}"
+    gateway_dns_handoff
   fi
 }
 
@@ -4436,7 +4480,7 @@ gateway_cert_require_issued() {
     sleep 15
   done
   rec="$(get_metadata "gateway_cert_validation")"
-  mark_phase_blocked "The gateway certificate ${cert} is '${status:-unknown}', not ISSUED. DNS validation needs this record where $(get_metadata "gateway_domain") is hosted: ${rec:-(run phase gateway-cert to print it)}. Add it, wait a few minutes, then re-run this phase."
+  mark_phase_blocked "The gateway certificate ${cert} is '${status:-unknown}', not ISSUED. DNS validation needs this record where $(get_metadata "gateway_domain") is hosted: ${rec:-(run phase gateway-cert to print it)}. Add it (the sheet ${HOME}/.straiker/gateway-dns-handoff-${CLUSTER_NAME}.md has it), wait a few minutes, then re-run this phase."
   return 1
 }
 
@@ -4451,6 +4495,7 @@ gateway_dns_ensure() {
   if [[ -z "${zone}" ]]; then
     log "ADD THIS DNS RECORD where ${domain} is hosted:  ${domain}  CNAME  ${host}"
     set_metadata "gateway_dns_record" "${domain} CNAME ${host}"
+    gateway_dns_handoff
     return 0
   fi
   # A CNAME is not allowed at a zone apex: use an alias to the load balancer there.
