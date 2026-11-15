@@ -32,7 +32,15 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
 - Bedrock model access for `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`
   (Bedrock console > Model access; **console only, one time per account**). The installer's preflight blocks with a
   clear message if it is missing.
-- Enough quota for the GPU instances (`g4dn.12xlarge` and `g5.2xlarge` on-demand vCPUs) and for ECR/Aurora/MSK.
+- **GPU quota, requested before the install** (a new account usually has 0-8 vCPUs, and the models cannot start without it).
+  The fleet is 10 model servers, one GPU node each, so about **80 vCPUs** of "Running On-Demand G and VT instances"
+  (quota code `L-DB2E81BA`, per region). Ask for **512 vCPUs** (Straiker's standard request; it leaves room for upgrades, extra replicas and larger GPU nodes):
+  `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-DB2E81BA --desired-value 512`
+  (approval takes minutes to hours; check with `aws service-quotas get-service-quota ...`). The quota counts every
+  G/VT instance already running in the account, so the installer subtracts those and stops in its first phase if too
+  little is left. A100/H100 (p4d, p4de, p5) use a different quota, "Running On-Demand P instances" (`L-417A185B`),
+  about 192 vCPUs for two p4d.24xlarge; those instance families are not enabled in the installer yet.
+- Quota for ECR, Aurora and MSK (the defaults are normally enough).
 
 ### On Straiker's side (once per customer, once per release)
 These live in the Straiker artifact account (631748089429, us-east-1) and are **not** done by the installer:
@@ -105,6 +113,7 @@ no read-only replicas, and no failed Jobs. A passing run prints `All data-layer 
 |---|---|
 | `a phase needs attention: <message>` | fix what the message says, run the same command again |
 | `the install failed` / installer error | read the output above it; fix; run the same command again |
+| `EC2 quota 'Running On-Demand G and VT instances' is N vCPUs ...` | request the increase (section 2), wait for approval, run the same command again. Without it Karpenter fails with `VcpuLimitExceeded` and the model pods stay Pending |
 | `still waiting after N minutes` | check `kubectl get jobs -n straiker`; run again (`--timeout-minutes` to wait longer) |
 | `... belongs to cluster 'x'` | `~/.straiker/install.json` is from another install; move it aside |
 

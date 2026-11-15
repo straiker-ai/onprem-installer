@@ -647,9 +647,15 @@ curl -fsSL https://raw.githubusercontent.com/straiker-ai/onprem-installer/dist/u
       </ul>
       <div class="callout flag"><b>Flag for SE/FDE:</b> The installer's automatic <code>ai-provider-secrets</code> phase only fires when Ascend is selected. On a Defend-only POV where the customer wants frontier false-positive reduction turned on, nobody automates the Bifrost/Bedrock credential wiring — an FDE has to set it up manually (values override + writing the secret) outside the standard phase flow. Confirm during scoping whether Defend-only means "no AI provider needed" or "frontier is wanted, so plan the manual step."</div>
 
-      <h3 id="sec2-6">2.6 GPU capacity</h3>
-      <p>Model serving runs on GPU-backed Karpenter nodes (instance families g4dn, g5, g6e). The installer throttles itself to 4 concurrent model installs specifically to avoid tripping the account's GPU instance quota mid-install — but if the target region's default vCPU/GPU quota for those families is low (a common default for accounts that have never run GPU workloads), the install stalls waiting for nodes Karpenter can't launch.</p>
-      <div class="callout flag"><b>Flag for SE/FDE:</b> A customer's first-ever GPU workload in an AWS account is one of the most common places a POV install stalls. Request a quota increase for the relevant instance families in the target region before the install date, not during it.</div>
+      <h3 id="sec2-6">2.6 GPU capacity and quota</h3>
+      <p>Model serving runs on GPU-backed Karpenter nodes: one node per model server, 10 servers (5 models, 2 replicas each) in the production profile. On g6e that is about <b>80 vCPUs</b> of the EC2 quota <b>"Running On-Demand G and VT instances"</b> (quota code <code>L-DB2E81BA</code>, set per region). A new AWS account usually has 0&ndash;8 vCPUs, so the install cannot start the models until the customer raises it.</p>
+      <ul class="bullets">
+        <li>Request <b>512 vCPUs</b> (Straiker's standard ask; it leaves room for upgrades and larger GPU nodes) in the target region before the install date: <code>aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-DB2E81BA --desired-value 512</code>. Approval takes minutes to hours.</li>
+        <li>The quota counts every G/VT instance already running in the account, not only Straiker's. The installer subtracts those and stops in its first phase, before building anything, if too little is left.</li>
+        <li>A100/H100 (p4d, p4de, p5) use a different quota, <b>"Running On-Demand P instances"</b> (<code>L-417A185B</code>): about 192 vCPUs for two p4d.24xlarge. A100 capacity can also need a capacity reservation. These families are not enabled in the installer yet.</li>
+        <li>The customer's AWS identity needs <code>servicequotas:GetServiceQuota</code> and <code>ec2:DescribeInstances</code> for the check; without them the installer only warns.</li>
+      </ul>
+      <div class="callout flag"><b>Flag for SE/FDE:</b> A customer's first-ever GPU workload in an AWS account is one of the most common places a POV install stalls. Confirm the quota is approved before the install date, not during it.</div>
     </section>
 
     <section id="sec3">

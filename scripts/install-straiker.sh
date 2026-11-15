@@ -2172,6 +2172,7 @@ phase_eks_tfbe() {
   fi
 
   require_command aws
+  preflight_gpu_quota || return
   require_command tofu
   require_terraform_dir "${TFBE_SRC}" || return
   sync_terraform_workdir "${TFBE_SRC}" "${TFBE_DIR}"
@@ -5837,10 +5838,24 @@ check_gpu_vcpu_quota() {
     | awk '$1 ~ /^(g|vt)[0-9]/ { n += $2 * $3 } END { print n + 0 }')"
   available="$(awk -v q="${quota}" -v u="${used:-0}" 'BEGIN { printf "%d", q - u }')"
   if [[ "${available}" -lt "${needed}" ]]; then
-    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}), then re-run this phase."
+    mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase to 512 vCPUs (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}), then re-run this phase."
     return 1
   fi
   log "EC2 G/VT vCPU quota OK: ${available} free of ${quota} (${used:-0} in use), ${needed} needed for ${nodes} GPU nodes."
+}
+
+# Prerequisites check, run in the first phase (before any cluster is built): production needs one GPU node per model server, and a
+# new AWS account usually has a G/VT quota of 0-8 vCPUs, so the fleet cannot start until the customer raises it.
+preflight_gpu_quota() {
+  [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
+  [[ "$(inference_mode)" == "vllm" && "$(inference_profile)" == "production" ]] || return 0
+  local count=0 line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && count=$((count + 1))
+  done < <(inference_models_for_products)
+  [[ ${count} -gt 0 ]] || return 0
+  require_command aws
+  check_gpu_vcpu_quota $((count * 2))
 }
 
 # Advertise each GPU N times (test profile time-slicing) by upgrading straiker-system's device plugin; 0 turns it off.
