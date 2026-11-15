@@ -512,10 +512,12 @@ if [[ -n "${QUEUE_URL}" && "${QUEUE_URL}" != "None" ]]; then
   echo "  [✓] SQS queue deleted"
 fi
 
-# 5. CloudWatch log groups for the EKS cluster
-LOG_GROUPS=$(aws logs describe-log-groups \
-  --log-group-name-prefix "/aws/eks/${CLUSTER}" --region "${REGION}" \
-  --query 'logGroups[].logGroupName' --output text 2>/dev/null || echo "")
+# 5. CloudWatch log groups for the EKS cluster (control plane + Container Insights)
+LOG_GROUPS=$(for P in "/aws/eks/${CLUSTER}/" "/aws/containerinsights/${CLUSTER}/"; do
+  aws logs describe-log-groups \
+    --log-group-name-prefix "${P}" --region "${REGION}" \
+    --query 'logGroups[].logGroupName' --output text 2>/dev/null || true
+done | tr '\t' '\n' | { grep -v '^None$' || true; } | tr '\n' ' ')
 for LG in ${LOG_GROUPS}; do
   [[ "${LG}" == "None" ]] && continue
   echo "  deleting log group: ${LG}..."

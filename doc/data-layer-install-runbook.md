@@ -25,7 +25,20 @@ per-IP rate limit (`--waf-rate-limit`, default 10000 requests / 5 minutes, `0` =
 count instead of block**: the Detect API receives attack prompts by design, and blocking them would break the product. Request logs go to
 CloudWatch Logs `aws-waf-logs-<cluster>-edge` (30 days; `Authorization`, `Cookie` and `X-Api-Key` redacted).
 
-Not included: monitoring/alerting.
+**CloudWatch** (phase `observability`, `terraform/aws/observability`, the last phase):
+
+| What | Where |
+|---|---|
+| Amazon CloudWatch Observability EKS add-on: Container Insights (enhanced) metrics for nodes, pods and GPUs (DCGM on the GPU nodes) | CloudWatch > Container Insights, cluster `<cluster>` |
+| Every container's stdout/stderr (Fluent Bit), node and data-plane logs; 30-day retention | Logs `/aws/containerinsights/<cluster>/{application,dataplane,host,performance}` |
+| EKS control-plane logs (audit, api, authenticator) | Logs `/aws/eks/<cluster>/cluster` |
+| WAF request logs | Logs `aws-waf-logs-<cluster>-edge` |
+| Alarms: failed nodes, node CPU > 85 %, node memory > 90 %, edge ALB 5xx (its own > 25, targets' > 50 per 5 min), each Aurora cluster's CPU > 80 % and capacity > 90 % of max ACUs | Alarms `<cluster>-*`, all to SNS topic `<cluster>-alarms` |
+
+Application Signals is switched **off**: by default the add-on would inject an OpenTelemetry agent into every Java/Python
+service on its next restart. `--alarm-email <address>` (repeatable) subscribes addresses to the topic: **MANUAL STEP**, each
+address must click the link in AWS's "Subscription Confirmation" mail before it receives alarms. Thresholds and extra alarms:
+`var.alarms` in `terraform/aws/observability` (a built-in alarm's key replaces it), then `--phase observability --rerun-phase`.
 
 ## 2. Before you run it
 
@@ -93,6 +106,7 @@ scripts/install-data-layer.sh \
   --cluster-name <name> --region <region> --customer-name <customer> \
   --profile <aws-profile> --expect-account <account-id> \
   --domain <customer.com> --route53 \
+  --alarm-email <ops@customer.com> \
   [--customer-key-file ./key.txt]
 ```
 Without the zone in this account: `--certificate-arn <arn>` instead of `--route53`. Questions asked on the first run also include
@@ -221,7 +235,11 @@ Until then Ascend keeps grading through v1, which is safe.
   Load Balancer Controller (in-tree NLB with a certificate) has been rendered and tested offline only; check it on the first real install.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
-- **Monitoring/alerting** is not part of this install yet (WAF logs are the only CloudWatch logs besides EKS control plane).
+- **Dashboards and tracing** (Grafana, OpenTelemetry, Argo CD from the reference architecture) are not part of this install; CloudWatch
+  covers metrics, logs and alarms. Re-run `--phase observability --rerun-phase` after changing the edge (the ALB alarms follow the
+  ALB) or adding an Aurora cluster.
+- **Existing installs** get CloudWatch with `--phase observability`; log groups the agent created earlier and a hand-installed add-on
+  are adopted, not recreated. The cluster needs the `eks-pod-identity-agent` add-on (the phase stops with the command if it is missing).
 - **WAF tuning**: body rules only count. Review the counted matches in the WAF log after the first real traffic and decide per rule;
   change them in `terraform/aws/edge` (`waf_managed_rule_groups`), then `--phase edge-infra --rerun-phase`.
 - **Edge**: `--edge-type internal` is a port-forward with self-signed certificates, for offline tests only.

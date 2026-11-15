@@ -31,6 +31,7 @@ EDGE_TYPE="xalb"
 DOMAIN=""
 CERT_ARN=""
 ROUTE53=false
+ALARM_EMAILS=()
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -71,6 +72,7 @@ Options:
   --multiarch-override R=U   image whose copy in your ECR lacks arm64, as <repo>:<tag>=<upstream> (repeatable).
                              Default: maximhq/bifrost at the tag pinned in charts/straiker-artifact, from Docker Hub.
                              Pass --multiarch-override none to disable.
+  --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
   --installer-arg ARG        extra argument for install-straiker.sh (repeatable)
   --timeout-minutes N        give up waiting after N minutes in total (default: 240)
   --poll-seconds N           seconds between checks while waiting (default: 30)
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --route53) ROUTE53=true; shift ;;
     --certificate-arn) CERT_ARN="${2:-}"; shift 2 ;;
+    --alarm-email) ALARM_EMAILS+=("${2:-}"); shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -211,7 +214,8 @@ About to install into AWS account ${ACCOUNT_ID}, region ${REGION}:
   customer ....... ${CUSTOMER_NAME}, products ${PRODUCTS}, AI provider ${AI_PROVIDER_MODE}, edge ${EDGE_TYPE}${DOMAIN:+ (${DOMAIN})}
   creates ........ VPC + EKS + Karpenter, ECR, Aurora PostgreSQL, MSK, ElastiCache, EFS, ClickHouse (2 + Keeper),
                    the platform services, Ascend and Defend, GPU nodes for the inference models, and
-                   for xalb/alb an Application Load Balancer with AWS WAF
+                   for xalb/alb an Application Load Balancer with AWS WAF, and CloudWatch (Container
+                   Insights, container logs, alarms)
   time / cost .... about 1.5-2 hours, and roughly 6-8 USD per hour while it runs (GPU nodes dominate)
 EOF
 }
@@ -250,6 +254,7 @@ if [[ "${ROUTE53}" == true ]]; then
   [[ "${EDGE_TYPE}" == "alb" ]] && run_args+=(--alb-route53)
 fi
 [[ -n "${CERT_ARN}" ]] && run_args+=(--alb-certificate-arn "${CERT_ARN}")
+for a in ${ALARM_EMAILS[@]+"${ALARM_EMAILS[@]}"}; do run_args+=(--alarm-email "${a}"); done
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then run_args+=("${EXTRA_ARGS[@]}"); fi
 
 # The customer key is stored in the install state after the first pass, so only the first run needs it.
