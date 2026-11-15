@@ -147,6 +147,12 @@ as off.
 **Smoke test:** `DETECT_API_KEY=sk_agt_... scripts/smoke-test-detect.sh` checks the gateway path (wrong key refused, real key
 gets a well-formed verdict). The key is an agent key: in the console create an agent, then mint a key for it.
 
+**Check that events reach ClickHouse:** `DETECT_API_KEY=sk_agt_... scripts/verify-clickhouse-ingest.sh` sends a few detect calls, waits,
+and shows rows landing in `grid.raw_event` / `grid.raw_finding` plus each ingest stream's read / written / error / dead-letter
+counts (from Redpanda Connect's metrics). It fails with the likely cause: nothing read = Argus did not publish to MSK; read but not
+written = the ClickHouse insert fails. `audit_event` fills only from console activity (create or edit something, then
+`--expect-audit`). Without the key it only observes.
+
 **Ascend on Argus v3 (optional).** Iris's graders switch from v1 to `/api/v3/detect` only when two things exist: the endpoint
 (set by the installer with `--defend-engine v3`) and an `sk_agt_` key of an agent named `iris-grader`, stored as
 `ARGUS_V3_API_KEY` in `straiker-secrets`. Steps (manual: agent creation is a console step):
