@@ -218,6 +218,24 @@ written = the ClickHouse insert fails. `audit_event` fills only from console act
 3. Check `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
 Until then Ascend keeps grading through v1, which is safe.
 
+## 6b. Console: new Defend overview and Controls (platform API)
+
+The console's Defend overview (identities, surfaces, agents, models, tools/MCP, findings) and Controls call the platform
+API through the api-gateway with the console's own signed session. All automatic with `--data-layer` and api-gateway
+2.3.13 or newer; with an older gateway the installer keeps both off (sign-in would end in 401). What each piece does:
+
+| Piece | Where | Why |
+|---|---|---|
+| Gateway accepts the console session | api-gateway `feature/onprem-session-auth` (image `v2.3.13-rc2`, **not on main yet**), env `ONPREM_SESSION_SIGNING_KEY` from the console's `frontend-session-source` secret | the on-prem console signs its own session instead of passing a Cognito token |
+| Role -> scopes for that session | gateway `straiker.onprem-session.role-scopes` (= foundation `authz/permissions.yaml`) | platform services authorize on scopes; SaaS puts them in the Cognito token |
+| Flags `defend-platform-api-overview`, `control-policies` | phase `straiker-core` | turn the views on |
+| Organization record (`tenant_directory`) | phase `straiker-core` (`ensure_platform_tenant`): the console's first `customers` id, named after `--straiker-customer-name` | otherwise "no tenant record was found for your organization" |
+| ClickHouse read profile `readonly=2` | `charts/straiker-clickhouse` | grid sets per-query limits; `readonly=1` made inventory return 502 |
+| Registry -> Argus control catalog | `straiker.registry.gateway.url` (phase `platform-services`) | default control policies (Endpoint, Gateway, Browser, Cloud) |
+
+**Merge to api-gateway `main`:** only the auth commits (`4a813e0`, `edfd29a`), not `chore/onprem-release`'s build changes.
+Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/straiker-artifact`.
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).
