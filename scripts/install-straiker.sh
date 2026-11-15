@@ -7492,7 +7492,9 @@ show_access_info() {
   if [[ -n "$(get_metadata "gateway_domain")" && "$(get_metadata "gateway_exposure")" == "public" ]]; then
     log ""
     log "API gateway (SDK / agents): https://$(get_metadata "gateway_domain")   (TLS: $(get_metadata "gateway_cert_source" | sed 's/own/your ACM certificate/;s/issued/ACM certificate issued by the installer/'))"
-    [[ -n "$(get_metadata "gateway_dns_record")" ]] && log "  DNS still to add: $(get_metadata "gateway_dns_record")"
+    if [[ -n "$(get_metadata "gateway_dns_record")" ]]; then
+      log "  DNS still to add: $(get_metadata "gateway_dns_record")"
+    fi
   fi
 }
 
