@@ -3733,6 +3733,28 @@ clickhouse_replicated() {
   if [[ "${n:-1}" =~ ^[0-9]+$ && "${n:-1}" -gt 1 ]]; then echo true; else echo false; fi
 }
 
+# Adds a random password to <cluster>/clickhouse/credentials for every user in CLICKHOUSE_PASSWORD_USERS that has none. Existing
+# passwords are never changed. A secret that does not exist yet is left to aws-data (Terraform creates it with all the keys).
+ensure_clickhouse_secret_keys() {
+  local name="${CLUSTER_NAME}/clickhouse/credentials" current merged
+  current="$(aws secretsmanager get-secret-value --secret-id "${name}" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null || true)"
+  [[ -n "${current}" ]] || return 0
+  merged="$(CURRENT="${current}" USERS="${CLICKHOUSE_PASSWORD_USERS}" python3 - <<'PY'
+import json, os, secrets, string
+current = json.loads(os.environ["CURRENT"])
+alphabet = string.ascii_letters + string.digits
+added = [u for u in os.environ["USERS"].split() if not current.get(u)]
+for u in added:
+    current[u] = "".join(secrets.choice(alphabet) for _ in range(32))
+print(json.dumps(current) if added else "SAME")
+PY
+)"
+  [[ "${merged}" == "SAME" ]] && return 0
+  aws secretsmanager put-secret-value --secret-id "${name}" --region "${AWS_REGION}" --secret-string "${merged}" >/dev/null \
+    || { mark_phase_blocked "Could not add the missing ClickHouse user password(s) to ${name}."; return 1; }
+  log "Added the missing ClickHouse user password(s) to ${name}."
+}
+
 phase_clickhouse() {
   if [[ "${DATA_LAYER}" != "true" ]]; then
     log "--data-layer not set — skipping ClickHouse."
@@ -3750,15 +3772,9 @@ phase_clickhouse() {
     mark_phase_blocked "No ECR registry in state. Run phase 'aws-artifacts' first."
     return
   fi
-  # The grid_sync password (ch-sync's least-privilege user) is created by aws-data. An install that predates it needs aws-data
-  # re-run first: say so here rather than failing later inside External Secrets.
-  local ch_secret
-  ch_secret="$(aws secretsmanager get-secret-value --secret-id "${CLUSTER_NAME}/clickhouse/credentials" --region "${AWS_REGION}" \
-    --query SecretString --output text 2>/dev/null || true)"
-  if [[ -n "${ch_secret}" ]] && ! python3 -c 'import json,sys; sys.exit(0 if "grid_sync" in json.loads(sys.argv[1]) else 1)' "${ch_secret}" 2>/dev/null; then
-    mark_phase_blocked "Secrets Manager '${CLUSTER_NAME}/clickhouse/credentials' has no grid_sync password yet. Run phase aws-data first (--phase aws-data --rerun-phase --data-layer), then this phase."
-    return
-  fi
+  # Terraform sets the secret's contents once and never rewrites them, so a ClickHouse user added after the first install (grid_sync)
+  # has no password there. Add the missing ones here (generated, merged, existing values untouched).
+  ensure_clickhouse_secret_keys || return
   ensure_clickhouse_passwords_secret || return
   helm upgrade --install straiker-clickhouse "${REPO_ROOT}/charts/straiker-clickhouse" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
