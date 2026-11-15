@@ -5832,7 +5832,12 @@ phase_platform_services() {
     local -a extra=()
     case "${svc}" in
       foundation) extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}") ;;
-      registry) extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/") ;;
+      registry)
+        extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/")
+        # Argus control catalog (Controls page, default policies): fetched through the gateway's /internal/argus tier with
+        # REGISTRY_GATEWAY_S2S_KEY (platform-secret). Without the URL the surface is off ("control catalog is unavailable").
+        extra+=(--set-string "${key}.gateway.url=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443")
+        ;;
       databridge)
         # The chart pins docker.redpanda.com/redpandadata/connect:<tag>, a public pull at runtime (breaks locked-down egress and the
         # "every image from the customer's registry" rule): use the mirrored copy, at the tag the mirror list carries.
@@ -5856,6 +5861,10 @@ phase_platform_services() {
         ;;
     esac
     log "Installing platform service '${svc}' (${tag})..."
+    # The platform charts carry no config checksum: a config-only change (ConfigMap <svc>-config) does not restart the
+    # pods, which keep the old environment. Compare it around the upgrade and restart when it changed.
+    local cfg_before cfg_after
+    cfg_before="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12)"
     helm upgrade --install "${svc}" "${chart}" \
       --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
       -f "${chart}/values-onprem.yaml" \
@@ -5865,6 +5874,13 @@ phase_platform_services() {
       --set-string "${key}.migrations.image.version=${tag}" \
       --set "${key}.observability.otel.requireSecret=false" \
       ${extra[@]+"${extra[@]}"}
+    cfg_after="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12)"
+    if [[ "${cfg_before}" != "${cfg_after}" ]] && kubectl get deploy "${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+      log "Configuration of '${svc}' changed: restarting it."
+      kubectl rollout restart "deploy/${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null
+      kubectl rollout status "deploy/${svc}-deployment" -n "${INFRA_NAMESPACE}" --timeout=10m >/dev/null \
+        || { mark_phase_blocked "'${svc}' did not become ready after its configuration changed."; return; }
+    fi
   done
 }
 
