@@ -7109,15 +7109,15 @@ phase_edge_infra() {
       ;;
     alb)
       enable_alb_controller=true
-      enable_route53="$(get_metadata "alb_route53_automation")"
+      enable_route53="$([[ "$(get_metadata "alb_route53_automation")" == "true" ]] && echo true || echo false)"
       enable_external_dns=false
       enable_cert_manager=false
       domain="$(get_metadata "custom_domain")"
       ;;
     xalb)
       enable_alb_controller=true
-      enable_route53="$(get_metadata "xalb_route53_automation")"
-      enable_external_dns="$(get_metadata "xalb_route53_automation")"
+      enable_route53="$([[ "$(get_metadata "xalb_route53_automation")" == "true" ]] && echo true || echo false)"
+      enable_external_dns="$([[ "$(get_metadata "xalb_route53_automation")" == "true" ]] && echo true || echo false)"
       enable_cert_manager=false
       domain="$(get_metadata "custom_domain")"
       ;;
@@ -7139,7 +7139,7 @@ phase_edge_infra() {
     -var="prefix=${TF_PREFIX}" \
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="san_hostnames=${san_hostnames_json}" \
-    -var="enable_bastion=$(get_metadata "alb_provision_bastion")" \
+    -var="enable_bastion=$([[ "$(get_metadata "alb_provision_bastion")" == "true" ]] && echo true || echo false)" \
     -var="enable_alb_controller=${enable_alb_controller}" \
     -var="alb_controller_namespace=${ALB_CONTROLLER_NAMESPACE}" \
     -var="alb_controller_service_account_name=${ALB_CONTROLLER_SERVICE_ACCOUNT}" \
