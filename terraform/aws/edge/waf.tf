@@ -38,7 +38,7 @@ resource "aws_wafv2_web_acl" "edge" {
   count = var.enable_waf ? 1 : 0
 
   name        = local.waf_name
-  description = "Straiker edge ALB (${var.cluster_name}): host allowlists, rate limit, AWS managed rules"
+  description = "Straiker edge ALB ${var.cluster_name} - host allowlists, rate limit, AWS managed rules"
   scope       = "REGIONAL"
 
   default_action {
