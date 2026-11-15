@@ -15,10 +15,21 @@ metadata:
     {{- include "straiker.labels" . | nindent 4 }}
   annotations:
     {{- if ne $exposure "none" }}
-    # AWS Load Balancer Controller: an NLB, internal unless exposure is public. TLS ends at the NLB (backend is HTTP :8080).
+    {{- if eq (toString $svc.awsLoadBalancerController) "true" }}
+    # AWS Load Balancer Controller (installed with edge types alb/xalb): an NLB, internal unless exposure is public.
+    # TLS ends at the NLB (backend is HTTP :8080).
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: {{ ternary "internet-facing" "internal" (eq $exposure "public") }}
+    {{- else }}
+    # No controller in the cluster: the cloud provider's built-in one provisions the load balancer, and it ignores the
+    # annotations above (it would create an INTERNET-FACING classic ELB, or leave a Service with no load balancer).
+    # These are the ones it honours: an NLB, internal unless exposure is public.
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    {{- if ne $exposure "public" }}
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+    {{- end }}
+    {{- end }}
     {{- end }}
     {{- if eq $exposure "public" }}
     service.beta.kubernetes.io/aws-load-balancer-ssl-cert: {{ $svc.certificateArn | quote }}

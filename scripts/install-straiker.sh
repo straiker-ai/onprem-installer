@@ -4232,6 +4232,9 @@ install_api_gateway() {
       cidr_i=$((cidr_i + 1))
     done
   fi
+  # Which controller provisions the gateway's load balancer decides which Service annotations take effect.
+  local gateway_lbc=false
+  kubectl get deploy aws-load-balancer-controller -n kube-system >/dev/null 2>&1 && gateway_lbc=true
   log "Installing platform service 'api-gateway' (${tag}, exposure $(get_metadata "gateway_exposure"))..."
   helm upgrade --install api-gateway "${chart}" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
@@ -4239,6 +4242,7 @@ install_api_gateway() {
     --set-string straiker.apiGateway.image.registry="$(docker_registry_with_prefix "${ecr_registry}")/straiker" \
     --set-string straiker.apiGateway.image.version="${tag}" \
     --set-string straiker.apiGateway.service.exposure="$(get_metadata "gateway_exposure")" \
+    --set-string straiker.apiGateway.service.awsLoadBalancerController="${gateway_lbc}" \
     --set-string straiker.apiGateway.service.certificateArn="$(get_metadata "gateway_cert_arn")" \
     ${gateway_cidr_args[@]+"${gateway_cidr_args[@]}"} \
     --set-file straiker.apiGateway.oauth.inmemory.signingKey="${key_file}" \
@@ -4247,7 +4251,42 @@ install_api_gateway() {
     "${mode_args[@]}"
   local rc=$?
   rm -f "${key_file}"
-  return ${rc}
+  [[ ${rc} -eq 0 ]] || return ${rc}
+  verify_gateway_exposure
+}
+
+# The gateway must never be internet-facing unless --gateway-exposure public was chosen (with TLS and, ideally, source ranges). Looks
+# the load balancer up by its hostname and blocks if it is public by accident. No hostname (exposure none, or still pending): nothing
+# to check yet. Also run by verify-data-layer.
+gateway_lb_scheme() {
+  local host=$1 scheme
+  scheme="$(aws elbv2 describe-load-balancers --region "${AWS_REGION}" --query "LoadBalancers[?DNSName=='${host}'].Scheme | [0]" --output text 2>/dev/null)"
+  if [[ -z "${scheme}" || "${scheme}" == "None" ]]; then
+    scheme="$(aws elb describe-load-balancers --region "${AWS_REGION}" --query "LoadBalancerDescriptions[?DNSName=='${host}'].Scheme | [0]" --output text 2>/dev/null)"
+  fi
+  [[ "${scheme}" == "None" ]] && scheme=""
+  printf '%s' "${scheme}"
+}
+
+verify_gateway_exposure() {
+  local mode host="" scheme="" n
+  mode="$(get_metadata "gateway_exposure")"
+  [[ "${mode}" == "none" ]] && return 0
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    host="$(kubectl get svc api-gateway -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)"
+    [[ -n "${host}" ]] && break
+    sleep 10
+  done
+  if [[ -z "${host}" ]]; then
+    log "WARNING: the api-gateway load balancer has no address yet; check 'kubectl describe svc api-gateway -n ${INFRA_NAMESPACE}'."
+    return 0
+  fi
+  scheme="$(gateway_lb_scheme "${host}")"
+  if [[ "${mode}" != "public" && "${scheme}" == "internet-facing" ]]; then
+    mark_phase_blocked "The api-gateway load balancer ${host} is INTERNET-FACING but --gateway-exposure is '${mode}'. An older install left it (a load balancer's scheme cannot change in place). Delete the Service so a new internal one is created, then re-run this phase: kubectl delete svc api-gateway -n ${INFRA_NAMESPACE}"
+    return 1
+  fi
+  log "api-gateway load balancer is ${scheme:-of unknown scheme} (exposure ${mode})."
 }
 
 # Post-install checks for the AWS data tier (opt-in via --data-layer). Gate between the data

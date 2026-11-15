@@ -169,6 +169,10 @@ Until then Ascend keeps grading through v1, which is safe.
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.
 - **ClickHouse sync hardening rollout** (existing installs): run `--phase aws-data --rerun-phase` (adds the `grid_sync` password to Secrets Manager), then `--phase clickhouse --rerun-phase` (pods restart to pick up the user and the RDS CA), then `--phase ch-sync --rerun-phase`. If the sync then fails with a TLS error, the Aurora endpoint is reached under a name the certificate does not cover: set `postgresSslMode: require` on the clickhouse chart.
+- **Gateway exposure.** `--gateway-exposure internal` (default) puts the api-gateway on an internal load balancer; the installer checks the
+  result and blocks if it came up internet-facing. Without the AWS Load Balancer Controller (edge type `internal`) the chart uses the cloud
+  provider's own annotations (an internal NLB). A load balancer's scheme cannot change in place: an install made before this check can still
+  have an internet-facing one, fix it with `kubectl delete svc api-gateway -n straiker` and re-running `--phase platform-services`.
 - **Bifrost database** is created but the bifrost chart does not use Postgres yet.
 - **GPU sizing** starts on `g4dn.12xlarge` + `g5.2xlarge`; the SaaS regions use `g6e.4xlarge`. Upgrading is a node-pool change.
 - **WAF, monitoring, ingress with real certificates** are not part of this install.
