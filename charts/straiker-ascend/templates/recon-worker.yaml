@@ -58,6 +58,17 @@ spec:
               value: {{ include "ascend.argusEndpoint" . | quote }}
             - name: SYS__ARGUS_ENABLED
               value: {{ .Values.argus.enabled | quote }}
+{{- if .Values.argus.v3.endpoint }}
+            # Argus v3 grader (see values.yaml argus.v3): iris uses it only when the key below exists as well.
+            - name: SYS__ARGUS_V3_ENDPOINT
+              value: {{ .Values.argus.v3.endpoint | quote }}
+            - name: SYS__ARGUS_V3_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: ARGUS_V3_API_KEY
+                  optional: true
+{{- end }}
             - name: SYS__IRIS_PRIVATELINK_ENDPOINT
               value: {{ include "ascend.privatelinkEndpoint" . | quote }}
             - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT

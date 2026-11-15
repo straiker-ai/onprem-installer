@@ -51,6 +51,17 @@ spec:
                   name: {{ include "ascend.secretName" . }}
                   key: ARGUS_SERVICE_API_KEY
                   optional: true
+{{- if .Values.argus.v3.endpoint }}
+            # Argus v3 grader (see values.yaml argus.v3): iris uses it only when the key below exists as well.
+            - name: SYS__ARGUS_V3_ENDPOINT
+              value: {{ .Values.argus.v3.endpoint | quote }}
+            - name: SYS__ARGUS_V3_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: ARGUS_V3_API_KEY
+                  optional: true
+{{- end }}
             # Shared bearer secret this sends (http_request_handler.py) and
             # probe-shadow's own identical secretKeyRef verifies -- only load-
             # bearing once probeShadow.enabled is flipped back on. See

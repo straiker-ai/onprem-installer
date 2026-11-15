@@ -6446,6 +6446,19 @@ phase_straiker_ascend() {
     fi
   fi
 
+  # Argus v3 for the graders: the in-cluster api-gateway (plain HTTP behind the NLB, Service port 443). Iris still uses v1 until the
+  # iris-grader key (ARGUS_V3_API_KEY in straiker-secrets) exists, so this is safe to set before the key is minted.
+  local ascend_v3_args=()
+  if [[ "${DEFEND_ENGINE}" == "v3" ]]; then
+    ascend_v3_args=(--set-string "argus.v3.endpoint=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443/api/v3/detect")
+    if [[ -n "${ARGUS_V3_GRADER_KEY:-}" ]]; then
+      patch_shared_secret "ARGUS_V3_API_KEY" "${ARGUS_V3_GRADER_KEY}"
+      log "Stored the iris-grader key as ARGUS_V3_API_KEY: Ascend will grade through Argus v3."
+    elif ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
+      log "NOTE: no iris-grader key yet (ARGUS_V3_API_KEY): Ascend keeps grading through Argus v1. Mint one (runbook 'Ascend on Argus v3') and re-run this phase with ARGUS_V3_GRADER_KEY set."
+    fi
+  fi
+
   local cmd=(
     helm upgrade --install "${ASCEND_RELEASE}" "$(chart_ref "${ASCEND_CHART_NAME}")"
     --namespace "${INFRA_NAMESPACE}"
@@ -6456,6 +6469,7 @@ phase_straiker_ascend() {
     --timeout "${HELM_TIMEOUT}"
   )
   cmd+=("${ascend_data_layer_args[@]+"${ascend_data_layer_args[@]}"}")
+  cmd+=("${ascend_v3_args[@]+"${ascend_v3_args[@]}"}")
   # See helm_ssa_conflict_flags's declaration above for why these can't just
   # always be passed, and why they must be passed together. (Note: `kubectl
   # patch --type=json remove metadata/managedFields` does NOT work as an
