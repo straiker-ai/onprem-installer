@@ -4,6 +4,10 @@ straiker:
     configMapName: straiker-readonly-environments
 
   apiGateway:
+    # On-prem only: K8s Secret holding the console's SESSION_SIGNING_KEY ({name, key}); the gateway then accepts the
+    # console's signed session as a user login (OnpremSessionTokenVerifier). Unset (SaaS): Cognito ID tokens only.
+    onpremSession:
+      signingKeySecret: null
     gateway:
       baseUrl: ""
       # Browser origins allowed to make credentialed cross-origin API calls

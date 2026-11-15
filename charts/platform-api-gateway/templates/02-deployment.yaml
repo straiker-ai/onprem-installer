@@ -104,6 +104,14 @@ spec:
                   key: SPRING_PROFILES_ACTIVE
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "service.name=api-gateway,service.namespace={{ .Release.Namespace }},service.version={{ .Values.straiker.apiGateway.image.version }}"
+            {{- with (.Values.straiker.apiGateway.onpremSession | default dict).signingKeySecret }}
+            # On-prem: the console's SESSION_SIGNING_KEY, so the console's signed session is accepted as a user login.
+            - name: ONPREM_SESSION_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "SESSION_SIGNING_KEY" | quote }}
+            {{- end }}
 
           volumeMounts:
             - name: config

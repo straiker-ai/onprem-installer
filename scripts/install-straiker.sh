@@ -4335,6 +4335,21 @@ remember_gateway_settings() {
   set_metadata "gateway_allowed_cidrs" "${cidrs}"
 }
 
+# The console's platform-API views (Defend overview: identities, agents, models, tools, findings; Controls) call the
+# api-gateway with the console's own signed session. api-gateway accepts that session from GATEWAY_CONSOLE_SESSION_FROM on
+# (OnpremSessionTokenVerifier, keyed by the console's SESSION_SIGNING_KEY); older images reject it (sign-in ends in 401).
+# Needs --data-layer: the shared key lives in Secrets Manager (<cluster>/frontend/auth), synced to both pods.
+GATEWAY_CONSOLE_SESSION_FROM="2.3.13"
+gateway_accepts_console_session() {
+  [[ "${DATA_LAYER}" == "true" ]] || return 1
+  local tag
+  tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${REPO_ROOT}/charts/platform-api-gateway/Chart.yaml")"
+  TAG="${tag}" MIN="${GATEWAY_CONSOLE_SESSION_FROM}" python3 -c '
+import os, re, sys
+num = lambda v: tuple(int(x) for x in re.findall(r"\d+", v.split("-")[0])[:3])
+sys.exit(0 if num(os.environ["TAG"].lstrip("v")) >= num(os.environ["MIN"]) else 1)'
+}
+
 # True when the public api-gateway is served by the edge ALB (edge type xalb) instead of its own NLB: its Service is
 # then ClusterIP and charts/straiker-edge adds the gateway's Ingress to the xalb IngressGroup (same ALB, same WAF).
 gateway_via_alb() {
@@ -4366,6 +4381,12 @@ install_api_gateway() {
   env_key="$(kubectl get secret api-gateway-env -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.env-key}' | base64 -d)"
 
   local -a mode_args=()
+  # The console's signed session as a user login (see gateway_accepts_console_session): same Secret as the console.
+  if gateway_accepts_console_session; then
+    ensure_synced_secret frontend-session-source "${CLUSTER_NAME}/frontend/auth" straiker-frontend-auth "%s" \
+      "SESSION_SIGNING_KEY" || return 1
+    mode_args+=(--set-string "straiker.apiGateway.onpremSession.signingKeySecret.name=frontend-session-source")
+  fi
   if [[ -n "${table}" ]]; then
     require_command aws
     log "api-gateway: full mode (DynamoDB table ${table})."
@@ -6136,9 +6157,15 @@ phase_straiker_core() {
   # the FEATURE_FLAG_OVERRIDES change ignore the flags; PUBLIC_API_GATEWAY is read by every build.
   if [[ " ${PLATFORM_SERVICES} " == *" api-gateway "* ]]; then
     cmd+=(--set-string "straiker-frontend.frontend.apiGatewayUrl=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443")
-    # OFF on-prem for now: with it on, the console sends the session cookie to the platform API as a bearer token, and
-    # the gateway only accepts a Cognito ID token, not the signed on-prem session (sign-in then ends in a 401).
-    cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=false")
+    # The platform-API views send the console's session to the gateway as the bearer token: on only when the gateway
+    # accepts it (gateway_accepts_console_session); otherwise sign-in would end in a 401 and the old Defend page stays.
+    if gateway_accepts_console_session; then
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=true")
+    else
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=false")
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=false")
+    fi
     # ascend-only hides Defend: on only when Ascend is the sole product.
     if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
       cmd+=(--set "straiker-frontend.frontend.featureFlags.ascend-only=false")
