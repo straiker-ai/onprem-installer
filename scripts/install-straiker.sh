@@ -8158,8 +8158,8 @@ main() {
     exit 0
   fi
 
-  remember_inference_settings || exit 1
   capture_install_config
+  remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
   require_resource_ack
   build_phase_list
   set_install_status "in_progress" "Installer started."
