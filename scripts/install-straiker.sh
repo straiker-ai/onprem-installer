@@ -5857,6 +5857,11 @@ check_gpu_vcpu_quota() {
     --query 'Reservations[].Instances[].[InstanceType,CpuOptions.CoreCount,CpuOptions.ThreadsPerCore]' --output text 2>/dev/null \
     | awk '$1 ~ /^(g|vt)[0-9]/ { n += $2 * $3 } END { print n + 0 }')"
   available="$(awk -v q="${quota}" -v u="${used:-0}" 'BEGIN { printf "%d", q - u }')"
+  if [[ "${available}" -lt "${needed}" && -n "${INFERENCE_MODELS}" ]]; then
+    # --inference-models is the deliberate partial test: servers that do not fit simply wait (Pending) for quota.
+    log "WARNING: EC2 G/VT quota leaves ${available} of the ${needed} vCPUs the missing GPU nodes need (${used:-0} of ${quota} in use); those servers will stay Pending until the quota is raised."
+    return 0
+  fi
   if [[ "${available}" -lt "${needed}" ]]; then
     mark_phase_blocked "EC2 quota 'Running On-Demand G and VT instances' is ${quota} vCPUs in ${AWS_REGION} and ${used:-0} are already in use, leaving ${available}; ${nodes} GPU nodes need ${needed}. Remove GPU nodes you no longer need or request an increase to 512 vCPUs (Service Quotas, code ${GPU_VCPU_QUOTA_CODE}), then re-run this phase."
     return 1
@@ -5918,7 +5923,19 @@ plan_inference_gpus() {
   fi
   sharing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sharing"])' "${INFERENCE_PLAN_FILE}")"
   if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "${INFERENCE_PLAN_FILE}")" == "projected" ]]; then
-    check_gpu_vcpu_quota "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpus_used"])' "${INFERENCE_PLAN_FILE}")" || return 1
+    # Servers that already have a running pod hold a node (and their vCPUs) already: only the rest need new nodes.
+    local planned running=0 m
+    planned="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gpus_used"])' "${INFERENCE_PLAN_FILE}")"
+    for m in ${models_csv//,/ }; do
+      running=$((running + $(kubectl get pods -n "${INFRA_NAMESPACE}" --field-selector=status.phase=Running -o name 2>/dev/null \
+        | grep -c "^pod/inference-${m}-" || true)))
+    done
+    [[ ${running} -gt ${planned} ]] && running=${planned}
+    if [[ ${planned} -gt ${running} ]]; then
+      check_gpu_vcpu_quota $((planned - running)) || return 1
+    else
+      log "All ${planned} model servers already run: no new GPU nodes needed."
+    fi
     apply_gpu_time_slicing 0 || return 1
   elif [[ "${sharing}" == "time-slicing" ]]; then
     apply_gpu_time_slicing "$(python3 "${GPU_PLANNER}" --slices "${INFERENCE_PLAN_FILE}")" || return 1
