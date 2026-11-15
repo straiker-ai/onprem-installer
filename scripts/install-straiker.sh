@@ -220,6 +220,8 @@ DEFEND_CHART_NAME="straiker-defend"
 # context reviewer in every mode, so it is checked whenever --defend-engine v3 is selected.
 INFERENCE_PROFILE="${INFERENCE_PROFILE:-}"
 INFERENCE_MODE="${INFERENCE_MODE:-}"
+# TESTING ONLY (not remembered): deploy just these models of the selected products, e.g. when GPU quota covers part of the fleet.
+INFERENCE_MODELS="${INFERENCE_MODELS:-}"
 GPU_PLANNER="${REPO_ROOT}/scripts/gpu_planner.py"
 GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
 # EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one server needs about 4.2 vCPUs, so Karpenter picks a .2xlarge node (8 vCPUs).
@@ -717,6 +719,9 @@ Options:
   --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
                                    fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
                                    use --ai-provider-mode bedrock for Ascend). Remembered.
+  --inference-models <a,b,c>       TESTING ONLY. Deploy only these models (of vision, wanda, kev-agentic, kev-non-agentic, thanos
+                                   that the selected products use), for a run where GPU quota covers part of the fleet. Not
+                                   remembered: pass it only with --phase straiker-inference, never for a customer install.
   --gateway-exposure <mode>        Who can reach the platform api-gateway (the API behind the console and SDK calls):
                                    internal (default): internal load balancer, VPC / private network only.
                                    public: internet-facing, TLS required (--gateway-cert-arn), optionally limited
@@ -1613,6 +1618,10 @@ parse_args() {
         ;;
       --inference-mode)
         INFERENCE_MODE=${2:-}
+        shift 2
+        ;;
+      --inference-models)
+        INFERENCE_MODELS=${2:-}
         shift 2
         ;;
       --saas-frontend)
@@ -5812,6 +5821,17 @@ remember_inference_settings() {
     return 1
     ;;
   esac
+  if [[ -n "${INFERENCE_MODELS}" ]]; then
+    local wanted known m
+    known=" $(PRODUCTS_OPT="${PRODUCTS_OPT}" INFERENCE_MODELS="" inference_models_for_products | tr '\n' ' ')"
+    for m in ${INFERENCE_MODELS//,/ }; do
+      if [[ "${known}" != *" ${m} "* ]]; then
+        echo "ERROR: --inference-models: '${m}' is not a model of the selected products (valid:${known})." >&2
+        return 1
+      fi
+    done
+    log "WARNING: --inference-models ${INFERENCE_MODELS}: only part of the fleet is deployed. For testing, never for a customer."
+  fi
   set_metadata "inference_profile" "${profile}"
   set_metadata "inference_mode" "${mode}"
   if [[ "${profile}" == "test" ]]; then
@@ -5955,6 +5975,13 @@ inference_models_for_products() {
   fi
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     models+=("thanos")
+  fi
+  if [[ -n "${INFERENCE_MODELS}" ]]; then
+    local kept=() m
+    for m in "${models[@]+"${models[@]}"}"; do
+      [[ ",${INFERENCE_MODELS}," == *",${m},"* ]] && kept+=("${m}")
+    done
+    models=("${kept[@]+"${kept[@]}"}")
   fi
   printf '%s\n' "${models[@]+"${models[@]}"}"
 }
