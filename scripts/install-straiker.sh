@@ -306,6 +306,10 @@ GPU_INSTANCE_TYPE="${GPU_INSTANCE_TYPE:-}"
 GPU_MAX_NODES="${GPU_MAX_NODES:-}"
 # Optional EC2 Capacity Reservation(s) / Capacity Block(s) for the GPU nodes (comma-separated cr-... ids). Remembered.
 GPU_CAPACITY_RESERVATION="${GPU_CAPACITY_RESERVATION:-}"
+# Which Availability Zones the cluster uses, in order (comma-separated, e.g. us-west-2c,us-west-2a): 2 or 3 of them. The FIRST is
+# the primary: --provision-strategy min runs every node there. Empty = the region's first 2 AZs (3 with --provision-strategy max).
+# Fixed once the cluster exists. Not with --vpc-id (the AZs then come from the subnets you supply).
+AVAILABILITY_ZONES_OPT="${AVAILABILITY_ZONES_OPT:-}"
 P4D_INSTANCE_TYPE="p4d.24xlarge"
 P4D_GPUS_PER_NODE=8
 P4D_NODE_VCPUS=96
@@ -824,6 +828,10 @@ Options:
   --gpu-max-nodes <n>              p4d fleet: most GPU nodes the pool may grow to (default 4). Remembered.
   --gpu-capacity-reservation <ids> EC2 Capacity Reservation / Capacity Block id(s) (cr-..., comma-separated) the GPU
                                    nodes launch into first. Remembered.
+  --availability-zones <a,b[,c]>   The Availability Zones the cluster uses, in order (e.g. us-west-2c,us-west-2a): 2 or 3.
+                                   The first is the primary (--provision-strategy min runs every node there). Default: the
+                                   region's first 2 (3 with --provision-strategy max); with --gpu-capacity-reservation, the
+                                   reservation's AZ is put first. Fixed once the cluster exists. Not with --vpc-id.
   --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
                                    fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
                                    use --ai-provider-mode bedrock for Ascend). Remembered.
@@ -1828,6 +1836,10 @@ parse_args() {
         GPU_CAPACITY_RESERVATION=${2:-}
         shift 2
         ;;
+      --availability-zones)
+        AVAILABILITY_ZONES_OPT=${2:-}
+        shift 2
+        ;;
       --inference-mode)
         INFERENCE_MODE=${2:-}
         shift 2
@@ -2282,6 +2294,73 @@ emit_eks_endpoint_tfvars() {
   return 0
 }
 
+# The AZ list the cluster is built on, space-separated, in order. --availability-zones wins; otherwise the region's first
+# $2 available AZs, with a --gpu-capacity-reservation's AZ moved to the front (that is where the reserved GPUs are).
+# $1 = how many AZs the default list has. Prints the list; on a bad choice prints the reason to stderr and returns 1.
+resolve_availability_zones() {
+  local want=$1 avail az chosen="" n=0 crs res_az=""
+  avail="$(aws ec2 describe-availability-zones --region "${AWS_REGION}" --filters Name=state,Values=available \
+    --query 'AvailabilityZones[].ZoneName' --output text 2>/dev/null | tr '\t' ' ')"
+  [[ -n "${avail// /}" ]] || { echo "Could not list the availability zones of region '${AWS_REGION}'." >&2; return 1; }
+  if [[ -n "${AVAILABILITY_ZONES_OPT}" ]]; then
+    local given=() seen=" "
+    IFS=',' read -r -a given <<< "${AVAILABILITY_ZONES_OPT// /}"
+    if (( ${#given[@]} < 2 || ${#given[@]} > 3 )); then
+      echo "--availability-zones takes 2 or 3 zone names (EKS needs at least 2), got ${#given[@]}: '${AVAILABILITY_ZONES_OPT}'." >&2
+      return 1
+    fi
+    for az in "${given[@]}"; do
+      if [[ " ${avail} " != *" ${az} "* ]]; then
+        echo "'${az}' is not an available Availability Zone of ${AWS_REGION}. Available: ${avail}." >&2
+        return 1
+      fi
+      if [[ "${seen}" == *" ${az} "* ]]; then
+        echo "--availability-zones lists '${az}' twice." >&2
+        return 1
+      fi
+      seen+="${az} "
+      chosen+="${az} "
+    done
+    echo "${chosen% }"
+    return 0
+  fi
+  crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
+  if [[ -n "${crs}" ]]; then
+    res_az="$(aws ec2 describe-capacity-reservations --region "${AWS_REGION}" --capacity-reservation-ids "${crs%%,*}" \
+      --query 'CapacityReservations[0].AvailabilityZone' --output text 2>/dev/null || true)"
+    [[ "${res_az}" == "None" || " ${avail} " != *" ${res_az} "* ]] && res_az=""
+  fi
+  [[ -n "${res_az}" ]] && { chosen="${res_az} "; n=1; }
+  for az in ${avail}; do
+    (( n >= want )) && break
+    [[ "${az}" == "${res_az}" ]] && continue
+    chosen+="${az} "
+    n=$((n + 1))
+  done
+  echo "${chosen% }"
+}
+
+# Checks --availability-zones before anything is built: not with --vpc-id, well-formed, and not changed once the cluster exists.
+validate_availability_zones_flag() {
+  [[ -n "${AVAILABILITY_ZONES_OPT}" ]] || return 0
+  if [[ -n "${VPC_ID}" ]]; then
+    mark_phase_blocked "--availability-zones cannot be combined with --vpc-id: with your own VPC the AZs are those of the subnets you supply."
+    return 1
+  fi
+  local azs
+  if ! azs="$(resolve_availability_zones 2)"; then
+    mark_phase_blocked "$(resolve_availability_zones 2 2>&1 >/dev/null)"
+    return 1
+  fi
+  local have
+  have="$(get_metadata "availability_zones" | tr ',' ' ' | xargs)"
+  if [[ -n "${have}" && "$(get_phase_status eks-cluster)" == "done" && "${have}" != "${azs}" ]]; then
+    mark_phase_blocked "The cluster already runs in ${have}; its Availability Zones cannot be changed afterwards. Re-run without --availability-zones, or pass the same list."
+    return 1
+  fi
+  log "Availability Zones (in order): ${azs}"
+}
+
 write_eks_tfvars() {
   # Bring-your-own-VPC: AZs are derived from the supplied subnets by
   # terraform/aws/eks itself (see its locals.tf), so the live
@@ -2315,11 +2394,10 @@ EOF
   [[ "${PROVISION_STRATEGY}" == "max" ]] && az_count=3
 
   local azs az_json az1
-  azs="$(aws ec2 describe-availability-zones \
-    --region "${AWS_REGION}" \
-    --filters Name=state,Values=available \
-    --query "AvailabilityZones[:${az_count}].ZoneName" \
-    --output text)"
+  if ! azs="$(resolve_availability_zones "${az_count}")"; then
+    mark_phase_blocked "$(resolve_availability_zones "${az_count}" 2>&1 >/dev/null)"
+    return
+  fi
 
   read -r az1 _ <<< "${azs}"
   if [[ -z "${az1:-}" || $(echo "${azs}" | wc -w) -lt "${az_count}" ]]; then
@@ -2442,6 +2520,7 @@ phase_eks_tfbe() {
   fi
 
   require_command aws
+  validate_availability_zones_flag || return
   preflight_gpu_quota || return
   require_command tofu
   require_terraform_dir "${TFBE_SRC}" || return
@@ -6747,6 +6826,15 @@ check_p4d_offered() {
   log "${itype} is offered in the GPU nodes' AZs: ${match}"
 }
 
+# The AZs GPU nodes will launch in, when the user chose them (empty = not chosen: any AZ of the region). --provision-strategy
+# min confines nodes to the first one.
+gpu_node_azs() {
+  [[ -n "${AVAILABILITY_ZONES_OPT}" && -z "${VPC_ID}" ]] || return 0
+  local azs
+  azs="$(resolve_availability_zones 2 2>/dev/null)" || return 0
+  if [[ "${PROVISION_STRATEGY}" == "min" ]]; then echo "${azs%% *}"; else echo "${azs}"; fi
+}
+
 # Prerequisites check, run in the first phase (before any cluster is built). per-model: one GPU node per model server against
 # the G/VT quota. p4d: 8 servers per node against the P quota. A new AWS account usually has 0-8 vCPUs of either, so the
 # fleet cannot start until the customer raises it.
@@ -6760,7 +6848,7 @@ preflight_gpu_quota() {
   [[ ${count} -gt 0 ]] || return 0
   require_command aws
   if [[ "$(gpu_fleet)" == "p4d" ]]; then
-    check_p4d_offered "" || return 1
+    check_p4d_offered "$(gpu_node_azs)" || return 1
     check_gpu_vcpu_quota "$(p4d_nodes_for $((count * 2)))"
   else
     check_gpu_vcpu_quota $((count * 2))

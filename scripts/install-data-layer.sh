@@ -35,6 +35,8 @@ ROUTE53=false
 ALARM_EMAILS=()
 GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
+AVAILABILITY_ZONES=""
+GPU_CAPACITY_RESERVATION=""
 DEFEND_ENGINE=""
 TF_PREFIX=""
 PRODUCTS="ascend,defend"
@@ -84,6 +86,9 @@ Options:
   --gpu-instance-type TYPE   p4d fleet only: pack it onto this EC2 type instead of p4d.24xlarge (e.g. g6e.12xlarge,
                              4x L40S) — a stand-in while A100/p4d capacity is being arranged; checked against
                              whichever quota that type actually falls under
+  --availability-zones A,B[,C]  The Availability Zones the cluster uses, in order (2 or 3); the first is the primary (the only
+                             node AZ with --provision-strategy min). Fixed once the cluster exists.
+  --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
   --tf-prefix P              prefix of the Terraform state bucket and of the account-wide IAM role names (default s6r-onprem).
                              A second install in the same AWS account needs its own, e.g. --tf-prefix vb
@@ -118,6 +123,8 @@ while [[ $# -gt 0 ]]; do
     --alarm-email) ALARM_EMAILS+=("${2:-}"); shift 2 ;;
     --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
+    --availability-zones) AVAILABILITY_ZONES="${2:-}"; shift 2 ;;
+    --gpu-capacity-reservation) GPU_CAPACITY_RESERVATION="${2:-}"; shift 2 ;;
     --defend-engine) DEFEND_ENGINE="${2:-}"; shift 2 ;;
     --tf-prefix) TF_PREFIX="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
@@ -306,6 +313,8 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
   --edge-type "${EDGE_TYPE}" --yes)
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
+[[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
+[[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ -n "${DEFEND_ENGINE}" ]] && run_args+=(--defend-engine "${DEFEND_ENGINE}")
 [[ -n "${TF_PREFIX}" ]] && run_args+=(--tf-prefix "${TF_PREFIX}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
