@@ -7018,7 +7018,13 @@ watch_gpu_capacity() {
 diagnose_gpu_capacity() {
   local line msg azs
   command -v kubectl >/dev/null 2>&1 || return 0
-  line="$(kubectl -n karpenter logs deploy/karpenter --since=90m 2>/dev/null | grep 'failed launching nodeclaim' | grep 'straiker-gpu' | tail -1 || true)"
+  # Newest failure for the CURRENT instance type (older ones may be for a type used before), else the newest of any type.
+  local logs itype
+  itype="$(gpu_instance_type 2>/dev/null || true)"
+  logs="$(kubectl -n karpenter logs deploy/karpenter --since=60m 2>/dev/null | grep 'failed launching nodeclaim' | grep 'straiker-gpu' || true)"
+  line=""
+  [[ -n "${itype}" ]] && line="$(printf '%s\n' "${logs}" | grep -F "sufficient ${itype} capacity" | tail -1 || true)"
+  [[ -n "${line}" ]] || line="$(printf '%s\n' "${logs}" | tail -1)"
   [[ -n "${line}" ]] || return 0
   msg="$(printf '%s' "${line}" | python3 -c '
 import json, sys
