@@ -18,6 +18,16 @@ spec:
       labels:
         app: straiker-ascend-probe-worker
     spec:
+      {{- if gt (int $pw.replicaCount) 1 }}
+      # Spread replicas over zones (soft: a zone without capacity must not block a pod).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: straiker-ascend-probe-worker
+      {{- end }}
       terminationGracePeriodSeconds: 600
       serviceAccountName: {{ .Values.serviceAccountName }}
       {{- with .Values.imagePullSecrets }}

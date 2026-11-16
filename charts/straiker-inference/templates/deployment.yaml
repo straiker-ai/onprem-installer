@@ -97,6 +97,12 @@ spec:
       {{- if gt (int .Values.replicas) 1 }}
       topologySpreadConstraints:
         - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: {{ include "straiker-inference.fullname" . }}
+        - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:

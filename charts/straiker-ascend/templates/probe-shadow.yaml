@@ -18,6 +18,16 @@ spec:
       labels:
         app: straiker-ascend-probe-shadow
     spec:
+      {{- if gt (int $ps.replicaCount) 1 }}
+      # Spread replicas over zones (soft: a zone without capacity must not block a pod).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: straiker-ascend-probe-shadow
+      {{- end }}
       serviceAccountName: {{ .Values.serviceAccountName }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

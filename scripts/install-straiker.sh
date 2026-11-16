@@ -4685,6 +4685,14 @@ install_api_gateway() {
   else
     log "Installing platform service 'api-gateway' (${tag}, exposure $(get_metadata "gateway_exposure"))..."
   fi
+  local -a ha_gw_args=()
+  if ha_enabled; then
+    ha_gw_args=(--set straiker.apiGateway.replicas=2
+      --set 'straiker.apiGateway.topologySpreadConstraints[0].maxSkew=1'
+      --set-string 'straiker.apiGateway.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone'
+      --set-string 'straiker.apiGateway.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway'
+      --set-string 'straiker.apiGateway.topologySpreadConstraints[0].labelSelector.matchLabels.app\.straiker\.io/app=api-gateway')
+  fi
   helm upgrade --install api-gateway "${chart}" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
     -f "${chart}/values-onprem.yaml" \
@@ -4694,6 +4702,7 @@ install_api_gateway() {
     --set-string straiker.apiGateway.service.awsLoadBalancerController="${gateway_lbc}" \
     --set-string straiker.apiGateway.service.certificateArn="$(get_metadata "gateway_cert_arn")" \
     ${gateway_cidr_args[@]+"${gateway_cidr_args[@]}"} \
+    ${ha_gw_args[@]+"${ha_gw_args[@]}"} \
     --set-file straiker.apiGateway.oauth.inmemory.signingKey="${key_file}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-id=${client_id}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-secret=${client_secret}" \
@@ -6125,6 +6134,16 @@ phase_platform_services() {
         extra+=(--set-string "${key}.artifacts.bucket=$(get_metadata "grid_artifacts_bucket")" --set-string "${key}.artifacts.region=${AWS_REGION}")
         ;;
     esac
+    # HA: 2 replicas spread over zones (these four charts expose replicas and topologySpread under straiker.<svc>; connect and
+    # databridge group their replicas per component and stay at 1).
+    case "${svc}" in
+      foundation | grid | portico | registry)
+        if ha_enabled; then
+          extra+=(--set "${key}.replicas=2" --set "${key}.topologySpread.enabled=true"
+            --set-string "${key}.topologySpread.whenUnsatisfiable=ScheduleAnyway" --set "${key}.topologySpread.minDomains=null")
+        fi
+        ;;
+    esac
     log "Installing platform service '${svc}' (${tag})..."
     # The platform charts carry no config checksum: a config-only change (ConfigMap <svc>-config) does not restart the
     # pods, which keep the old environment. Compare it around the upgrade and restart when it changed.
@@ -6151,6 +6170,7 @@ phase_platform_services() {
         || { mark_phase_blocked "'${svc}' did not become ready after its configuration changed."; return; }
     fi
   done
+  apply_ha_pdbs "${INFRA_NAMESPACE}" foundation-deployment grid-deployment portico-deployment registry-deployment api-gateway api-gateway-deployment
 }
 
 # $1=key name (e.g. "SYS__OPENAI_API_KEY"). True if that key already has a
@@ -6874,6 +6894,33 @@ check_p4d_offered() {
     return 1
   fi
   log "${itype} is offered in the GPU nodes' AZs: ${match}"
+}
+
+# High availability (--provision-strategy ha|max): services run 2 replicas spread over zones instead of the on-prem default of 1.
+# The spread is soft (ScheduleAnyway): a zone with no capacity must not leave a pod Pending, but Karpenter and the scheduler still
+# prefer another zone for the second replica. Under 'min' nothing changes (one zone, one replica).
+ha_enabled() { [[ "${PROVISION_STRATEGY:-min}" != "min" ]]; }
+
+# PodDisruptionBudgets (maxUnavailable 1) for the vendored platform charts, which ship none: without one, a node drain
+# (Karpenter consolidation, upgrades) may evict both replicas at once. Applied with kubectl, not Helm (the charts are synced from
+# another repo), and only for Deployments that run 2 or more replicas. $1 = namespace, rest = deployment names.
+apply_ha_pdbs() {
+  local ns=$1 d reps sel
+  shift
+  ha_enabled || return 0
+  for d in "$@"; do
+    reps="$(kubectl get deploy "${d}" -n "${ns}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    [[ "${reps:-0}" =~ ^[0-9]+$ ]] && (( reps >= 2 )) || continue
+    sel="$(kubectl get deploy "${d}" -n "${ns}" -o json 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["spec"]["selector"]["matchLabels"]))' 2>/dev/null || true)"
+    [[ -n "${sel}" ]] || continue
+    python3 - "${d}" "${ns}" "${sel}" <<'PYEOF' | kubectl apply -f - >/dev/null || log "WARNING: could not create the PodDisruptionBudget for ${d}."
+import json, sys
+name, ns, sel = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+print(json.dumps({"apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
+  "metadata": {"name": name + "-pdb", "namespace": ns, "labels": {"app.kubernetes.io/managed-by": "straiker-installer"}},
+  "spec": {"maxUnavailable": 1, "selector": {"matchLabels": sel}}}))
+PYEOF
+  done
 }
 
 # The AZs GPU nodes will launch in, when the user chose them (empty = not chosen: any AZ of the region). --provision-strategy
@@ -7831,6 +7878,7 @@ phase_straiker_defend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  ha_enabled && cmd+=(--set "replicas=2")
   # --data-layer: Redis is ElastiCache Serverless (TLS only), not straiker-system's valkey.
   if [[ "${DATA_LAYER}" == "true" ]]; then
     local redis_endpoint
@@ -7856,7 +7904,8 @@ phase_straiker_defend() {
     cmd+=(--version "${CHART_VERSION}")
   fi
 
-  "${cmd[@]}"
+  "${cmd[@]}" || return
+  apply_ha_pdbs "${INFRA_NAMESPACE}" straiker-ascend-control-plane
 }
 
 # --force-conflicts resolves a field-manager conflict from an out-of-band edit
@@ -7990,6 +8039,7 @@ phase_straiker_ascend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  ha_enabled && cmd+=(--set "controlPlane.replicaCount=2")
   cmd+=("${ascend_data_layer_args[@]+"${ascend_data_layer_args[@]}"}")
   cmd+=("${ascend_v3_args[@]+"${ascend_v3_args[@]}"}")
   # See helm_ssa_conflict_flags's declaration above for why these can't just
@@ -8053,7 +8103,8 @@ phase_straiker_ascend() {
     fi
   fi
 
-  "${cmd[@]}"
+  "${cmd[@]}" || return
+  apply_ha_pdbs "${INFRA_NAMESPACE}" straiker-edge
 }
 
 # Tailscale Kubernetes operator (third-party chart, not Straiker's) — only
@@ -8535,6 +8586,7 @@ phase_straiker_edge() {
     --timeout "${HELM_TIMEOUT}"
     --set "edgeType=${EDGE_TYPE}"
   )
+  ha_enabled && cmd+=(--set "replicas=2")
   if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
     cmd+=(--set "tailscale.domain=$(get_metadata "custom_domain")")
     cmd+=(--set "tailscale.clusterIssuerEmail=${TAILSCALE_CLUSTER_ISSUER_EMAIL:-$(get_metadata "tailscale_cluster_issuer_email")}")

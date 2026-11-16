@@ -20,6 +20,16 @@ spec:
       labels:
         app: straiker-defend
     spec:
+      {{- if gt (int .Values.replicas) 1 }}
+      # Spread replicas over zones (soft: a zone without capacity must not block a pod).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: straiker-defend
+      {{- end }}
       serviceAccountName: {{ .Values.serviceAccountName }}
       terminationGracePeriodSeconds: 30
       {{- with .Values.imagePullSecrets }}
