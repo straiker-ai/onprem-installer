@@ -310,6 +310,8 @@ GPU_CAPACITY_RESERVATION="${GPU_CAPACITY_RESERVATION:-}"
 # the primary: --provision-strategy min runs every node there. Empty = the region's first 2 AZs (3 with --provision-strategy max).
 # Fixed once the cluster exists. Not with --vpc-id (the AZs then come from the subnets you supply).
 AVAILABILITY_ZONES_OPT="${AVAILABILITY_ZONES_OPT:-}"
+# Skips the GPU capacity probe (a brief real launch of the fleet's GPU instances right after the cluster is built).
+SKIP_CAPACITY_PROBE="${SKIP_CAPACITY_PROBE:-false}"
 P4D_INSTANCE_TYPE="p4d.24xlarge"
 P4D_GPUS_PER_NODE=8
 P4D_NODE_VCPUS=96
@@ -872,6 +874,10 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
+  --skip-capacity-probe            Skip the GPU capacity probe: right after the cluster is built (p4d fleet, no reservation) the
+                                   installer launches the fleet's GPU instances for about a minute in the cluster's node AZ(s)
+                                   to prove AWS has capacity now (about $1-2 for 2 p4d.24xlarge, cents for g6e), then terminates
+                                   them. Needs ec2:RunInstances/TerminateInstances. Fails early with remedies when there is none.
   --skip-sso-preflight             Skip the reachability / certificate checks of the SAML metadata or OIDC issuer
                                    (use when this machine cannot reach a provider that AWS can).
   --ses-domain <domain>            With --data-layer: sending domain in Amazon SES. Cognito invitations / password
@@ -1928,6 +1934,10 @@ parse_args() {
         SKIP_SSO_PREFLIGHT=true
         shift
         ;;
+      --skip-capacity-probe)
+        SKIP_CAPACITY_PROBE=true
+        shift
+        ;;
       --rotate-admin-password)
         ROTATE_ADMIN_PASSWORD=true
         RESET_ADMIN_PASSWORD=true
@@ -2907,6 +2917,8 @@ phase_karpenter() {
     --set "controller.resources.limits.cpu=1" \
     --set "controller.resources.limits.memory=1Gi" \
     --wait --timeout "${HELM_TIMEOUT}"
+
+  probe_gpu_capacity || return
 }
 
 phase_karpenter_gke() {
@@ -6868,6 +6880,127 @@ gpu_node_azs() {
   if [[ "${PROVISION_STRATEGY}" == "min" ]]; then echo "${azs%% *}"; else echo "${azs}"; fi
 }
 
+# Capacity Blocks for ML (p4d/p5) a customer could BUY for this fleet, printed in the first phase when no reservation is given.
+# Information only: it never blocks (it says nothing about on-demand capacity). Needs ec2:DescribeCapacityBlockOfferings.
+show_capacity_block_offerings() {
+  local nodes=$1 itype out
+  [[ -z "${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}" ]] || return 0
+  itype="$(gpu_instance_type)"
+  case "${itype}" in p4d.* | p4de.* | p5.*) ;; *) return 0 ;; esac
+  out="$(aws ec2 describe-capacity-block-offerings --region "${AWS_REGION}" --instance-type "${itype}" --instance-count "${nodes}" \
+    --capacity-duration-hours 24 --output json 2>/dev/null || true)"
+  [[ -n "${out}" ]] || return 0
+  printf '%s' "${out}" | python3 -c '
+import json, sys
+try:
+    offers = json.load(sys.stdin).get("CapacityBlockOfferings", [])
+except Exception:
+    sys.exit(0)
+itype, nodes = sys.argv[1], sys.argv[2]
+if not offers:
+    print("No reservation was given and AWS lists no Capacity Block for %s x %s (24 h) right now. On-demand capacity is not guaranteed; reserve capacity before a customer install." % (nodes, itype))
+    sys.exit(0)
+offers.sort(key=lambda o: o.get("StartDate", ""))
+print("No reservation was given. Capacity Blocks you could buy for %s x %s (24 h), earliest first:" % (nodes, itype))
+for o in offers[:3]:
+    print("  %s  starts %s  upfront %s %s  (offering %s)" % (o.get("AvailabilityZone"), o.get("StartDate", "")[:16], o.get("UpfrontFee"), o.get("CurrencyCode", "USD"), o.get("CapacityBlockOfferingId")))
+' "${itype}" "${nodes}" | while IFS= read -r line; do log "${line}"; done
+  return 0
+}
+
+# GPU capacity probe: AWS has no call that reports free on-demand capacity, so launch the fleet's GPU instances for real (all or
+# nothing: the whole node count at once), once per usable zone and type, and terminate them at once. Runs right after the cluster
+# is built (it needs the subnets), before the data layer and the models, and blocks with remedies when no zone has capacity.
+# Skipped with a reservation (that capacity is checked separately), for non-p4d fleets, with --skip-capacity-probe, and when a
+# probe passed in the last 2 hours. Permission or other errors only warn: the probe must never fail an install by itself.
+probe_gpu_capacity() {
+  [[ "${SKIP_CAPACITY_PROBE}" != true && "${CLOUD_PROVIDER}" != "gke" ]] || return 0
+  [[ "$(gpu_fleet)" == "p4d" && "$(inference_mode)" == "vllm" ]] || return 0
+  [[ -z "${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}" ]] || return 0
+  # An install whose models already run needs no probe (it would only compete with its own nodes).
+  [[ "$(get_phase_status straiker-inference)" != "done" ]] || return 0
+  local last
+  last="$(get_metadata "gpu_capacity_probe")"
+  if [[ "${last}" == ok\|* ]]; then
+    local at="${last##*|}"
+    if [[ "${at}" =~ ^[0-9]+$ ]] && (( $(date +%s) - at < 7200 )); then
+      log "GPU capacity probe passed less than 2 hours ago: skipping."
+      return 0
+    fi
+  fi
+  local nodes types itype have azs
+  local count=0 line
+  while IFS= read -r line; do [[ -n "${line}" ]] && count=$((count + 1)); done < <(inference_models_for_products)
+  [[ ${count} -gt 0 ]] || return 0
+  nodes="$(p4d_nodes_for $((count * 2)))" # the fleet: 2 replicas of each model
+  types="$(gpu_instance_types)"
+  have="$(get_metadata "availability_zones" | tr ',' ' ' | xargs)"
+  azs="${have}"
+  [[ "${PROVISION_STRATEGY}" == "min" && -n "${azs}" ]] && azs="${azs%% *}"
+  local pairs
+  pairs="$(aws ec2 describe-subnets --region "${AWS_REGION}" --filters "Name=tag:karpenter.sh/discovery,Values=${CLUSTER_NAME}" \
+    --query 'Subnets[].[AvailabilityZone,SubnetId]' --output text 2>/dev/null || true)"
+  if [[ -z "${pairs}" ]]; then
+    log "WARNING: capacity probe skipped: no subnets tagged karpenter.sh/discovery=${CLUSTER_NAME} found."
+    return 0
+  fi
+  if [[ "${AUTO_YES}" != true ]]; then
+    local ans
+    ans="$(prompt_line "Probe GPU capacity now? This launches ${nodes} x ${types%%,*} for about a minute per zone (about \$1-2 for p4d, cents for g6e) and terminates them [Y/n]: " || true)"
+    case "${ans}" in n | N | no | NO) log "GPU capacity probe skipped at your request."; return 0 ;; esac
+  fi
+  local ami
+  ami="$(aws ssm get-parameter --region "${AWS_REGION}" --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+    --query Parameter.Value --output text 2>/dev/null || true)"
+  if [[ -z "${ami}" || "${ami}" == "None" ]]; then
+    log "WARNING: capacity probe skipped: could not look up the Amazon Linux AMI in ${AWS_REGION}."
+    return 0
+  fi
+  # Instances a previous, interrupted probe left behind.
+  local stale
+  stale="$(aws ec2 describe-instances --region "${AWS_REGION}" --filters "Name=tag:straiker-capacity-probe,Values=${CLUSTER_NAME}" \
+    "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)"
+  [[ -n "${stale}" && "${stale}" != "None" ]] && aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${stale} >/dev/null 2>&1 || true
+
+  local az subnet out rc ids tried="" passed="" failed="" note=""
+  while read -r az subnet; do
+    [[ -n "${az}" ]] || continue
+    if [[ -n "${azs}" && " ${azs} " != *" ${az} "* ]]; then continue; fi
+    for itype in ${types//,/ }; do
+      rc=0
+      out="$(aws ec2 run-instances --region "${AWS_REGION}" --image-id "${ami}" --instance-type "${itype}" --count "${nodes}" \
+        --subnet-id "${subnet}" --metadata-options HttpTokens=required --instance-initiated-shutdown-behavior terminate \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
+        --query 'Instances[].InstanceId' --output text 2>&1)" || rc=$?
+      tried+="${az}/${itype} "
+      if [[ ${rc} -eq 0 ]]; then
+        ids="${out}"
+        aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${ids} >/dev/null 2>&1 \
+          || log "WARNING: could not terminate the probe instances (${ids}); terminate them in the EC2 console."
+        passed+="${az}/${itype} "
+        log "GPU capacity probe: ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
+        break 2 # one proof is enough; probing every zone would only cost more
+      elif [[ "${out}" == *InsufficientInstanceCapacity* ]]; then
+        failed+="${az}/${itype} "
+        log "GPU capacity probe: no capacity for ${nodes} x ${itype} in ${az} right now."
+      else
+        note="${out##*: }"
+        log "WARNING: GPU capacity probe could not run in ${az} for ${itype}: ${note}"
+      fi
+    done
+  done <<< "${pairs}"
+  if [[ -n "${passed}" ]]; then
+    set_metadata "gpu_capacity_probe" "ok|${passed% }|$(date +%s)"
+    return 0
+  fi
+  if [[ -z "${failed}" ]]; then
+    log "WARNING: the GPU capacity probe could not run (${note:-no usable zone}); continuing without it."
+    return 0
+  fi
+  mark_phase_blocked "AWS has no capacity for ${nodes} x ${types} right now in the cluster's node zone(s) (tried: ${tried% }). The cluster is built and nothing else needs to change: re-run in a while (capacity changes by the hour), or (1) reserve capacity (EC2 Capacity Reservation or Capacity Block) and pass --gpu-capacity-reservation cr-..., (2) list more instance types in --gpu-instance-type (capacity is per type), or (3) for a NEW install choose zones with --availability-zones. Use --skip-capacity-probe to continue anyway."
+  return 1
+}
+
 # --gpu-capacity-reservation pre-flight: every reservation must be usable by this fleet BEFORE any cost is incurred. Checks each
 # cr-... id: visible in this account/region, active (a Capacity Block not yet started is reported with its start time), the
 # fleet's instance type, Linux and default tenancy, in an AZ the cluster launches nodes in, and enough free instances for $1 nodes
@@ -6961,6 +7094,7 @@ preflight_gpu_quota() {
   if [[ "$(gpu_fleet)" == "p4d" ]]; then
     check_p4d_offered "$(gpu_node_azs)" || return 1
     check_gpu_reservations "$(p4d_nodes_for $((count * 2)))" || return 1
+    show_capacity_block_offerings "$(p4d_nodes_for $((count * 2)))"
     check_gpu_vcpu_quota "$(p4d_nodes_for $((count * 2)))"
   else
     check_gpu_vcpu_quota $((count * 2))

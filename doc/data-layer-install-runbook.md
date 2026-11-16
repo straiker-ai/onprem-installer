@@ -136,6 +136,10 @@ the shell already has, so the customer must give the AWS CLI working credentials
 - **GPU capacity:** EC2 capacity is per instance type and per Availability Zone and cannot be checked ahead. For a customer, reserve
   2-4 `p4d.24xlarge` (EC2 Capacity Reservation or Capacity Block) and pass `--gpu-capacity-reservation`; the installer checks it
   first (active, type, AZ, free count). Choose the zones with `--availability-zones`.
+- **Capacity checks without a reservation:** the first phase prints Capacity Blocks you could buy (information only). Right after
+  the cluster is built, a capacity probe launches the fleet's GPU instances for about a minute in the node zone(s) and terminates them
+  (about $1-2 for 2 `p4d.24xlarge`, cents for g6e; needs `ec2:RunInstances`/`TerminateInstances`). It proves capacity exists *now*,
+  not later, and blocks with remedies before the data layer is built when there is none. `--skip-capacity-probe` turns it off.
 - **Egress:** the private subnets reach Straiker's artifact source in us-east-1 (no regional endpoint can), Docker Hub (verify
   probes, the multi-arch override) and the Helm repository.
 - **DNS:** a Route53 zone in the account needs no manual step; otherwise the customer must add the validation records.

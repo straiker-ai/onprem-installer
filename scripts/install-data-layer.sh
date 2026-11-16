@@ -36,6 +36,7 @@ ALARM_EMAILS=()
 GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
 AVAILABILITY_ZONES=""
+SKIP_CAPACITY_PROBE=""
 GPU_CAPACITY_RESERVATION=""
 DEFEND_ENGINE=""
 TF_PREFIX=""
@@ -88,6 +89,7 @@ Options:
                              whichever quota that type actually falls under
   --availability-zones A,B[,C]  The Availability Zones the cluster uses, in order (2 or 3); the first is the primary (the only
                              node AZ with --provision-strategy min). Fixed once the cluster exists.
+  --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
   --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
   --tf-prefix P              prefix of the Terraform state bucket and of the account-wide IAM role names (default s6r-onprem).
@@ -124,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --availability-zones) AVAILABILITY_ZONES="${2:-}"; shift 2 ;;
+    --skip-capacity-probe) SKIP_CAPACITY_PROBE=true; shift ;;
     --gpu-capacity-reservation) GPU_CAPACITY_RESERVATION="${2:-}"; shift 2 ;;
     --defend-engine) DEFEND_ENGINE="${2:-}"; shift 2 ;;
     --tf-prefix) TF_PREFIX="${2:-}"; shift 2 ;;
@@ -318,6 +321,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
   --edge-type "${EDGE_TYPE}" --yes)
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
+[[ "${SKIP_CAPACITY_PROBE}" == true ]] && run_args+=(--skip-capacity-probe)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ -n "${DEFEND_ENGINE}" ]] && run_args+=(--defend-engine "${DEFEND_ENGINE}")
