@@ -2,7 +2,7 @@
 
 Give this page to the customer's cloud, network, DNS and security contacts **before** the install call. Every item is something the
 installer cannot do for you, or something that makes it stop part-way. If every box is ticked, the install runs in one go
-(about 1.5-2 hours, then a hands-off finish). Details and reasons: `doc/data-layer-install-runbook.md`.
+(about 1.5-2 hours, then a hands-off finish).
 
 Legend: **[Customer]** you do it, **[Straiker]** we do it, **[Both]** agree on it together.
 
