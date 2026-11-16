@@ -61,7 +61,7 @@ declare -a ALL_RELEASES=("straiker-edge" "straiker-core" "inference-antman" "inf
 # install-straiker.sh, which never resets these), silently turning a real
 # uninstall into a no-op that still reports "completed successfully". Always
 # re-verify these against reality instead of trusting the flag.
-declare -a ALWAYS_RERUN_PHASES=("preflight" "helm-uninstall" "namespace-cleanup")
+declare -a ALWAYS_RERUN_PHASES=("preflight" "helm-uninstall" "namespace-cleanup" "observability-destroy" "edge-infra-destroy" "data-destroy" "artifacts-destroy" "eks-cluster-destroy" "eks-tfbe-destroy")
 
 NAMESPACE="${DEFAULT_NAMESPACE}"
 RELEASE_NAME=""
@@ -154,6 +154,7 @@ Options:
   --yes                          Skip the interactive confirmation for --destroy-eks
                                   (for non-interactive/automated use).
   --aws-region <region>          Override the AWS region read from install state.
+  --aws-profile <name>           AWS CLI profile (default: AWS_PROFILE, else the profile recorded in the install state).
   --gcp-region <region>          Override the GCP region read from install state.
   --gcp-project <project-id>     Override the GCP project read from install state.
   --cluster-name <name>          Override the cluster name read from install state.
@@ -460,6 +461,10 @@ parse_args() {
         AWS_REGION=${2:-}
         shift 2
         ;;
+      --aws-profile)
+        export AWS_PROFILE=${2:-}
+        shift 2
+        ;;
       --gcp-region)
         GCP_REGION=${2:-}
         shift 2
@@ -547,6 +552,13 @@ phase_preflight() {
   require_command helm
   require_command kubectl
   require_command python3
+  if [[ "${DESTROY_EKS}" == true ]]; then
+    resolve_destroy_inputs
+    if [[ "${CLOUD_PROVIDER}" != "gke" ]]; then
+      require_command aws
+      require_aws_identity || return
+    fi
+  fi
   # Best-effort, not required -- a re-run after a successful --destroy-eks
   # (whose own cleanup_kubeconfig(_gke) already removed the context) has
   # nothing left to reach here, and that's success, not failure. Every
@@ -771,7 +783,37 @@ resolve_destroy_inputs() {
     if [[ -z "${AWS_REGION}" ]]; then
       AWS_REGION="$(get_install_metadata "aws_region")"
     fi
+    # Same account the install used: a teardown with the wrong (or no) credentials must never look like "nothing to destroy".
+    if [[ -z "${AWS_PROFILE:-}" ]]; then
+      local recorded_profile
+      recorded_profile="$(get_install_metadata "aws_profile")"
+      [[ -n "${recorded_profile}" ]] && export AWS_PROFILE="${recorded_profile}"
+    fi
   fi
+}
+
+# Blocks a destroying run unless the AWS credentials work; a missing credential used to read as "state bucket not found".
+require_aws_identity() {
+  local caller
+  caller="$(aws sts get-caller-identity --query Account --output text 2>&1)" || {
+    mark_phase_blocked "AWS credentials do not work (profile '${AWS_PROFILE:-<default>}'): ${caller##*: }. Log in (aws sso login --profile <name>) or pass --aws-profile, then re-run."
+    return 1
+  }
+  log "AWS account ${caller}, profile '${AWS_PROFILE:-<default>}', region ${AWS_REGION:-<unset>}."
+}
+
+# 0 = the state bucket exists; 1 = it is really gone (nothing to destroy); 2 = it could not be checked (phase blocked).
+state_bucket_present() {
+  local bucket=$1 out
+  if out="$(aws s3api head-bucket --bucket "${bucket}" 2>&1)"; then
+    return 0
+  fi
+  if [[ "${out}" == *"404"* || "${out}" == *"Not Found"* || "${out}" == *NoSuchBucket* ]]; then
+    log "State bucket '${bucket}' not found; nothing to destroy."
+    return 1
+  fi
+  mark_phase_blocked "Could not check the state bucket '${bucket}' (${out##*: }); not treating that as 'nothing to destroy'. Fix the AWS access and re-run."
+  return 2
 }
 
 confirm_destruction() {
@@ -935,10 +977,7 @@ phase_edge_infra_destroy() {
   if [[ -z "${bucket_name}" ]]; then
     bucket_name="$(resolve_bucket_name)"
   fi
-  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
-    log "State bucket '${bucket_name}' not found; nothing to destroy."
-    return
-  fi
+  state_bucket_present "${bucket_name}" || return 0
 
   write_edge_infra_backend_config "${bucket_name}"
   tofu -chdir="${EDGE_INFRA_DIR}" init -upgrade -input=false -migrate-state -force-copy
@@ -972,10 +1011,7 @@ phase_observability_destroy() {
   local bucket_name
   bucket_name="$(get_install_metadata "bootstrap_bucket")"
   [[ -n "${bucket_name}" ]] || bucket_name="$(resolve_bucket_name)"
-  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
-    log "State bucket '${bucket_name}' not found; nothing to destroy."
-    return
-  fi
+  state_bucket_present "${bucket_name}" || return 0
   write_observability_backend_config "${bucket_name}"
   tofu -chdir="${OBSERVABILITY_DIR}" init -upgrade -input=false -migrate-state -force-copy
   tofu -chdir="${OBSERVABILITY_DIR}" destroy -auto-approve -input=false \
@@ -1098,10 +1134,7 @@ phase_data_destroy() {
   local bucket_name
   bucket_name="$(get_install_metadata "bootstrap_bucket")"
   [[ -n "${bucket_name}" ]] || bucket_name="$(resolve_bucket_name)"
-  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
-    log "State bucket '${bucket_name}' not found; nothing to destroy."
-    return
-  fi
+  state_bucket_present "${bucket_name}" || return 0
 
   write_data_backend_config "${bucket_name}"
   tofu -chdir="${DATA_DIR}" init -upgrade -input=false -migrate-state -force-copy
@@ -1181,10 +1214,7 @@ phase_artifacts_destroy() {
   local bucket_name
   bucket_name="$(get_install_metadata "bootstrap_bucket")"
   [[ -n "${bucket_name}" ]] || bucket_name="$(resolve_bucket_name)"
-  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
-    log "State bucket '${bucket_name}' not found; nothing to destroy."
-    return
-  fi
+  state_bucket_present "${bucket_name}" || return 0
   write_artifacts_backend_config "${bucket_name}"
   tofu -chdir="${ARTIFACTS_DIR}" init -upgrade -input=false -migrate-state -force-copy
   if [[ -z "$(tofu -chdir="${ARTIFACTS_DIR}" state list 2>/dev/null)" ]]; then
@@ -1243,10 +1273,7 @@ phase_eks_cluster_destroy() {
   if [[ -z "${bucket_name}" ]]; then
     bucket_name="$(resolve_bucket_name)"
   fi
-  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
-    log "State bucket '${bucket_name}' not found; nothing to destroy."
-    return
-  fi
+  state_bucket_present "${bucket_name}" || return 0
 
   write_eks_backend_config "${bucket_name}"
   write_eks_tfvars || return
