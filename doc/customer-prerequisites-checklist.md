@@ -72,16 +72,202 @@ The models need 10 GPU servers (5 models x 2 replicas). Customers run **2 x `p4d
 
 ## 5. Network and egress
 
-The product needs **no inbound access** except the load balancer's ports 443 from the ranges you allow. Cluster nodes need outbound
-TCP/443 (full list in `doc/egress-allowlist.md`).
+**In plain words.** The Straiker servers run inside a private network in your AWS account. A private network has no direct line to the
+internet, by design. During the install, and again whenever Straiker is upgraded, those servers must **reach out** to a few named
+internet addresses to fetch software and AI model files. Reaching out is called *egress*. We never need anyone on the internet to
+reach in, apart from your own users opening the Straiker website through the load balancer.
 
-| # | Item | Why | Who |
-|---|---|---|---|
-| 5.1 | Outbound to Straiker's artifact source in **us-east-1** during install and every upgrade: broker `2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws`, ECR `631748089429.dkr.ecr.us-east-1.amazonaws.com`, `api.ecr.us-east-1.amazonaws.com`, `prod-us-east-1-starport-layer-bucket.s3.us-east-1.amazonaws.com`, `onprem-artifact-models.s3.us-east-1.amazonaws.com` | Images and model weights are copied into your ECR and S3. VPC endpoints cannot reach another region, so a real NAT/proxy path is needed. Removing NAT entirely is not supported | Customer |
-| 5.2 | Operator workstation reaches `raw.githubusercontent.com`, `public.ecr.aws`, `aws.github.io`, `kubernetes-sigs.github.io`, `charts.jetstack.io`, Docker Hub and `*.amazonaws.com` | Helm charts and probe images | Customer |
-| 5.3 | Steady-state, in-region: `sts`, `ec2`, `ssm`, `eks`, `sqs`, `elasticloadbalancing`, `logs`, `bedrock-runtime`, your ECR and S3. With interface endpoints, **private DNS must be on** | The VPC CNI needs STS and EC2 continuously, or nodes degrade about an hour in | Customer |
-| 5.4 | If the EKS API is private-only: the operator workstation has routed access to the VPC (VPN, Direct Connect, Transit Gateway) and a security-group rule for 443 from its range | `--private-api-endpoint` | Customer |
-| 5.5 | Free address space for the cluster. Default VPC `10.0.0.0/16` must not overlap networks you connect to | One `/24` private subnet is small: use more zones (`ha`) or your own larger subnets for anything beyond a test | Customer |
+Your network or security team controls which addresses are allowed out (a firewall, a proxy, or AWS's "NAT gateway", which is the
+shared door through which private servers reach the internet). This section lists every address and rule, why it is needed, and a
+check that proves it works. All checks use `HTTPS` (port 443). Nothing else is required.
+
+**Where to run the checks.** Run each check from a computer that sits **behind the same firewall or proxy as the cluster will**:
+ideally a small temporary test server (an EC2 instance) in the cluster's private subnet, opened with AWS Session Manager, or any
+machine the network team confirms uses the same outbound rules. A laptop on a different network can pass a check that the cluster
+would fail. Delete the test server afterwards.
+
+**How to read the results.** The checks use `curl`. Any answer from the other side (even "403 Forbidden" or "404 Not Found") means the
+door is **open**: the address was reached, and we only need to reach it, not log in. The code `000` means **blocked or unreachable**
+(a firewall dropped it, the name did not resolve, or a security device that inspects encrypted traffic rejected the connection; if your
+firewall inspects HTTPS, tell us, because the inspecting certificate may have to be trusted).
+
+### 5.1 Straiker's artifact source in us-east-1 (during install and every upgrade)
+
+- **What it is:** Straiker keeps its software images and AI model files in Straiker's own AWS account, in the US East (N. Virginia)
+  region. During install the cluster copies them into **your** account. After that the cluster uses only your copies.
+- **Why it needs the internet:** AWS private connections ("VPC endpoints") only work inside one region. Your cluster may be in
+  another region, so the copy has to go over the normal internet path. Removing the NAT or internet path entirely is not supported.
+- **What to allow (outbound, HTTPS 443):**
+  - `2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws` (hands out short-lived, limited access passes)
+  - `631748089429.dkr.ecr.us-east-1.amazonaws.com` and `api.ecr.us-east-1.amazonaws.com` (Straiker's software images)
+  - `prod-us-east-1-starport-layer-bucket.s3.us-east-1.amazonaws.com` (the file storage behind every AWS image download)
+  - `onprem-artifact-models.s3.us-east-1.amazonaws.com` (the AI model files)
+- **Needed again:** at every Straiker version upgrade, not only the first install.
+- **Check:** from the test server run:
+
+  ```bash
+  for h in 2a7owzgkie5zw6dfl4qqg6tfhe0pqkvb.lambda-url.us-east-1.on.aws \
+           631748089429.dkr.ecr.us-east-1.amazonaws.com \
+           api.ecr.us-east-1.amazonaws.com \
+           prod-us-east-1-starport-layer-bucket.s3.us-east-1.amazonaws.com \
+           onprem-artifact-models.s3.us-east-1.amazonaws.com; do
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h/")
+    if [ "$code" = "000" ]; then echo "BLOCKED  $h"; else echo "OK ($code)  $h"; fi
+  done
+  ```
+
+  **Pass:** five lines starting with `OK`. **Fail:** any `BLOCKED` line: send that address to the network team to allow.
+
+### 5.2 The installer's own computer (the "operator workstation")
+
+- **What it is:** the laptop, jump server or CloudShell session where the install command is run.
+- **Why it needs the internet:** the installer downloads its deployment recipes ("Helm charts") on that computer before applying them,
+  plus the AWS tools talk to AWS.
+- **What to allow (outbound, HTTPS 443):** `raw.githubusercontent.com` (Straiker's recipes), `public.ecr.aws` (autoscaling software),
+  `aws.github.io` (load balancer software), `kubernetes-sigs.github.io` (DNS automation), `charts.jetstack.io` (certificate software),
+  Docker Hub (`registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`; used by small verification pods), and
+  `*.amazonaws.com` (all AWS services). `pkgs.tailscale.com` only if you choose the Tailscale edge.
+- **Check:** from the installer's computer:
+
+  ```bash
+  for h in raw.githubusercontent.com public.ecr.aws aws.github.io kubernetes-sigs.github.io charts.jetstack.io \
+           registry-1.docker.io auth.docker.io sts.amazonaws.com; do
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h/")
+    if [ "$code" = "000" ]; then echo "BLOCKED  $h"; else echo "OK ($code)  $h"; fi
+  done
+  aws sts get-caller-identity --profile <profile>
+  ```
+
+  **Pass:** all `OK`, and the last command prints the customer's AWS account number. **Fail:** a `BLOCKED` line (allow that address) or an
+  AWS error (the login or permissions are the problem, see section 2).
+
+### 5.3 AWS services the cluster talks to all the time (steady state, in your own region)
+
+- **What it is:** once installed, the servers keep talking to a handful of AWS services in **your** region: security tokens, server
+  management, load balancer control, logs, and the AI service (Bedrock).
+- **Why it matters:** two of them are needed **continuously**, not just at install. If the security-token service (`sts`) or the
+  server service (`ec2`) cannot be reached, the cluster's network layer loses its permissions after about an hour and the servers
+  start failing, with nothing in the product pointing at the cause.
+- **What to allow (outbound, HTTPS 443, replace `<region>` with your region, for example `us-west-2`):**
+  `sts.<region>.amazonaws.com`, `ec2.<region>.amazonaws.com`, `ssm.<region>.amazonaws.com`, `eks.<region>.amazonaws.com`,
+  `sqs.<region>.amazonaws.com`, `elasticloadbalancing.<region>.amazonaws.com`, `logs.<region>.amazonaws.com`,
+  `bedrock-runtime.<region>.amazonaws.com`, your own image registry (`<account>.dkr.ecr.<region>.amazonaws.com`, `api.ecr.<region>.amazonaws.com`)
+  and S3 in your region (`s3.<region>.amazonaws.com`).
+- **Two ways to allow them:** let them out through the NAT/firewall (simplest), or create AWS "VPC endpoints" so the traffic never
+  leaves AWS. If you use endpoints, **private DNS must be switched on** for each one; otherwise the traffic silently goes the public
+  way and fails if that is blocked.
+- **Check:** from the test server (set `R` to your region):
+
+  ```bash
+  R=<region>; A=<account-id>
+  for h in sts.$R.amazonaws.com ec2.$R.amazonaws.com ssm.$R.amazonaws.com eks.$R.amazonaws.com sqs.$R.amazonaws.com \
+           elasticloadbalancing.$R.amazonaws.com logs.$R.amazonaws.com bedrock-runtime.$R.amazonaws.com \
+           api.ecr.$R.amazonaws.com $A.dkr.ecr.$R.amazonaws.com s3.$R.amazonaws.com; do
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h/")
+    if [ "$code" = "000" ]; then echo "BLOCKED  $h"; else echo "OK ($code)  $h"; fi
+  done
+  ```
+
+  **Pass:** all `OK`. If you use VPC endpoints, also run these two checks; every endpoint must show `PrivateDns` as `True`:
+
+  ```bash
+  aws ec2 describe-vpc-endpoints --region <region> --filters Name=vpc-id,Values=<vpc-id> \
+    --query 'VpcEndpoints[].{Service:ServiceName,PrivateDns:PrivateDnsEnabled}' --output table
+  nslookup sts.<region>.amazonaws.com
+  ```
+
+  The `nslookup` answer should be a private address (starting `10.`, `172.16-31.` or `192.168.`) when a private endpoint serves it.
+  **Fail:** a `BLOCKED` line, or `PrivateDns` `False` with no matching private DNS zone.
+
+### 5.4 Private-only Kubernetes control address (only if you choose `--private-api-endpoint`)
+
+- **What it is:** the cluster has a management address (the "API server") used by the installer. By default it is reachable from the
+  internet but protected by AWS login. A **private-only** setting hides it inside your network.
+- **Why it matters:** with the private setting, the installer's computer must be on a network route into the VPC (VPN, Direct Connect
+  or Transit Gateway), or it can not finish the install.
+- **What to arrange:** a routed connection from the installer's computer to the VPC, and a firewall (security group) rule that
+  allows port 443 from that computer's address range to the cluster.
+- **Check (after the cluster exists):**
+
+  ```bash
+  aws eks describe-cluster --name <cluster> --region <region> --profile <profile> \
+    --query 'cluster.{private:resourcesVpcConfig.endpointPrivateAccess,public:resourcesVpcConfig.endpointPublicAccess,endpoint:endpoint}'
+  aws eks update-kubeconfig --name <cluster> --region <region> --profile <profile>
+  kubectl get nodes
+  ```
+
+  **Pass:** `kubectl get nodes` lists the nodes. For a private-only cluster, `private` is `true` and `public` is `false`.
+  **Fail:** `kubectl` hangs or times out: the route into the VPC or the 443 rule is missing.
+- **Check (before the install, to avoid surprises):** from the installer's computer, confirm a private address in the VPC answers on
+  443, for example `nc -vz <private-ip-in-the-vpc> 443`, or ask the network team to confirm the VPN or Direct Connect route to the VPC range.
+
+### 5.5 Free address space (the network ranges must not clash)
+
+- **What it is:** every network has a range of addresses. The new VPC uses `10.0.0.0/16` by default. If your company network already
+  uses that range, or you connect this VPC to other networks (VPN, peering), traffic between them breaks.
+- **Why it matters:** an overlap cannot be fixed after the cluster exists.
+- **What to do:** compare the range with your company's ranges. If it clashes, tell us a free range before the install (or bring your
+  own VPC, 5.6). Also note that the default layout uses one small private subnet (a `/24`, about 250 addresses); for anything beyond
+  a test use more zones (`ha`) or your own larger subnets.
+- **Check:**
+
+  ```bash
+  aws ec2 describe-vpcs --region <region> --profile <profile> --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output table
+  ```
+
+  **Pass:** the network team confirms `10.0.0.0/16` (or your agreed range) does not overlap with anything this VPC will connect to.
+  **Fail:** an overlap: agree a different range first.
+
+### 5.6 Bring your own VPC: the private subnets must already reach the internet
+
+(Only if you use `--vpc-id`.)
+
+- **What it is:** if you give us your own network, the installer **does not** create a NAT gateway or an internet route. Your
+  private subnets must already have a way out.
+- **Why it matters:** without it the servers cannot fetch their software, and they may degrade about an hour later when they cannot
+  refresh their AWS permissions. Nothing in the install output would name the cause.
+- **What to arrange:** each private subnet has a route to a NAT gateway (or your firewall) for `0.0.0.0/0`, and has free addresses.
+- **Check** (repeat for every private subnet):
+
+  ```bash
+  aws ec2 describe-route-tables --region <region> --profile <profile> \
+    --filters Name=association.subnet-id,Values=<private-subnet-id> \
+    --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' --output json
+  aws ec2 describe-subnets --region <region> --profile <profile> --subnet-ids <private-subnet-id> \
+    --query 'Subnets[].[SubnetId,AvailabilityZone,CidrBlock,AvailableIpAddressCount]' --output table
+  ```
+
+  **Pass:** the first command shows a route with a `NatGatewayId` (or your appliance) and state `active`; the second shows plenty of
+  free addresses (at least 200 for a small install). **Fail:** an empty list `[]` for the first command, or a `blackhole` state: add or
+  repair the route. The installer also checks this itself and stops with a message before building anything.
+
+### 5.7 Your users can reach the Straiker website and API
+
+- **What it is:** your staff open `https://straiker.<your-domain>` and your applications call `https://api.<your-domain>`. Both go to the
+  load balancer in your account, over HTTPS 443.
+- **Why it matters:** a corporate firewall or proxy that blocks the new names, or the allowed-address list (`--internal-lb-source-ranges`
+  for the website, `--gateway-allowed-cidrs` for the API) missing an office or server range, shows up as "the site does not load".
+- **What to arrange:** the office and server networks that need access are in the allowed ranges you gave us, and outbound HTTPS to the
+  four names (`straiker.`, `straiker-defend.`, `straiker-ascend.` and `api.<your-domain>`) is permitted.
+- **Check (after the install):** from a user's computer and from an application server:
+
+  ```bash
+  for h in straiker straiker-defend straiker-ascend api; do
+    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.<your-domain>/")
+    if [ "$code" = "000" ]; then echo "BLOCKED  $h.<your-domain>"; else echo "OK ($code)  $h.<your-domain>"; fi
+  done
+  ```
+
+  **Pass:** four `OK` lines (a login page or an authentication error code is normal). **Fail:** `BLOCKED` from a network that should have access:
+  check the allowed ranges, the DNS records (section 4) and the firewall.
+
+### 5.8 Only if you do not use Amazon Bedrock for the AI provider
+
+- **What it is:** by default the AI calls go to Amazon Bedrock inside AWS (5.3 covers it). If you instead choose your own keys, the
+  cluster must reach the provider's public service.
+- **What to allow:** `api.openai.com`, `api.x.ai`, `api.anthropic.com` (only the ones you give keys for), HTTPS 443.
+- **Check:** `curl -s -o /dev/null -m 10 -w '%{http_code}\n' https://api.openai.com/` (and likewise for the others you use). **Pass:** any number other
+  than `000`. Prompts and answers travel on this path, so prefer Bedrock where you can.
 
 ---
 
@@ -116,7 +302,7 @@ All of these should be answered "yes" before pressing Enter:
 - [ ] SES production access is on, or the sandbox is accepted for the first day (verified recipients only)
 - [ ] The Route 53 zone is in this account, or the DNS admin is on call for the two records
 - [ ] The sign-in redirect URI is registered at the identity provider
-- [ ] Outbound HTTPS to the us-east-1 addresses in 5.1 is allowed from the cluster's subnets
+- [ ] Every check in section 5 passed (5.1 the us-east-1 addresses, 5.2 the installer's computer, 5.3 in-region AWS services, 5.4-5.6 as they apply)
 - [ ] The customer key is at hand, and the workstation will not sleep
 - [ ] Everyone knows a pause ("blocked") is not a failure: fix the named item and run the same command again
 
