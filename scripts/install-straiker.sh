@@ -184,9 +184,38 @@ mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
 # tofu init with one automatic repair: macOS clears old files from /tmp, which can leave the provider cache half-deleted, and init then
 # stops with "existing cached package ... does not match". Rebuild the installer's own cache (never one you pointed it at) and retry once.
+# The working directory (TF_WORK_ROOT, /tmp/straiker-tf by default) outlives an install, and tofu caches the backend it last
+# initialised in <dir>/.terraform. `init -migrate-state -force-copy` would then COPY that other install's state into the new
+# backend (a different cluster, prefix, region or account), and the next apply would modify or destroy its resources. So when
+# the cached backend differs from the backend.tf about to be used, drop the cache: the state itself lives remotely, nothing is lost.
+reset_stale_backend_cache() {
+  local dir=$1 cache="${1}/.terraform/terraform.tfstate"
+  [[ -f "${cache}" && -f "${dir}/backend.tf" ]] || return 0
+  local verdict
+  verdict="$(python3 - "${cache}" "${dir}/backend.tf" <<'PY' 2>/dev/null || true
+import json, re, sys
+try:
+    have = json.load(open(sys.argv[1]))["backend"]["config"]
+except Exception:
+    sys.exit(0)  # no readable cache: nothing to compare
+text = open(sys.argv[2]).read()
+want = {k: m.group(1) for k in ("bucket", "key", "region") if (m := re.search(r'^\s*%s\s*=\s*"([^"]*)"' % k, text, re.M))}
+pick = lambda d: " ".join(f"{k}={d[k]}" for k in sorted(want) if k in d)
+if want and pick(have) != pick(want):
+    print(f"STALE|{pick(have)}|{pick(want)}")
+PY
+)"
+  if [[ "${verdict}" == STALE\|* ]]; then
+    IFS='|' read -r _ have_cfg want_cfg <<<"${verdict}"
+    echo "[*] ${dir} was initialised for a different backend (${have_cfg}); clearing its cache so that state is not migrated into this install's backend (${want_cfg})." >&2
+    rm -rf "${dir:?}/.terraform"
+  fi
+}
+
 tofu_init() {
   local dir=$1 out rc=0
   shift
+  reset_stale_backend_cache "${dir}"
   out="$(tofu -chdir="${dir}" init "$@" 2>&1)" || rc=$?
   printf '%s\n' "${out}"
   if [[ ${rc} -ne 0 && "${out}" == *"existing cached package"* ]]; then
@@ -690,7 +719,9 @@ Options:
                                    Only used when --cloud-provider gke. gcloud credentials
                                    themselves come from your existing `gcloud auth login` session
                                    — there's no gcloud equivalent of --aws-profile to pass here.
-  --tf-prefix <prefix>            Prefix for the Terraform state bucket (default: s6r-onprem).
+  --tf-prefix <prefix>            Prefix for the Terraform state bucket and for the account-wide IAM roles the install creates
+                                   (alb-controller, external-dns, hauler, models-reader, ...), default: s6r-onprem. A second
+                                   install in the SAME AWS account needs its own prefix, or those role names collide.
   --cluster-name <name>           EKS cluster name (default: s6r-onprem with --install-eks;
                                    otherwise auto-detected from the current kubectl context).
   --namespace <name>              Kubernetes namespace for every Straiker chart (straiker-system,
@@ -1031,6 +1062,18 @@ resolve_cluster_name() {
     fi
   fi
   CLUSTER_NAME="s6r-onprem"
+}
+
+# The data tier builds AWS resource names from the cluster name: S3 buckets (<cluster>-<account>-grid-artifacts), the Cognito
+# domain, the OpenSearch domain (<cluster>-oss, at most 28 characters), Aurora and ElastiCache identifiers. Those only accept
+# lowercase letters, digits and hyphens, and OpenSearch's limit caps the name at 24. Fail here, with the reason, not in the
+# aws-data phase after the cluster is already built.
+validate_cluster_name() {
+  [[ "${DATA_LAYER}" == "true" && -n "${CLUSTER_NAME}" ]] || return 0
+  if [[ ! "${CLUSTER_NAME}" =~ ^[a-z]([a-z0-9-]{0,22}[a-z0-9])?$ ]]; then
+    echo "ERROR: --cluster-name '${CLUSTER_NAME}' cannot be used with --data-layer: the data tier names S3 buckets, the Cognito domain, OpenSearch, Aurora and ElastiCache after it, which allow only lowercase letters, digits and hyphens (start with a letter, no trailing hyphen, at most 24 characters). Example: '$(printf '%s' "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n-' '-' | cut -c1-24)'." >&2
+    exit 1
+  fi
 }
 
 # --defend-engine: flag > remembered > v3 with --data-layer (Argus v3 is what the console's Controls page and the Detect API
@@ -8744,6 +8787,7 @@ EOF
   # default; never persisted blank.
   [[ -z "${CLUSTER_NAME}" ]] && CLUSTER_NAME="$(get_metadata "cluster_name")"
   resolve_cluster_name
+  validate_cluster_name # also covers a name taken from the kubectl context or the remembered state
   set_metadata "cluster_name" "${CLUSTER_NAME}"
 
   # Namespace shared by every Straiker chart — resolved via flag/persisted/
@@ -9190,6 +9234,7 @@ main() {
   fi
 
   check_state_matches_cluster
+  validate_cluster_name
   resolve_defend_engine
   capture_install_config
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products

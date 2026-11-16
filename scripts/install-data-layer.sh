@@ -36,6 +36,7 @@ ALARM_EMAILS=()
 GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
 DEFEND_ENGINE=""
+TF_PREFIX=""
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -84,6 +85,8 @@ Options:
                              4x L40S) — a stand-in while A100/p4d capacity is being arranged; checked against
                              whichever quota that type actually falls under
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
+  --tf-prefix P              prefix of the Terraform state bucket and of the account-wide IAM role names (default s6r-onprem).
+                             A second install in the same AWS account needs its own, e.g. --tf-prefix vb
   --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
   --installer-arg ARG        extra argument for install-straiker.sh (repeatable)
   --timeout-minutes N        give up waiting after N minutes in total (default: 240)
@@ -116,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --defend-engine) DEFEND_ENGINE="${2:-}"; shift 2 ;;
+    --tf-prefix) TF_PREFIX="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -147,6 +151,7 @@ fi
 
 [[ -n "${CLUSTER_NAME}" ]] || die "--cluster-name is required (see --help)"
 [[ -n "${REGION}" ]] || die "--region is required"
+[[ "${CLUSTER_NAME}" =~ ^[a-z]([a-z0-9-]{0,22}[a-z0-9])?$ ]] || die "--cluster-name '${CLUSTER_NAME}' is not usable: the data tier names S3 buckets, the Cognito domain, OpenSearch, Aurora and ElastiCache after it, which allow only lowercase letters, digits and hyphens (start with a letter, no trailing hyphen, at most 24 characters)"
 [[ -n "${CUSTOMER_NAME}" ]] || die "--customer-name is required"
 [[ "${PROVISION_STRATEGY}" =~ ^(min|ha|max)$ ]] || die "--provision-strategy must be min, ha or max"
 if [[ "${EDGE_TYPE}" == "xalb" || "${EDGE_TYPE}" == "alb" ]]; then
@@ -299,6 +304,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
 [[ -n "${DEFEND_ENGINE}" ]] && run_args+=(--defend-engine "${DEFEND_ENGINE}")
+[[ -n "${TF_PREFIX}" ]] && run_args+=(--tf-prefix "${TF_PREFIX}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
 if [[ -n "${DOMAIN}" ]]; then
   run_args+=(--custom-domain "${DOMAIN}")
