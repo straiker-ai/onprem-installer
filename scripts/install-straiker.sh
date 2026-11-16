@@ -6835,6 +6835,83 @@ gpu_node_azs() {
   if [[ "${PROVISION_STRATEGY}" == "min" ]]; then echo "${azs%% *}"; else echo "${azs}"; fi
 }
 
+# --gpu-capacity-reservation pre-flight: every reservation must be usable by this fleet BEFORE any cost is incurred. Checks each
+# cr-... id: visible in this account/region, active (a Capacity Block not yet started is reported with its start time), the
+# fleet's instance type, Linux and default tenancy, in an AZ the cluster launches nodes in, and enough free instances for $1 nodes
+# (a shortfall only warns: Karpenter falls back to on-demand for the rest). Blocks on an unusable reservation.
+check_gpu_reservations() {
+  local nodes=$1 crs itype node_azs out rc=0 line errs="" have
+  crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
+  [[ -n "${crs}" ]] || return 0
+  [[ "$(gpu_fleet)" == "p4d" ]] || return 0
+  itype="$(gpu_instance_type)"
+  node_azs="$(gpu_node_azs)"
+  if [[ -z "${node_azs}" ]]; then
+    have="$(get_metadata "availability_zones" | tr ',' ' ' | xargs)"
+    if [[ -n "${have}" ]]; then
+      if [[ "${PROVISION_STRATEGY}" == "min" ]]; then node_azs="${have%% *}"; else node_azs="${have}"; fi
+    fi
+  fi
+  out="$(aws ec2 describe-capacity-reservations --region "${AWS_REGION}" --capacity-reservation-ids ${crs//,/ } --output json 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    if [[ "${out}" == *InvalidCapacityReservationId* ]]; then
+      mark_phase_blocked "--gpu-capacity-reservation: AWS does not know a reservation in ${AWS_REGION} / this account for '${crs}' (${out##*: }). Check the id, region and account (a Capacity Block shared from another account must be shared with this one)."
+    else
+      log "WARNING: could not check the capacity reservation(s) ${crs}: ${out##*: }"
+      return 0
+    fi
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "${line}" in
+      ERR:*) errs+="${line#ERR:} " ;;
+      WARN:*) log "WARNING: ${line#WARN:}" ;;
+      OK:*) log "${line#OK:}" ;;
+    esac
+  done < <(printf '%s' "${out}" | python3 -c '
+import json, sys, datetime
+itype, nodes, azs = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
+now = datetime.datetime.now(datetime.timezone.utc)
+def ts(v):
+    try: return datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except Exception: return None
+total = 0
+for r in json.load(sys.stdin).get("CapacityReservations", []):
+    rid, st, az = r["CapacityReservationId"], r.get("State", "?"), r.get("AvailabilityZone", "?")
+    bad = []
+    if r.get("InstanceType") != itype:
+        bad.append("is for %s, not %s" % (r.get("InstanceType"), itype))
+    if r.get("InstancePlatform") not in ("Linux/UNIX", None):
+        bad.append("is for %s (the nodes are Linux)" % r.get("InstancePlatform"))
+    if r.get("Tenancy", "default") != "default":
+        bad.append("has %s tenancy (must be default)" % r.get("Tenancy"))
+    if azs and az not in azs:
+        bad.append("is in %s but the cluster launches GPU nodes in %s; add --availability-zones %s,<another> (the first AZ is the node AZ)" % (az, " ".join(azs), az))
+    if st in ("pending", "scheduled", "assessing", "delayed", "payment-pending"):
+        start = ts(r.get("StartDate", "")) if r.get("StartDate") else None
+        print("WARN:%s is %s%s; the GPU nodes use on-demand until it is active." % (rid, st, (" until " + start.strftime("%Y-%m-%d %H:%M UTC")) if start else ""))
+    elif st != "active":
+        bad.append("is %s (only active reservations can be used)" % st)
+    else:
+        total += int(r.get("AvailableInstanceCount", 0))
+    end = ts(r.get("EndDate", "")) if r.get("EndDate") else None
+    if end and (end - now).days < 7 and st == "active":
+        print("WARN:%s ends %s; the nodes in it are replaced by on-demand ones after that." % (rid, end.strftime("%Y-%m-%d %H:%M UTC")))
+    if r.get("InstanceMatchCriteria") == "open":
+        print("WARN:%s is an open reservation: any matching instance in the account may use it first." % rid)
+    if bad:
+        print("ERR:Reservation %s %s." % (rid, "; ".join(bad)))
+    else:
+        print("OK:Reservation %s: %s %s in %s, %s of %s instances free." % (rid, st, r.get("InstanceType"), az, r.get("AvailableInstanceCount"), r.get("TotalInstanceCount")))
+if total < nodes:
+    print("WARN:The active reservation(s) have %d free %s instance(s) and the fleet needs %d; the other %d node(s) launch on-demand." % (total, itype, nodes, nodes - total))
+' "${itype}" "${nodes}" "${node_azs}")
+  if [[ -n "${errs}" ]]; then
+    mark_phase_blocked "${errs}Fix the reservation or drop --gpu-capacity-reservation, then re-run."
+    return 1
+  fi
+}
+
 # Prerequisites check, run in the first phase (before any cluster is built). per-model: one GPU node per model server against
 # the G/VT quota. p4d: 8 servers per node against the P quota. A new AWS account usually has 0-8 vCPUs of either, so the
 # fleet cannot start until the customer raises it.
@@ -6849,6 +6926,7 @@ preflight_gpu_quota() {
   require_command aws
   if [[ "$(gpu_fleet)" == "p4d" ]]; then
     check_p4d_offered "$(gpu_node_azs)" || return 1
+    check_gpu_reservations "$(p4d_nodes_for $((count * 2)))" || return 1
     check_gpu_vcpu_quota "$(p4d_nodes_for $((count * 2)))"
   else
     check_gpu_vcpu_quota $((count * 2))
@@ -7064,6 +7142,9 @@ phase_straiker_inference() {
 
   local models_csv
   models_csv="$(IFS=','; echo "${models[*]}")"
+  if [[ "$(gpu_fleet)" == "p4d" ]]; then
+    check_gpu_reservations "$(p4d_nodes_for $((${#models[@]} * 2)))" || return
+  fi
   plan_inference_gpus "${models_csv}" || return
 
   # Shared across all per-model releases below — EKS Pod Identity binds one
