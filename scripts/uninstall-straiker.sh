@@ -645,14 +645,48 @@ for item in data.get('items', []):
 
 phase_helm_uninstall() {
   local releases=("${ALL_RELEASES[@]}")
-  [[ -n "${RELEASE_NAME}" ]] && releases=("${RELEASE_NAME}")
+  if [[ -n "${RELEASE_NAME}" ]]; then
+    releases=("${RELEASE_NAME}")
+  else
+    # Every release in the namespace, not just the ones this list knows: the platform services, Argus v3, ClickHouse, the data
+    # jobs and the inference models are separate releases. Known app releases first, then anything else found, then the
+    # infrastructure release (straiker-system: Karpenter pools, device plugin) and the artifact mirror last.
+    local found r known
+    found="$(helm list -n "${NAMESPACE}" -q 2>/dev/null || true)"
+    releases=()
+    for r in "${ALL_RELEASES[@]}"; do
+      [[ "${r}" == "straiker-system" || "${r}" == "straiker-artifact" ]] && continue
+      releases+=("${r}")
+    done
+    for r in ${found}; do
+      known=false
+      for k in "${ALL_RELEASES[@]}"; do [[ "${r}" == "${k}" ]] && known=true; done
+      [[ "${known}" == true ]] || releases+=("${r}")
+    done
+    releases+=("straiker-system" "straiker-artifact")
+  fi
 
   local release
   for release in "${releases[@]}"; do
     if helm status "${release}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+      if [[ "${release}" == "straiker-system" ]]; then
+        # PodDisruptionBudgets (ClickHouse, keeper, inference, Argus) forbid evicting their pods, so Karpenter can never drain the
+        # nodes once straiker-system's NodePools go: the uninstall then hangs until the Helm timeout. The workloads are gone or
+        # going; drop the budgets first.
+        kubectl -n "${NAMESPACE}" delete pdb --all --ignore-not-found >/dev/null 2>&1 || true
+      fi
       scale_down_release_workloads "${release}"
       log "Uninstalling release '${release}'..."
-      helm uninstall "${release}" -n "${NAMESPACE}" --wait --timeout "${HELM_TIMEOUT}"
+      if ! helm uninstall "${release}" -n "${NAMESPACE}" --wait --timeout "${HELM_TIMEOUT}"; then
+        if [[ "${DESTROY_EKS}" == true ]]; then
+          # The whole cluster is about to be destroyed: a release that cannot finish (node or volume finalizers) must not stop
+          # the teardown. The cluster destroy terminates the nodes and clears the finalizers.
+          log "WARNING: uninstalling '${release}' did not finish; continuing, the cluster teardown below removes what is left."
+        else
+          mark_phase_blocked "Uninstalling release '${release}' failed (see above)."
+          return
+        fi
+      fi
       local install_phase
       install_phase="$(install_phase_for_release "${release}")"
       if [[ -n "${install_phase}" ]]; then
@@ -1298,6 +1332,15 @@ terminate_karpenter_nodes() {
   log "Waiting for termination (up to 10 min)..."
   # shellcheck disable=SC2086
   aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids ${instance_ids}
+  # Karpenter cannot finish deleting a node claim or node class once its pool is gone: clear what its finalizers held.
+  local o
+  for o in $(kubectl get nodeclaims -o name 2>/dev/null); do
+    kubectl patch "${o}" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  done
+  for o in $(kubectl get ec2nodeclasses -o name 2>/dev/null); do
+    kubectl patch "${o}" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  done
+  kubectl delete nodes -l karpenter.sh/nodepool --wait=false >/dev/null 2>&1 || true
 }
 
 # What the installer and ExternalDNS create outside Terraform: the gateway's ACM certificate (requested with the CLI, tagged
