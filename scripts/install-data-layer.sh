@@ -217,7 +217,39 @@ is_waiting_message() {
   esac
 }
 
+# Node count + known hourly rate for a packed-fleet instance type, for the default 10-server fleet (5 models x 2
+# replicas, ascend+defend). Must stay in sync with install-straiker.sh's gpu_instance_spec()/known rates — this
+# script doesn't source that one (standalone wrapper), so the figures are duplicated here, not shared.
+gpu_plan_packed_summary() {
+  local itype="${1:-p4d.24xlarge}" gpus_per_node rate
+  case "${itype}" in
+    p4d.24xlarge | p4de.24xlarge | p5.48xlarge) gpus_per_node=8 ;;
+    g6e.12xlarge) gpus_per_node=4 ;;
+    g6e.48xlarge | g5.48xlarge | g6.48xlarge) gpus_per_node=8 ;;
+    *) gpus_per_node=8 ;; # unknown type: same guess install-straiker.sh's quota check falls back to
+  esac
+  case "${itype}" in
+    p4d.24xlarge) rate=32.77 ;;
+    g6e.12xlarge) rate=10.17 ;;
+    *) rate="" ;;
+  esac
+  local nodes=$(( (10 + gpus_per_node - 1) / gpus_per_node ))
+  if [[ -n "${rate}" ]]; then
+    printf '%s (%dx %s, ~%s USD/hour; pool grows to %d)' "${itype}" "${nodes}" "${itype}" "${rate}" "${GPU_MAX_NODES:-4}"
+  else
+    printf '%s (%dx %s; pool grows to %d — check the AWS pricing calculator for this type)' "${itype}" "${nodes}" "${itype}" "${GPU_MAX_NODES:-4}"
+  fi
+}
+
 report_plan() {
+  local packed_itype packed_summary packed_hourly
+  packed_itype="${GPU_INSTANCE_TYPE:-p4d.24xlarge}"
+  packed_summary="$(gpu_plan_packed_summary "${packed_itype}")"
+  case "${packed_itype}" in
+    p4d.24xlarge) packed_hourly="70-75" ;;
+    g6e.12xlarge) packed_hourly="30-35" ;;
+    *) packed_hourly="see above" ;;
+  esac
   cat <<EOF
 
 About to install into AWS account ${ACCOUNT_ID}, region ${REGION}:
@@ -229,10 +261,10 @@ About to install into AWS account ${ACCOUNT_ID}, region ${REGION}:
                    Insights, container logs, alarms)
   GPU fleet ...... $(case "${GPU_FLEET}" in
                        per-model) echo "per-model (one g5/g6e-class node per model server)" ;;
-                       p4d) echo "p4d (2x p4d.24xlarge, ~66 USD/hour; pool grows to 4)" ;;
-                       *) echo "p4d for a new install (2x p4d.24xlarge, ~66 USD/hour); an existing install keeps its fleet" ;;
+                       p4d) echo "p4d: ${packed_summary}" ;;
+                       *) echo "p4d for a new install: ${packed_summary}; an existing install keeps its fleet" ;;
                      esac)
-  time / cost .... about 1.5-2 hours; roughly $([[ "${GPU_FLEET}" == per-model ]] && echo "6-8" || echo "70-75") USD per hour while it runs (GPU nodes dominate)
+  time / cost .... about 1.5-2 hours; roughly $([[ "${GPU_FLEET}" == per-model ]] && echo "6-8" || echo "${packed_hourly}") USD per hour while it runs (GPU nodes dominate)
 EOF
 }
 
