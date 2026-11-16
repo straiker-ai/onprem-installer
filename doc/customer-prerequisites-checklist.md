@@ -179,6 +179,29 @@ All of these should be answered "yes" before pressing Enter:
 
 ## 9. The command
 
+> **The command below is only a sample, not the one to run.** The real command is built from the answers to section 1 (and the
+> reservation from section 3): each answer becomes one or more flags, as the table shows. Leave out any flag whose answer is "default".
+> Straiker builds the final command with you on the pre-install call, and `--check` proves it before anything is created.
+
+| Section 1 answer | Becomes this flag |
+|---|---|
+| 1.1 Region / account ID | `--region <region>` and `--expect-account <account-id>` (stops if the wrong account is logged in); the login itself is `--profile <aws-profile>` |
+| 1.2 Cluster name | `--cluster-name <name>` |
+| 1.3 Resource prefix | `--tf-prefix <prefix>` |
+| 1.4 Customer name | `--customer-name <customer>`; the key goes in `--customer-key-file ./key.txt` (or a hidden prompt) |
+| 1.5 Base domain | `--domain <customer.com>`, plus `--route53` when its public zone is in this account, **or** `--certificate-arn <arn>` when DNS is elsewhere (then DNS records are added by hand, section 4) |
+| 1.6 Who may reach the product | `--installer-arg --internal-lb-source-ranges --installer-arg <cidr>` (website) and `--installer-arg --gateway-allowed-cidrs --installer-arg <cidr,cidr>` (API). A private API: `--installer-arg --gateway-exposure --installer-arg internal` |
+| 1.7 Own VPC or new | New VPC: nothing to add (optionally `--availability-zones a,b`). Own VPC: `--installer-arg --vpc-id --installer-arg <vpc-id> --installer-arg --private-subnet-ids --installer-arg <ids> --installer-arg --public-subnet-ids --installer-arg <ids>` |
+| 1.8 Products | `--products ascend,defend` (default both) and `--defend-engine v3` (default) |
+| 1.9 Admin email | `--installer-arg --admin-email --installer-arg <admin@customer.com>` |
+| 1.10 Alarm email(s) | `--alarm-email <ops@customer.com>` (repeat per address) |
+| 1.11 Sign-in method | `--sso-type <google\|facebook\|amazon\|apple\|saml\|oidc>`, `--sso-client-id <id>`, `--sso-domains <customer.com>`; `saml`/`oidc` also `--sso-name`, `--sso-saml-metadata-url` or `--sso-oidc-issuer`. The client secret is **not** a flag: set `SSO_CLIENT_SECRET` or type it at the hidden prompt |
+| 1.12 Email sending | `--ses-domain <customer.com>`, **or** `--ses-identity-arn <arn> --ses-from <address>` |
+| 1.13 Bedrock profile | No flag: the installer asks once on the first run (`regional` or `global`) |
+| Section 3 GPU capacity | `--gpu-fleet p4d` (default for customers) and `--gpu-capacity-reservation cr-...` |
+
+Every flag is explained in `doc/install-parameters.md`. Sample (illustrative values only):
+
 ```bash
 scripts/install-data-layer.sh \
   --cluster-name <name> --region <region> --customer-name <customer> --tf-prefix <prefix> \
@@ -192,4 +215,4 @@ scripts/install-data-layer.sh \
   --customer-key-file ./key.txt --yes
 ```
 
-Without a Route 53 zone in the account use `--certificate-arn <arn>` instead of `--route53`. Run `--check` first.
+Run the same command with `--check` first (pre-flight only, nothing is created), then without it.
