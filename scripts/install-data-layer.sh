@@ -37,6 +37,8 @@ GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
 AVAILABILITY_ZONES=""
 SKIP_CAPACITY_PROBE=""
+EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
+SSO_TYPE=""
 GPU_CAPACITY_RESERVATION=""
 DEFEND_ENGINE=""
 TF_PREFIX=""
@@ -89,6 +91,12 @@ Options:
                              whichever quota that type actually falls under
   --availability-zones A,B[,C]  The Availability Zones the cluster uses, in order (2 or 3); the first is the primary (the only
                              node AZ with --provision-strategy min). Fixed once the cluster exists.
+  --ses-domain D             send Cognito mail (invitations, password resets) from SES on domain D (DNS records are created in Route53
+                             when the zone is in this account); also --ses-route53-zone-id, --ses-identity-arn + --ses-from (your own
+                             verified identity), --ses-configuration-set
+  --sso-type T               federate the customer's identity provider into Cognito: google | facebook | amazon | apple | saml | oidc,
+                             with --sso-domains a.com,b.com, --sso-client-id ID (secret: env SSO_CLIENT_SECRET, or a hidden prompt here),
+                             and the type's other --sso-* flags (see install-straiker.sh --help)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
   --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
@@ -127,6 +135,10 @@ while [[ $# -gt 0 ]]; do
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --availability-zones) AVAILABILITY_ZONES="${2:-}"; shift 2 ;;
     --skip-capacity-probe) SKIP_CAPACITY_PROBE=true; shift ;;
+    --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
+      | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
+      | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
+    --sso-type) SSO_TYPE="${2:-}"; EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
     --gpu-capacity-reservation) GPU_CAPACITY_RESERVATION="${2:-}"; shift 2 ;;
     --defend-engine) DEFEND_ENGINE="${2:-}"; shift 2 ;;
     --tf-prefix) TF_PREFIX="${2:-}"; shift 2 ;;
@@ -297,6 +309,21 @@ EOF
 
 # ------------------------------------------------------------------ main
 preflight
+# The SSO client secret is read from the environment, never from a flag (it would show up in `ps` and shell history).
+case "${SSO_TYPE}" in
+  google | facebook | amazon | oidc)
+    if [[ -z "${SSO_CLIENT_SECRET:-}" ]]; then
+      if [[ -t 0 ]]; then
+        printf '[install-data-layer] SSO client secret for %s (input hidden): ' "${SSO_TYPE}" >&2
+        read -rs SSO_CLIENT_SECRET < /dev/tty || SSO_CLIENT_SECRET=""
+        printf '\n' >&2
+        export SSO_CLIENT_SECRET
+      fi
+      [[ -n "${SSO_CLIENT_SECRET:-}" ]] || die "--sso-type ${SSO_TYPE} needs the client secret: export SSO_CLIENT_SECRET (read -rs SSO_CLIENT_SECRET && export SSO_CLIENT_SECRET) and run again."
+    fi
+    ;;
+esac
+
 if [[ "${CHECK_ONLY}" == true ]]; then
   log "pre-flight OK"
   exit 0
@@ -324,6 +351,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ "${SKIP_CAPACITY_PROBE}" == true ]] && run_args+=(--skip-capacity-probe)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
+[[ ${#EXTRA_FLAGS[@]} -gt 0 ]] && run_args+=("${EXTRA_FLAGS[@]}")
 [[ -n "${DEFEND_ENGINE}" ]] && run_args+=(--defend-engine "${DEFEND_ENGINE}")
 [[ -n "${TF_PREFIX}" ]] && run_args+=(--tf-prefix "${TF_PREFIX}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)

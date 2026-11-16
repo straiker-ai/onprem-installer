@@ -240,6 +240,22 @@ Teardown: `nuke-eks.sh` removes the cluster but **not** the data, artifacts and 
 protection if the strategy was `ha`/`max`, then `tofu destroy` the data stack, delete the final snapshot
 (`<cluster>-aurora-final`) by hand, and retry on `BucketNotEmpty`.
 
+### Tear everything down (clean slate)
+`scripts/list-cluster-resources.sh --cluster-name <name> --tf-prefix <prefix> --region <region> --profile <profile> [--zone-id <zone>]`
+is a read-only inventory of everything the install left in the account (exit 0 = nothing left). Run it before, to see what will go,
+and after, to prove it is clean. Then:
+
+```bash
+STRAIKER_STATE_FILE=~/.straiker/install-<name>.json scripts/uninstall-straiker.sh --delete-namespace --destroy-eks --purge-state-bucket --yes
+```
+
+It removes, in order: the Helm releases and namespace, the edge and CloudWatch Terraform, the **data layer** (Aurora and its final
+snapshot, MSK, OpenSearch, ElastiCache, EFS, Cognito, SES identity and DNS records, DynamoDB, KMS, secrets with no recovery window,
+the grid bucket), the **artifacts** (ECR mirror images and repositories, the models bucket), the GPU nodes and load balancers, the
+EKS cluster and VPC, the install's ACM certificates and its own Route53 records, and finally (`--purge-state-bucket`) every version in
+the Terraform state bucket and the bucket. Left on purpose: account-wide service-linked roles, the Route53 hosted zone, other records
+in it, anything not created by this install. It is irreversible; delete `~/.straiker/install-<name>.json` afterwards.
+
 ## 6. Defend v3 (Argus v3): what it can detect, and Ascend on v3
 
 Install with `--defend-engine v3`. The gateway sends `/api/v1/detect`, `/api/v3/detect` and the integration detect paths to
