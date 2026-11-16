@@ -63,7 +63,8 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
 
   **`--gpu-instance-type`** overrides which EC2 type the `p4d` (packed) fleet is pinned to, same "one server per GPU,
   one pinned type" shape either way — a stand-in while A100/p4d capacity is being arranged, not a cost optimization.
-  Known types today: `p4d.24xlarge`/`p4de.24xlarge`/`p5.48xlarge` (P-instance quota) and `g6e.12xlarge`/`g6e.48xlarge`/
+  Known types today: `p4d.24xlarge`/`p4de.24xlarge`/`p5.48xlarge` (P-instance quota) and `g6e.4xlarge` (1 GPU per node, 10 nodes, the easiest to get),
+  `g6e.12xlarge`/`g6e.48xlarge`/
   `g5.48xlarge`/`g6.48xlarge` (G-and-VT quota) — the installer checks the quota and region/AZ offering that actually
   governs the chosen type, not always the P-instance one. Example: `--gpu-instance-type g6e.12xlarge` packs the
   10-server fleet onto 3 nodes (4x L40S each) against the G-and-VT quota instead of 2x p4d.24xlarge against the

@@ -233,13 +233,15 @@ gpu_plan_packed_summary() {
   local itype="${1:-p4d.24xlarge}" gpus_per_node rate
   case "${itype}" in
     p4d.24xlarge | p4de.24xlarge | p5.48xlarge) gpus_per_node=8 ;;
+    g6e.4xlarge) gpus_per_node=1 ;;
     g6e.12xlarge) gpus_per_node=4 ;;
     g6e.48xlarge | g5.48xlarge | g6.48xlarge) gpus_per_node=8 ;;
     *) gpus_per_node=8 ;; # unknown type: same guess install-straiker.sh's quota check falls back to
   esac
   case "${itype}" in
     p4d.24xlarge) rate=32.77 ;;
-    g6e.12xlarge) rate=10.17 ;;
+    g6e.12xlarge) rate=10.49 ;;
+    g6e.4xlarge) rate=3.00 ;;
     *) rate="" ;;
   esac
   local nodes=$(( (10 + gpus_per_node - 1) / gpus_per_node ))
@@ -257,6 +259,7 @@ report_plan() {
   case "${packed_itype}" in
     p4d.24xlarge) packed_hourly="70-75" ;;
     g6e.12xlarge) packed_hourly="30-35" ;;
+    g6e.4xlarge) packed_hourly="33-38" ;;
     *) packed_hourly="see above" ;;
   esac
   cat <<EOF

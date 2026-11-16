@@ -33,7 +33,7 @@ GPU_KINDS = {
 INSTANCE_GPUS = {
     "g4dn.xlarge": ("T4", 1), "g4dn.12xlarge": ("T4", 4), "g5.xlarge": ("A10G", 1), "g5.12xlarge": ("A10G", 4),
     "g5.48xlarge": ("A10G", 8), "g6.xlarge": ("L4", 1), "g6.12xlarge": ("L4", 4), "g6.48xlarge": ("L4", 8),
-    "g6e.xlarge": ("L40S", 1), "g6e.12xlarge": ("L40S", 4), "p4d.24xlarge": ("A100-SXM4-40GB", 8),
+    "g6e.xlarge": ("L40S", 1), "g6e.4xlarge": ("L40S", 1), "g6e.12xlarge": ("L40S", 4), "p4d.24xlarge": ("A100-SXM4-40GB", 8),
     "p4de.24xlarge": ("A100-SXM4-80GB", 8), "p5.48xlarge": ("H100", 8),
 }
 # MIG profiles: name -> (compute slices of 7, memory GB)

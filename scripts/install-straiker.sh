@@ -1556,7 +1556,8 @@ show_cost_estimate() {
       packed_max="${packed_max:-4}"
       case "${packed_itype}" in
         p4d.24xlarge) packed_rate=32.77 ;;
-        g6e.12xlarge) packed_rate=10.17 ;;
+        g6e.12xlarge) packed_rate=10.49 ;;
+        g6e.4xlarge) packed_rate=3.00 ;;
         *) packed_rate="" ;;
       esac
       if [[ -n "${packed_rate}" ]]; then
@@ -6579,6 +6580,7 @@ gpu_instance_spec() {
   case "${itype}" in
     p4d.24xlarge | p4de.24xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=96 ;;
     p5.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
+    g6e.4xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=16 ;; # one L40S per node: 10 nodes for the fleet, far easier to get than a 12xlarge
     g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 ;;
     g6e.48xlarge | g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
     *) return 1 ;;
@@ -6651,8 +6653,19 @@ remember_inference_settings() {
     return 1
   fi
   if [[ "${fleet}" == "p4d" ]] && ! gpu_instance_spec "${itype}"; then
-    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
+    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.4xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
     return 1
+  fi
+  if [[ "${fleet}" == "p4d" ]] && gpu_instance_spec "${itype}"; then
+    # The pool's GPU limit is max-nodes x GPUs per node. It must cover the fleet with room to double it (replicas, upgrades), or
+    # pods wait forever on a limit nobody sees: 4 single-GPU nodes would cap 10 model servers at 4 GPUs.
+    local fleet_servers=0 fleet_line min_nodes
+    while IFS= read -r fleet_line; do [[ -n "${fleet_line}" ]] && fleet_servers=$((fleet_servers + 2)); done < <(inference_models_for_products)
+    min_nodes=$(( (fleet_servers * 2 + GPU_SPEC_GPUS - 1) / GPU_SPEC_GPUS ))
+    if [[ ${fleet_servers} -gt 0 && ${max_nodes} -lt ${min_nodes} ]]; then
+      log "--gpu-max-nodes ${max_nodes} x ${GPU_SPEC_GPUS} GPU(s) per ${itype} node is too small for ${fleet_servers} model servers: using ${min_nodes} (room to double the fleet)."
+      max_nodes="${min_nodes}"
+    fi
   fi
   set_metadata "gpu_fleet" "${fleet}"
   set_metadata "gpu_instance_type" "${itype}"
