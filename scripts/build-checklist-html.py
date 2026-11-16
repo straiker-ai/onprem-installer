@@ -169,9 +169,10 @@ ul.boxes li{padding:9px 12px;border-bottom:1px solid var(--border)}ul.boxes li:l
 ul.boxes label{display:flex;gap:10px;align-items:flex-start;cursor:pointer}ul.boxes input{margin-top:2px;flex-shrink:0}
 ul.boxes li.done span{opacity:.55;text-decoration:line-through}
 footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--secondary-foreground);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-@media print{.dark{--foreground:#000;--background:#fff;--tier-1:#fff;--secondary:#f1f1f1;--border:#ccc;--secondary-foreground:#555;--corner:#999;--defend:hsl(191 48% 36%);--ok:hsl(122 45% 30%)}
-body::before,.actions,.progress,.copy{display:none!important}.wrap{padding:0}section{break-inside:auto}.card,.code,tr,.callout{break-inside:avoid}
-input[type=text]{border:0;border-bottom:1px solid #999}}
+@page{size:Letter landscape;margin:12mm;background:#050505}
+@media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}html{background:var(--background)}
+body::before,.actions,.progress,.copy{display:none!important}.wrap{padding:0;max-width:none}section{break-inside:auto}.code,tr,.callout,ul.boxes li{break-inside:avoid}.card{break-inside:auto}
+.h2{break-after:avoid}input[type=text]{border:0;border-bottom:1px solid var(--secondary-foreground);background:transparent}.tt{font-size:11.5px}.code pre{white-space:pre-wrap;word-break:break-all}}
 @media(max-width:700px){.h1{font-size:30px}.wrap{padding:0 14px 64px}}
 """
 
@@ -199,7 +200,7 @@ var csv=rows.map(function(r){return r.map(q).join(',')}).join('\\r\\n');
 var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='straiker-prerequisites-answers.csv';document.body.appendChild(a);a.click();a.remove()});
 document.getElementById('print').addEventListener('click',function(){window.print()});
 var root=document.documentElement,tb=document.getElementById('theme');
-try{if(localStorage.getItem('straiker-theme')==='dark')root.classList.add('dark')}catch(e){}
+try{if(localStorage.getItem('straiker-theme')==='light')root.classList.remove('dark')}catch(e){}
 tb.addEventListener('click',function(){root.classList.toggle('dark');try{localStorage.setItem('straiker-theme',root.classList.contains('dark')?'dark':'light')}catch(e){}});
 })();
 """
@@ -212,7 +213,7 @@ def main():
     rest = "".join(intro[1:])
     secs = "".join(f'<section><h2 class="h2 display">{inline(s["title"])}</h2>{"".join(s["body"])}</section>' for s in sections)
     page = f"""<!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
