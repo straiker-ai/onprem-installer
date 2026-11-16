@@ -6770,6 +6770,40 @@ apply_gpu_time_slicing() {
   set_metadata "gpu_time_slicing_replicas" "${n}"
 }
 
+# After model pods stay Pending, say WHY when Karpenter could not get GPU instances. EC2 capacity is per instance type and per
+# Availability Zone and cannot be checked in advance; with provision-strategy min every node uses ONE AZ (the first the region
+# lists), so a shortage there blocks the whole fleet while the other AZs may have plenty. Karpenter logs the exact AWS reason.
+diagnose_gpu_capacity() {
+  local line msg azs
+  command -v kubectl >/dev/null 2>&1 || return 0
+  line="$(kubectl -n karpenter logs deploy/karpenter --since=90m 2>/dev/null | grep 'failed launching nodeclaim' | grep 'straiker-gpu' | tail -1 || true)"
+  [[ -n "${line}" ]] || return 0
+  msg="$(printf '%s' "${line}" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.readline())
+    print((d.get("error") or d.get("message") or "")[:420])
+except Exception:
+    pass' 2>/dev/null || true)"
+  [[ -n "${msg}" ]] || return 0
+  azs="$(aws ec2 describe-subnets --region "${AWS_REGION}" --filters "Name=tag:karpenter.sh/discovery,Values=${CLUSTER_NAME}" \
+    --query 'Subnets[].AvailabilityZone' --output text 2>/dev/null | tr '\t' ' ' || true)"
+  {
+    echo ""
+    echo "[*] The GPU nodes could not be created. AWS (via Karpenter) says:"
+    echo "      ${msg}"
+    if [[ "${msg}" == *InsufficientInstanceCapacity* || "${msg}" == *UnfulfillableCapacity* || "${msg}" == *"insufficient capacity"* ]]; then
+      echo "[*] This is a temporary shortage of that instance type in the Availability Zone(s) this cluster launches nodes in (${azs:-unknown}),"
+      echo "    not a quota or installer problem. Karpenter keeps retrying, so waiting and re-running this phase can succeed. To get unstuck sooner:"
+      echo "      1. Allow another AZ: tag its private subnet  karpenter.sh/discovery=${CLUSTER_NAME}  (the strategy 'min' tags only the first AZ);"
+      echo "         the message above usually names AZs that have capacity. For a new install use --provision-strategy ha (all AZs)."
+      echo "      2. Use an instance type with capacity: re-run with --gpu-instance-type <type>, or --gpu-fleet per-model (smaller instances)."
+      echo "      3. Reserve capacity (EC2 Capacity Reservation / Capacity Block) and pass --gpu-capacity-reservation cr-..."
+    fi
+    echo ""
+  } >&2
+}
+
 # Plans where the model servers run (scripts/gpu_planner.py), prints it, blocks if the hardware cannot hold the fleet, and leaves
 # the plan in INFERENCE_PLAN_FILE. production: one server per GPU on each model's validated tier (what Karpenter creates).
 # test: the GPU nodes that exist now, shared if needed; with none, the same exclusive plan as production.
@@ -7046,6 +7080,7 @@ phase_straiker_inference() {
 
   rm -f "${INFERENCE_PLAN_FILE}"
   if [[ ${#failed[@]} -gt 0 ]]; then
+    diagnose_gpu_capacity
     mark_phase_blocked "Inference model(s) failed to install: ${failed[*]}. Each model is its own Helm release named 'inference-<model>' — check GPU node/capacity availability for the failed one(s), then re-run --phase straiker-inference --rerun-phase (already-succeeded models are just re-verified, not disrupted)."
     return
   fi
