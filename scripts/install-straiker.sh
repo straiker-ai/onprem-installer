@@ -247,7 +247,8 @@ DEFEND_RELEASE="straiker-defend"
 
 # Defend's detection engine: v1 (charts/straiker-defend, the default for now) or v3 (charts/straiker-argus-v3, Argus v3, needs
 # --data-layer). v3 runs next to v1 until Ascend is moved to it; then v3 becomes the default and v1 is removed.
-DEFEND_ENGINE="${DEFEND_ENGINE:-v1}"
+# Resolved by resolve_defend_engine() (flag > remembered > the data layer's v3 > v1); empty until then.
+DEFEND_ENGINE="${DEFEND_ENGINE:-}"
 DEFEND_CHART_NAME="straiker-defend"
 
 # How the local model servers (GPU) are provided. Profile: production (default; one server per GPU, never shared or
@@ -771,8 +772,10 @@ Options:
   --saas-frontend                  With --data-layer: also create the AWS backends of the SaaS frontend (DynamoDB
                                    environment + guardrail tables, Kinesis audit stream) and a Pod Identity role for
                                    the frontend. Remembered in install state; needs a SaaS-style frontend image.
-  --defend-engine <v1|v3>          Defend's detection engine. v1 (default for now): charts/straiker-defend. v3: Argus v3
-                                   (phase straiker-argus-v3, needs --data-layer), run next to v1 until Ascend moves to it.
+  --defend-engine <v1|v3>          Defend's detection engine. v3 (default with --data-layer): Argus v3 (phase straiker-argus-v3),
+                                   which the console's Controls page and the Detect API need; run next to v1
+                                   (charts/straiker-defend) until Ascend moves to it. v1 (default without --data-layer): v1 only.
+                                   Remembered in install state; a later run without the flag keeps it.
   --inference-profile <production|test>
                                    production (default): one model server per GPU, never shared or quantized, on the GPU
                                    tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
@@ -1028,6 +1031,28 @@ resolve_cluster_name() {
     fi
   fi
   CLUSTER_NAME="s6r-onprem"
+}
+
+# --defend-engine: flag > remembered > v3 with --data-layer (Argus v3 is what the console's Controls page and the Detect API
+# need; without it the registry cannot read the control catalog) > v3 if its phase already ran > v1. Remembered, so a later
+# phase run without the flag does not silently fall back to v1.
+resolve_defend_engine() {
+  local v="${DEFEND_ENGINE}"
+  [[ -n "${v}" ]] || v="$(get_metadata "defend_engine")"
+  if [[ -z "${v}" ]]; then
+    if [[ "$(get_phase_status "straiker-argus-v3")" == "done" || "${DATA_LAYER}" == "true" ]]; then v="v3"; else v="v1"; fi
+  fi
+  case "${v}" in v1 | v3) ;; *)
+    echo "ERROR: --defend-engine must be v1 or v3 (got '${v}')." >&2
+    exit 1
+    ;;
+  esac
+  if [[ "${v}" == "v3" && "${DATA_LAYER}" != "true" ]]; then
+    echo "ERROR: --defend-engine v3 needs --data-layer (Argus v3 uses MSK, ElastiCache and Secrets Manager from the data tier)." >&2
+    exit 1
+  fi
+  DEFEND_ENGINE="${v}"
+  set_metadata "defend_engine" "${v}"
 }
 
 # Refuse to run --cluster-name X against a state file that belongs to cluster Y: it would silently overwrite Y's remembered
@@ -6221,7 +6246,8 @@ phase_straiker_core() {
     # accepts it (gateway_accepts_console_session); otherwise sign-in would end in a 401 and the old Defend page stays.
     if gateway_accepts_console_session; then
       cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
-      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=true")
+      # Controls reads its catalog from Argus v3 (registry -> gateway -> /internal/argus/v3): only with the v3 engine.
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=$([[ "${DEFEND_ENGINE}" == "v3" ]] && echo true || echo false)")
     else
       cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=false")
       cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=false")
@@ -9164,6 +9190,7 @@ main() {
   fi
 
   check_state_matches_cluster
+  resolve_defend_engine
   capture_install_config
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
   # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).

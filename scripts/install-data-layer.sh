@@ -35,6 +35,7 @@ ROUTE53=false
 ALARM_EMAILS=()
 GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
+DEFEND_ENGINE=""
 PRODUCTS="ascend,defend"
 AI_PROVIDER_MODE="bedrock"
 EXPECT_ACCOUNT=""
@@ -82,6 +83,7 @@ Options:
   --gpu-instance-type TYPE   p4d fleet only: pack it onto this EC2 type instead of p4d.24xlarge (e.g. g6e.12xlarge,
                              4x L40S) — a stand-in while A100/p4d capacity is being arranged; checked against
                              whichever quota that type actually falls under
+  --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
   --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
   --installer-arg ARG        extra argument for install-straiker.sh (repeatable)
   --timeout-minutes N        give up waiting after N minutes in total (default: 240)
@@ -113,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --alarm-email) ALARM_EMAILS+=("${2:-}"); shift 2 ;;
     --gpu-fleet) GPU_FLEET="${2:-}"; shift 2 ;;
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
+    --defend-engine) DEFEND_ENGINE="${2:-}"; shift 2 ;;
     --products) PRODUCTS="${2:-}"; shift 2 ;;
     --ai-provider-mode) AI_PROVIDER_MODE="${2:-}"; shift 2 ;;
     --multiarch-override) MULTIARCH_SET=true; [[ "${2:-}" == "none" ]] || MULTIARCH_LIST+=("${2:-}"); shift 2 ;;
@@ -295,6 +298,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
   --edge-type "${EDGE_TYPE}" --yes)
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
+[[ -n "${DEFEND_ENGINE}" ]] && run_args+=(--defend-engine "${DEFEND_ENGINE}")
 command -v tofu >/dev/null 2>&1 || run_args+=(--install-tofu)
 if [[ -n "${DOMAIN}" ]]; then
   run_args+=(--custom-domain "${DOMAIN}")
