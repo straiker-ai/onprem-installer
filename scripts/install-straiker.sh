@@ -7038,9 +7038,13 @@ watch_gpu_capacity() {
       for pid in "$@"; do pkill -TERM -P "${pid}" 2>/dev/null || true; kill -TERM "${pid}" 2>/dev/null || true; done
       return 0
     fi
-    if (( ice > 0 && SECONDS - last_note >= 120 )); then
+    if (( SECONDS - last_note >= 120 )); then
       last_note=${SECONDS}
-      log "GPU capacity: ${nodes} of ${needed} GPU node(s) up; AWS has no capacity for the rest right now (${ice} failed launches so far). Karpenter keeps retrying."
+      if (( nodes >= needed )); then
+        log "GPU capacity: all ${needed} GPU node(s) are up; waiting for the model servers to load."
+      elif (( ice > 0 )); then
+        log "GPU capacity: ${nodes} of ${needed} GPU node(s) up; AWS has no capacity for the rest right now (${ice} failed launches so far). Karpenter keeps retrying."
+      fi
     fi
   done
 }
