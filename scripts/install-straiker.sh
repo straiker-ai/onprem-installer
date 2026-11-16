@@ -6913,10 +6913,38 @@ for o in offers[:3]:
   return 0
 }
 
+# One capacity probe launch: asks for 1 to $3 instances of type $2 (AMI $1) in subnet $4 and terminates what it got. A fleet does not
+# have to launch all at once (Karpenter launches node by node and may mix types), so "all or nothing" would call a zone empty that
+# can still hold most of the fleet. Sets PROBE_LAUNCHED (instances AWS gave us), PROBE_NOTE (error text) and appends the ids to
+# PROBE_IDS. Returns 0 when at least one launched, 1 when AWS had no capacity, 2 on any other error.
+PROBE_LAUNCHED=0
+PROBE_NOTE=""
+PROBE_IDS=""
+probe_launch() {
+  local ami=$1 itype=$2 nodes=$3 subnet=$4 out rc=0 ids
+  PROBE_LAUNCHED=0
+  PROBE_NOTE=""
+  out="$(aws ec2 run-instances --region "${AWS_REGION}" --image-id "${ami}" --instance-type "${itype}" --count "1:${nodes}" \
+    --subnet-id "${subnet}" --metadata-options HttpTokens=required --instance-initiated-shutdown-behavior terminate \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
+    --query 'Instances[].InstanceId' --output text 2>&1)" || rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    ids="${out}"
+    PROBE_LAUNCHED="$(echo "${ids}" | wc -w | tr -d ' ')"
+    PROBE_IDS+="${ids} "
+    aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${ids} >/dev/null 2>&1 \
+      || log "WARNING: could not terminate the probe instances (${ids}); terminate them in the EC2 console."
+    return 0
+  fi
+  if [[ "${out}" == *InsufficientInstanceCapacity* ]]; then return 1; fi
+  PROBE_NOTE="${out##*: }"
+  return 2
+}
+
 # Picks the zone the cluster is built in by trying the GPU fleet where it will run, BEFORE any cluster exists (so a zone with no
 # capacity costs nothing and fails in minutes, not after a 15-minute build). AWS has no call that reports free on-demand capacity,
-# so this launches the whole fleet for real (all or nothing) in a throwaway VPC that has one subnet per candidate zone, terminates
-# it, and deletes the VPC. The first zone that has capacity becomes the first AZ of the cluster (metadata gpu_first_az, read by
+# so this launches as much of the fleet as AWS will give (1 to N nodes) in a throwaway VPC that has one subnet per candidate zone, terminates
+# it, and deletes the VPC. The zone that gives the most (stopping at the first that holds the whole fleet) becomes the first AZ of the cluster (metadata gpu_first_az, read by
 # resolve_availability_zones); with --provision-strategy min that is the only zone nodes run in. $1 = GPU nodes needed.
 # Not run: with --availability-zones, --vpc-id, a --gpu-capacity-reservation, --skip-capacity-probe, once the cluster's AZs are
 # fixed, or when a throwaway VPC cannot be created (the post-build probe still runs then). Only InsufficientInstanceCapacity
@@ -6977,32 +7005,31 @@ select_gpu_zone() {
       az_subnets+="${az} ${sn}"$'\n'
     fi
   done
-  local out rc ids chosen="" tried="" failed="" note="" probed_ids=""
+  local chosen="" tried="" failed="" note="" best=0 best_az="" best_type="" zone_best got
+  PROBE_IDS=""
   while read -r az sn; do
     [[ -n "${az}" ]] || continue
+    zone_best=0
     for itype in ${types//,/ }; do
-      rc=0
-      out="$(aws ec2 run-instances --region "${AWS_REGION}" --image-id "${ami}" --instance-type "${itype}" --count "${nodes}" \
-        --subnet-id "${sn}" --metadata-options HttpTokens=required --instance-initiated-shutdown-behavior terminate \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
-        --query 'Instances[].InstanceId' --output text 2>&1)" || rc=$?
+      probe_launch "${ami}" "${itype}" "${nodes}" "${sn}" && got=0 || got=$?
       tried+="${az}/${itype} "
-      if [[ ${rc} -eq 0 ]]; then
-        ids="${out}"
-        probed_ids+="${ids} "
-        aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${ids} >/dev/null 2>&1 || true
-        log "GPU zone probe: ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
-        chosen="${az}"
-        break 2
-      elif [[ "${out}" == *InsufficientInstanceCapacity* ]]; then
+      if [[ ${got} -eq 0 ]]; then
+        log "GPU zone probe: ${PROBE_LAUNCHED} of ${nodes} x ${itype} launched in ${az} and terminated."
+        if (( PROBE_LAUNCHED > zone_best )); then zone_best=${PROBE_LAUNCHED}; fi
+        if (( PROBE_LAUNCHED > best )); then best=${PROBE_LAUNCHED}; best_az="${az}"; best_type="${itype}"; fi
+        (( PROBE_LAUNCHED >= nodes )) && break
+      elif [[ ${got} -eq 1 ]]; then
         failed+="${az}/${itype} "
         log "GPU zone probe: no capacity for ${nodes} x ${itype} in ${az} right now."
       else
-        note="${out##*: }"
+        note="${PROBE_NOTE}"
         log "WARNING: GPU zone probe could not run in ${az} for ${itype}: ${note}"
       fi
     done
+    if (( zone_best >= nodes )); then break; fi # a zone that holds the whole fleet: no need to look further
   done <<< "${az_subnets}"
+  chosen="${best_az}"
+  probed_ids="${PROBE_IDS}"
   # Remove the throwaway VPC: wait for the probe instances to be gone first (their network interfaces block subnet deletion).
   [[ -n "${probed_ids// /}" ]] && aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids ${probed_ids} >/dev/null 2>&1 || true
   for sn in ${subnets}; do aws ec2 delete-subnet --region "${AWS_REGION}" --subnet-id "${sn}" >/dev/null 2>&1 || true; done
@@ -7016,6 +7043,7 @@ select_gpu_zone() {
   if [[ -n "${chosen}" ]]; then
     set_metadata "gpu_first_az" "${chosen}"
     set_metadata "gpu_zone_probe" "ok|${chosen}|$(date +%s)"
+    (( best < nodes )) && log "WARNING: the best zone (${chosen}) could give ${best} of the ${nodes} GPU nodes right now; the rest launch as AWS frees capacity, and the install stops waiting after 10 minutes without progress."
     log "The cluster will be built with ${chosen} as its first (and, with provision strategy 'min', only node) zone."
     return 0
   fi
@@ -7081,29 +7109,24 @@ probe_gpu_capacity() {
     "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)"
   [[ -n "${stale}" && "${stale}" != "None" ]] && aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${stale} >/dev/null 2>&1 || true
 
-  local az subnet out rc ids tried="" passed="" failed="" note=""
+  local az subnet got tried="" passed="" failed="" note=""
+  PROBE_IDS=""
   while read -r az subnet; do
     [[ -n "${az}" ]] || continue
     if [[ -n "${azs}" && " ${azs} " != *" ${az} "* ]]; then continue; fi
     for itype in ${types//,/ }; do
-      rc=0
-      out="$(aws ec2 run-instances --region "${AWS_REGION}" --image-id "${ami}" --instance-type "${itype}" --count "${nodes}" \
-        --subnet-id "${subnet}" --metadata-options HttpTokens=required --instance-initiated-shutdown-behavior terminate \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
-        --query 'Instances[].InstanceId' --output text 2>&1)" || rc=$?
+      probe_launch "${ami}" "${itype}" "${nodes}" "${subnet}" && got=0 || got=$?
       tried+="${az}/${itype} "
-      if [[ ${rc} -eq 0 ]]; then
-        ids="${out}"
-        aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${ids} >/dev/null 2>&1 \
-          || log "WARNING: could not terminate the probe instances (${ids}); terminate them in the EC2 console."
+      if [[ ${got} -eq 0 ]]; then
         passed+="${az}/${itype} "
-        log "GPU capacity probe: ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
+        log "GPU capacity probe: ${PROBE_LAUNCHED} of ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
+        (( PROBE_LAUNCHED < nodes )) && log "WARNING: only ${PROBE_LAUNCHED} of ${nodes} GPU nodes are available right now; the rest launch as AWS frees capacity."
         break 2 # one proof is enough; probing every zone would only cost more
-      elif [[ "${out}" == *InsufficientInstanceCapacity* ]]; then
+      elif [[ ${got} -eq 1 ]]; then
         failed+="${az}/${itype} "
         log "GPU capacity probe: no capacity for ${nodes} x ${itype} in ${az} right now."
       else
-        note="${out##*: }"
+        note="${PROBE_NOTE}"
         log "WARNING: GPU capacity probe could not run in ${az} for ${itype}: ${note}"
       fi
     done
