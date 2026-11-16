@@ -72,7 +72,7 @@ Everything lives in **one AWS account and one region**. Nothing in the product n
 | Relational | **One Aurora PostgreSQL cluster**, engine 17.x (newest in the region), serverless v2 2-16 ACU, writer + reader in two zones, port 3306, TLS, final snapshot `<cluster>-aurora-final`. Holds the databases foundation, registry, databridge, connect, notify, frontend, iris, bifrost | `terraform/aws/data` |
 | Streaming | MSK Serverless (SASL/IAM, port 9098), topics in section 5 | `data` |
 | Cache | ElastiCache Serverless Valkey (TLS 6379) for Argus and Defend; Ascend uses its own node-based Valkey replication group `<cluster>-iris-redis` | `data` |
-| Search | Amazon OpenSearch Service domain, VPC-only (`min`: `t3.small.search` x1, 20 GB; `ha`: `r7g.large.search` x3 + 3 masters, 100 GB; `max`: `r7g.xlarge.search`, 200 GB) | `data` |
+| Search | Amazon OpenSearch Service domain (used by the console frontend), VPC-only (`min`: `t3.small.search` x1, 20 GB; `ha`: `r7g.large.search` x3 + 3 masters, 100 GB; `max`: `r7g.xlarge.search`, 200 GB) | `data` |
 | Files | EFS for the shared models volume; DynamoDB table `<cluster>-environment`; grid artifacts S3 bucket | `data` |
 | Secrets and keys | Secrets Manager under `<cluster>/...`, KMS key for data, External Secrets Operator syncs them into the cluster | `data`, `external-secrets` phase |
 | Identity and mail | Cognito user pool with your identity provider federated in (Google, Facebook, Amazon, Apple, OIDC, SAML), Cognito domain `straiker-<cluster>`, SES domain identity (DKIM, mail-from) for the pool's email | `data` |
@@ -132,6 +132,8 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 | clickhouse-keeper | same image | 3 | 10 Gi each | ports 9181 client, 9234 raft |
 | ch-sync (CronJob every minute) | same image | | | copies Aurora `registry` into ClickHouse `grid` as user `grid_sync` |
 | straiker-ingest | `redpandadata/connect:4.101.0` | 1 | | reads MSK, batches 5000 rows or 1 s into ClickHouse over HTTP |
+| straiker-benthos (archive) | `redpandadata/connect:4.101.0` | 1 | | HTTP `/archive` on 4195; writes each record to the **in-cluster OpenSearch** index named by its `stream` field (`turns`, `turns-flagged`, `turns-insights`, `iris`) |
+| opensearch-cluster-master, postgres, valkey (from `straiker-system`) | `opensearch 3.6.0`, `postgres:16-alpine`, `valkey 8-alpine` | 1 each | OpenSearch 10 Gi, Postgres 20 Gi | still deployed in the data-layer install. Only OpenSearch is in use (archive target); on dl-test nothing was seen connecting to Postgres or Valkey, because the frontend and Ascend use Aurora and Defend/Argus use ElastiCache |
 | straiker-data Jobs | `postgres:16-alpine`, `confluentinc/cp-kafka:7.7.1` | one-off | | create the databases and roles in Aurora; create the MSK topics (replication factor 3) |
 
 ClickHouse users: `admin` (DDL), `grid_query_ro` (read, `readonly=2`), `grid_ingest` (insert on `grid.*`), `grid_purge`, `grid_sync` (select, insert, optimize, Postgres engine).
@@ -221,7 +223,7 @@ flowchart LR
 | Ascend | thanos, bifrost, Defend v1 or api-gateway `/api/v3/detect` (v3 graders), Aurora, ElastiCache, benthos | attack generation and grading |
 | bifrost | Bedrock (and OpenAI, xAI, Anthropic if keys are given) | HTTPS |
 | Defend v1 | vision, wanda, benthos `/archive`, the frontend | detection, archive, foundation endpoint |
-| straiker-benthos | OpenSearch | archive writes, index per stream |
+| straiker-benthos | in-cluster OpenSearch (not the managed domain) | archive writes, index per stream |
 | Model pods | S3 models bucket / EFS | weights at start |
 
 Secrets: all from Secrets Manager `<cluster>/...` through External Secrets into `straiker-secrets`, `platform-secret`, `straiker-db-dsn`,
@@ -249,7 +251,7 @@ Re-running the same command resumes at the first unfinished phase.
 | Sign-in | Google | Google | their provider |
 | Bedrock profile | regional (`us`) | regional (`us`) | regional or global |
 
-The dl-test values above come from the recorded install state file, not from querying the live cluster.
+The dl-test values above come from the recorded install state file, cross-checked read-only against the live cluster (section 10).
 
 ---
 
@@ -261,3 +263,15 @@ The dl-test values above come from the recorded install state file, not from que
 - **api-gateway `v2.3.13-rc2`** carries the on-prem session authentication and is not yet on the api-gateway `main` branch.
 - **No managed dashboards:** CloudWatch covers metrics, logs and alarms; Grafana, OpenTelemetry and Argo CD from the SaaS reference are not included.
 - Customer requirements before running: `doc/customer-prerequisites-checklist.md`. Egress list: `doc/egress-allowlist.md`. Run, recover, tear down: `doc/data-layer-install-runbook.md`.
+
+---
+
+## 10. Live check of dl-test (read-only, 2026-11-16)
+
+Compared this document with the running dl-test cluster (`kubectl get`, `helm get values`, environment variables without secrets). Nothing was changed.
+
+- **Matches:** every Deployment, StatefulSet, CronJob and image tag in section 4, replica counts (all as listed, `argus-v3-app` 2 with HPA 2-6, ClickHouse 2, Keeper 3, each model 2), the five NodePools, four ALB Ingresses (`straiker.`, `straiker-defend.`, `straiker-ascend.`, `api.dltest.straiker.ai`, one shared ALB), Kubernetes v1.35.
+- **GPU nodes (10, all us-east-2a):** vision 2 x g5.4xlarge, wanda 2 x g5.2xlarge, kev-non-agentic 2 x g5.2xlarge, kev-agentic 2 x g6.4xlarge, thanos 2 x g6e.4xlarge. System nodes also include one unmanaged-pool `m5.large` (the system node group).
+- **Wiring confirmed:** frontend uses Aurora (port 3306, `sslmode=require`) and the managed OpenSearch domain; Ascend uses Aurora; Defend and Argus v3 use ElastiCache Serverless over TLS; Argus v3 talks to MSK Serverless on 9098.
+- **Differences from the first draft:** the archive Benthos writes to the **in-cluster** OpenSearch; the in-cluster Postgres, Valkey and OpenSearch from `straiker-system` are still deployed next to the managed services. They are not removed by the data-layer install; turning off the unused ones would save a node's worth of memory but has not been tried.
+- **Not observed:** no HPA other than `argus-v3-app`'s (its CPU metric shows `unknown`, so it will not scale on CPU until metrics-server answers).
