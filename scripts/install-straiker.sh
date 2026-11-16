@@ -2065,6 +2065,23 @@ on_interrupt() {
   exit 130
 }
 
+# EXIT handler: a command that fails under `set -e` ends the installer with no message and leaves its phase "in_progress" (seen on
+# the first clean install: a ConfigMap read in platform-services). Name the failing command and function, and mark the phase
+# failed so state, --status and the wrapper show it. Phases that already recorded blocked/failed, interrupts and clean exits are
+# left alone (the EXIT trap only runs in the main shell, not in command substitutions).
+on_exit_report() {
+  local rc=$? cmd="${BASH_COMMAND}" fn="${FUNCNAME[1]:-main}"
+  trap - EXIT
+  [[ ${rc} -ne 0 && -n "${CURRENT_PHASE:-}" ]] || return 0
+  [[ "$(get_phase_status "${CURRENT_PHASE}" 2>/dev/null || true)" == "in_progress" ]] || return 0
+  local message="Phase '${CURRENT_PHASE}' stopped unexpectedly (exit ${rc}) in ${fn}: ${cmd}"
+  set_phase_status "${CURRENT_PHASE}" "failed" "${message}" 2>/dev/null || true
+  set_install_status "failed" "${message}" 2>/dev/null || true
+  echo "ERROR: ${message}" >&2
+  echo "       Re-run the same command after fixing this; the phase starts again from its beginning." >&2
+  return 0
+}
+
 mark_phase_blocked() {
   local message=$1
   set_phase_status "${CURRENT_PHASE}" "blocked" "${message}"
@@ -5988,8 +6005,12 @@ phase_platform_services() {
     log "Installing platform service '${svc}' (${tag})..."
     # The platform charts carry no config checksum: a config-only change (ConfigMap <svc>-config) does not restart the
     # pods, which keep the old environment. Compare it around the upgrade and restart when it changed.
-    local cfg_before cfg_after
-    cfg_before="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12)"
+    # No ConfigMap before (first install): nothing runs with an old config, so there is nothing to restart. The read must not abort
+    # the installer either (set -e / pipefail: a missing ConfigMap makes the pipeline fail).
+    local cfg_before="" cfg_after=""
+    if kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+      cfg_before="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12 || true)"
+    fi
     helm upgrade --install "${svc}" "${chart}" \
       --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
       -f "${chart}/values-onprem.yaml" \
@@ -5999,8 +6020,8 @@ phase_platform_services() {
       --set-string "${key}.migrations.image.version=${tag}" \
       --set "${key}.observability.otel.requireSecret=false" \
       ${extra[@]+"${extra[@]}"}
-    cfg_after="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12)"
-    if [[ "${cfg_before}" != "${cfg_after}" ]] && kubectl get deploy "${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+    cfg_after="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12 || true)"
+    if [[ -n "${cfg_before}" && "${cfg_before}" != "${cfg_after}" ]] && kubectl get deploy "${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
       log "Configuration of '${svc}' changed: restarting it."
       kubectl rollout restart "deploy/${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null
       kubectl rollout status "deploy/${svc}-deployment" -n "${INFRA_NAMESPACE}" --timeout=10m >/dev/null \
@@ -9214,6 +9235,7 @@ update_alb_certificate() {
 main() {
   trap 'on_error $LINENO' ERR
   trap on_interrupt HUP INT TERM
+  trap on_exit_report EXIT
 
   parse_args "$@"
   # --data-layer provisions ClickHouse and Aurora, which registry and grid need (grid's migration creates the
