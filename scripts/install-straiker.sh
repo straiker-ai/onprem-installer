@@ -6941,6 +6941,7 @@ phase_straiker_inference() {
         --namespace "${INFRA_NAMESPACE}"
         --create-namespace
         --set "modelProfile=${model}"
+        --set-string "modelCache.awsRegion=${AWS_REGION}" # the models bucket lives in the install region (chart falls back to us-east-1)
         --set "global.dockerRegistry=${ecr_registry_prefixed}"
         --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
         --timeout "${HELM_TIMEOUT}"
