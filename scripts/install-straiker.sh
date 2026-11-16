@@ -2344,6 +2344,11 @@ resolve_availability_zones() {
       --query 'CapacityReservations[0].AvailabilityZone' --output text 2>/dev/null || true)"
     [[ "${res_az}" == "None" || " ${avail} " != *" ${res_az} "* ]] && res_az=""
   fi
+  # No reservation: the zone the pre-build capacity probe found free (select_gpu_zone) goes first.
+  if [[ -z "${res_az}" ]]; then
+    res_az="$(get_metadata "gpu_first_az")"
+    [[ -n "${res_az}" && " ${avail} " != *" ${res_az} "* ]] && res_az=""
+  fi
   [[ -n "${res_az}" ]] && { chosen="${res_az} "; n=1; }
   for az in ${avail}; do
     (( n >= want )) && break
@@ -6908,6 +6913,120 @@ for o in offers[:3]:
   return 0
 }
 
+# Picks the zone the cluster is built in by trying the GPU fleet where it will run, BEFORE any cluster exists (so a zone with no
+# capacity costs nothing and fails in minutes, not after a 15-minute build). AWS has no call that reports free on-demand capacity,
+# so this launches the whole fleet for real (all or nothing) in a throwaway VPC that has one subnet per candidate zone, terminates
+# it, and deletes the VPC. The first zone that has capacity becomes the first AZ of the cluster (metadata gpu_first_az, read by
+# resolve_availability_zones); with --provision-strategy min that is the only zone nodes run in. $1 = GPU nodes needed.
+# Not run: with --availability-zones, --vpc-id, a --gpu-capacity-reservation, --skip-capacity-probe, once the cluster's AZs are
+# fixed, or when a throwaway VPC cannot be created (the post-build probe still runs then). Only InsufficientInstanceCapacity
+# everywhere blocks; any other error only warns.
+select_gpu_zone() {
+  local nodes=$1
+  [[ "${SKIP_CAPACITY_PROBE}" != true && "${CLOUD_PROVIDER}" != "gke" ]] || return 0
+  [[ -z "${AVAILABILITY_ZONES_OPT}" && -z "${VPC_ID}" ]] || return 0
+  [[ -z "${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}" ]] || return 0
+  [[ -z "$(get_metadata "availability_zones")" ]] || return 0 # the cluster's zones are already fixed
+  local last
+  last="$(get_metadata "gpu_zone_probe")"
+  if [[ "${last}" == ok\|* ]]; then
+    local at="${last##*|}"
+    if [[ "${at}" =~ ^[0-9]+$ ]] && (( $(date +%s) - at < 7200 )); then
+      log "GPU zone probe passed less than 2 hours ago (zone $(get_metadata "gpu_first_az")): skipping."
+      return 0
+    fi
+  fi
+  local types itype az azs="" offered
+  types="$(gpu_instance_types)"
+  for itype in ${types//,/ }; do
+    offered="$(aws ec2 describe-instance-type-offerings --region "${AWS_REGION}" --location-type availability-zone \
+      --filters "Name=instance-type,Values=${itype}" --query 'InstanceTypeOfferings[].Location' --output text 2>/dev/null | tr '\t' ' ' || true)"
+    for az in ${offered}; do [[ " ${azs} " == *" ${az} "* ]] || azs+="${azs:+ }${az}"; done
+  done
+  azs="$(echo "${azs}" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)"
+  if [[ -z "${azs}" ]]; then
+    log "WARNING: zone probe skipped: could not list the zones that offer ${types}."
+    return 0
+  fi
+  if [[ "${AUTO_YES}" != true ]]; then
+    local ans
+    ans="$(prompt_line "Find a zone with GPU capacity now? This launches ${nodes} x ${types%%,*} for about a minute per zone (about \$1-2 for p4d, cents for g6e) in a temporary VPC and removes everything again [Y/n]: " || true)"
+    case "${ans}" in n | N | no | NO) log "GPU zone probe skipped at your request."; return 0 ;; esac
+  fi
+  local ami
+  ami="$(aws ssm get-parameter --region "${AWS_REGION}" --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+    --query Parameter.Value --output text 2>/dev/null || true)"
+  if [[ -z "${ami}" || "${ami}" == "None" ]]; then
+    log "WARNING: zone probe skipped: could not look up the Amazon Linux AMI in ${AWS_REGION}."
+    return 0
+  fi
+  local vpc subnets="" az_subnets="" i=0 az sn
+  vpc="$(aws ec2 create-vpc --region "${AWS_REGION}" --cidr-block 10.255.0.0/16 \
+    --tag-specifications "ResourceType=vpc,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
+    --query Vpc.VpcId --output text 2>/dev/null || true)"
+  if [[ -z "${vpc}" || "${vpc}" == "None" ]]; then
+    log "WARNING: zone probe skipped: could not create a temporary VPC (ec2:CreateVpc denied?). The probe after the cluster build still runs."
+    return 0
+  fi
+  for az in ${azs}; do
+    i=$((i + 1))
+    sn="$(aws ec2 create-subnet --region "${AWS_REGION}" --vpc-id "${vpc}" --availability-zone "${az}" --cidr-block "10.255.${i}.0/24" \
+      --query Subnet.SubnetId --output text 2>/dev/null || true)"
+    if [[ -n "${sn}" && "${sn}" != "None" ]]; then
+      subnets+="${sn} "
+      az_subnets+="${az} ${sn}"$'\n'
+    fi
+  done
+  local out rc ids chosen="" tried="" failed="" note="" probed_ids=""
+  while read -r az sn; do
+    [[ -n "${az}" ]] || continue
+    for itype in ${types//,/ }; do
+      rc=0
+      out="$(aws ec2 run-instances --region "${AWS_REGION}" --image-id "${ami}" --instance-type "${itype}" --count "${nodes}" \
+        --subnet-id "${sn}" --metadata-options HttpTokens=required --instance-initiated-shutdown-behavior terminate \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=straiker-capacity-probe,Value=${CLUSTER_NAME}},{Key=Name,Value=straiker-capacity-probe}]" \
+        --query 'Instances[].InstanceId' --output text 2>&1)" || rc=$?
+      tried+="${az}/${itype} "
+      if [[ ${rc} -eq 0 ]]; then
+        ids="${out}"
+        probed_ids+="${ids} "
+        aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${ids} >/dev/null 2>&1 || true
+        log "GPU zone probe: ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
+        chosen="${az}"
+        break 2
+      elif [[ "${out}" == *InsufficientInstanceCapacity* ]]; then
+        failed+="${az}/${itype} "
+        log "GPU zone probe: no capacity for ${nodes} x ${itype} in ${az} right now."
+      else
+        note="${out##*: }"
+        log "WARNING: GPU zone probe could not run in ${az} for ${itype}: ${note}"
+      fi
+    done
+  done <<< "${az_subnets}"
+  # Remove the throwaway VPC: wait for the probe instances to be gone first (their network interfaces block subnet deletion).
+  [[ -n "${probed_ids// /}" ]] && aws ec2 wait instance-terminated --region "${AWS_REGION}" --instance-ids ${probed_ids} >/dev/null 2>&1 || true
+  for sn in ${subnets}; do aws ec2 delete-subnet --region "${AWS_REGION}" --subnet-id "${sn}" >/dev/null 2>&1 || true; done
+  local try
+  for try in 1 2 3 4 5; do
+    aws ec2 delete-vpc --region "${AWS_REGION}" --vpc-id "${vpc}" >/dev/null 2>&1 && break
+    sleep 5
+  done
+  aws ec2 describe-vpcs --region "${AWS_REGION}" --vpc-ids "${vpc}" >/dev/null 2>&1 \
+    && log "WARNING: could not delete the temporary probe VPC ${vpc} (tag straiker-capacity-probe=${CLUSTER_NAME}); delete it in the VPC console."
+  if [[ -n "${chosen}" ]]; then
+    set_metadata "gpu_first_az" "${chosen}"
+    set_metadata "gpu_zone_probe" "ok|${chosen}|$(date +%s)"
+    log "The cluster will be built with ${chosen} as its first (and, with provision strategy 'min', only node) zone."
+    return 0
+  fi
+  if [[ -z "${failed}" ]]; then
+    log "WARNING: the GPU zone probe could not run (${note:-no usable zone}); continuing without it."
+    return 0
+  fi
+  mark_phase_blocked "AWS has no capacity for ${nodes} x ${types} right now in any zone (tried: ${tried% }). Nothing was built. Re-run in a while (capacity changes by the hour), or (1) reserve capacity (EC2 Capacity Reservation or Capacity Block) and pass --gpu-capacity-reservation cr-..., or (2) list more instance types in --gpu-instance-type (capacity is per type). Use --skip-capacity-probe to build anyway."
+  return 1
+}
+
 # GPU capacity probe: AWS has no call that reports free on-demand capacity, so launch the fleet's GPU instances for real (all or
 # nothing: the whole node count at once), once per usable zone and type, and terminate them at once. Runs right after the cluster
 # is built (it needs the subnets), before the data layer and the models, and blocks with remedies when no zone has capacity.
@@ -7095,6 +7214,7 @@ preflight_gpu_quota() {
     check_p4d_offered "$(gpu_node_azs)" || return 1
     check_gpu_reservations "$(p4d_nodes_for $((count * 2)))" || return 1
     show_capacity_block_offerings "$(p4d_nodes_for $((count * 2)))"
+    select_gpu_zone "$(p4d_nodes_for $((count * 2)))" || return 1
     check_gpu_vcpu_quota "$(p4d_nodes_for $((count * 2)))"
   else
     check_gpu_vcpu_quota $((count * 2))

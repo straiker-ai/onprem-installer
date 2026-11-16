@@ -140,6 +140,9 @@ the shell already has, so the customer must give the AWS CLI working credentials
   the cluster is built, a capacity probe launches the fleet's GPU instances for about a minute in the node zone(s) and terminates them
   (about $1-2 for 2 `p4d.24xlarge`, cents for g6e; needs `ec2:RunInstances`/`TerminateInstances`). It proves capacity exists *now*,
   not later, and blocks with remedies before the data layer is built when there is none. `--skip-capacity-probe` turns it off.
+  Before the cluster is built, a zone probe does the same in a temporary VPC (one subnet per zone that offers the GPU type; also needs
+  `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity, and stops
+  before building anything when no zone has. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
 - **Egress:** the private subnets reach Straiker's artifact source in us-east-1 (no regional endpoint can), Docker Hub (verify
   probes, the multi-arch override) and the Helm repository.
 - **DNS:** a Route53 zone in the account needs no manual step; otherwise the customer must add the validation records.
