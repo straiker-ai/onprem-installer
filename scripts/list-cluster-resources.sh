@@ -39,7 +39,7 @@ echo
 # section <title> <command output (one item per line)>
 section() {
   local title=$1 items=$2 n
-  items="$(printf '%s\n' "${items}" | tr '\t' '\n' | sed '/^$/d;/^None$/d')"
+  items="$(printf '%s\n' "${items}" | tr '\t' '\n' | sed '/^[[:space:]]*$/d;/^None$/d')"
   n=$(printf '%s' "${items}" | grep -c . || true)
   if [[ "${n}" -gt 0 ]]; then
     FOUND=1
