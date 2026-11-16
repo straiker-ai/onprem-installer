@@ -12,6 +12,10 @@ Versions are the ones pinned in the repo at the time of writing (`charts/image-t
 
 ## 1. The whole picture
 
+![Straiker on-prem architecture](architecture-diagram.svg)
+
+(`architecture-diagram.svg` is the source, `architecture-diagram.png` the same picture as an image; both are in `doc/`.) The same layout as a text diagram, for places that cannot show images:
+
 ```mermaid
 flowchart TB
   user([Users and SDK/agents]) -->|HTTPS 443| waf[AWS WAF Web ACL]
