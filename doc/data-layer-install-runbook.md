@@ -48,6 +48,21 @@ address must click the link in AWS's "Subscription Confirmation" mail before it 
 if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the account:
 `aws sts get-caller-identity --profile <profile>`.
 
+### AWS access: the credentials the installer runs with
+The installer has no AWS login of its own. It runs the standard AWS CLI, OpenTofu, kubectl and Helm against whatever credentials
+the shell already has, so the customer must give the AWS CLI working credentials first. It never stores them (the state file in
+`~/.straiker` keeps only the profile name).
+
+- Pick the account with `--aws-profile <name>` (exported as `AWS_PROFILE` for every command), or the `AWS_PROFILE` environment
+  variable. With neither, it asks for a profile (blank = the default credential chain). The region comes from `--aws-region`.
+- Any way of giving the CLI credentials works: IAM Identity Center (`aws configure sso`, then `aws sso login --profile <name>`),
+  static keys (`aws configure --profile <name>` or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`), an assumed
+  role (a profile with `role_arn` and `source_profile`), or an instance/CloudShell role.
+- Prove it before the install: `aws sts get-caller-identity --profile <name>` must print the customer's account ID.
+- The login must last the whole run (about 2-3 hours): a short SSO session expires mid-install.
+- The role needs to create IAM roles and service-linked roles, VPC, EKS, MSK, Aurora, OpenSearch, ElastiCache, EFS, WAF, ACM
+  and SES resources; check that no service control policy (SCP) blocks them. Missing IAM-role creation is the most common gap.
+
 ### In the AWS account
 - Bedrock model access for `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`
   (Bedrock console > Model access; **console only, one time per account**). The installer's preflight blocks with a
@@ -99,6 +114,34 @@ if missing. Log in to AWS (`aws sso login --profile <profile>`) and confirm the 
   For the edge it also needs `wafv2:*` on the Web ACL and IP sets, and `logs:CreateLogGroup/PutRetentionPolicy/DeleteLogGroup/TagResource`
   plus `logs:CreateLogDelivery`/`logs:PutResourcePolicy`/`logs:DescribeResourcePolicies` for WAF logging.
 - Quota for ECR, Aurora and MSK (the defaults are normally enough).
+
+### Details to collect from the customer before the call
+| Item | Rule |
+|---|---|
+| AWS account ID and region | The region must offer the GPU instance type (`p4d.24xlarge`); the installer checks this |
+| Cluster name | Lowercase, starts with a letter, up to 24 characters |
+| State and IAM prefix (`--tf-prefix`) | IAM role names are account-wide: a second install in the same account and region needs its own prefix |
+| Straiker customer name and API key | Straiker onboards the tenant first; the key goes in a hidden prompt |
+| Base domain, and whether its Route53 zone is in the same account | Otherwise DNS records are added by hand and a certificate ARN is supplied |
+| Gateway exposure (public or private) and allowed CIDRs | The installer warns on public with no CIDRs |
+| Admin email and alarm email | First Cognito admin; CloudWatch alarm topic |
+| SES: sending domain and who controls its DNS, or their own verified identity ARN and From address | New SES accounts are in sandbox (200 mails/day, verified recipients only): request production access early |
+| SSO: provider type, client ID, client secret, allowed email domains | The Cognito redirect URI must be registered with the provider |
+| Bedrock: model access granted in the region; global or regional inference profile | The installer prompts for the profile |
+| Products (Ascend, Defend) and Defend engine | Defend engine v3 is needed for the console's Controls page |
+| Own VPC or ours | Own VPC: private and public subnet IDs; the private subnets need outbound routing |
+
+### Must be true before the run (the failures behind the "one go" goal)
+- **GPU quota:** P-instance quota of at least 384 vCPUs (`L-417A185B`, 4 x `p4d.24xlarge`); a new account usually has 0-8.
+- **GPU capacity:** EC2 capacity is per instance type and per Availability Zone and cannot be checked ahead. For a customer, reserve
+  2-4 `p4d.24xlarge` (EC2 Capacity Reservation or Capacity Block) and pass `--gpu-capacity-reservation`; the installer checks it
+  first (active, type, AZ, free count). Choose the zones with `--availability-zones`.
+- **Egress:** the private subnets reach Straiker's artifact source in us-east-1 (no regional endpoint can), Docker Hub (verify
+  probes, the multi-arch override) and the Helm repository.
+- **DNS:** a Route53 zone in the account needs no manual step; otherwise the customer must add the validation records.
+- **Workstation:** the tools above, kept awake for 2-3 hours (use `tmux`); do not edit the scripts during a run; set
+  `STRAIKER_STATE_FILE` when running more than one install from one machine.
+- A pause ("blocked") is not a failure: fix the named item and re-run the same command.
 
 ### On Straiker's side (once per customer, once per release)
 These live in the Straiker artifact account (631748089429, us-east-1) and are **not** done by the installer:
