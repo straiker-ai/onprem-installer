@@ -17,8 +17,11 @@ TOFU_VERSION="1.11.6"
 TOFU_INSTALL_DIR="${HOME}/.local/bin"
 TOFU_BIN="${TOFU_INSTALL_DIR}/tofu"
 
-STATE_DIR="${HOME}/.straiker"
-STATE_FILE="${STATE_DIR}/install.json"
+# One state file per install. Default ~/.straiker/install.json; STRAIKER_STATE_FILE points another cluster's install at its
+# own file (install-data-layer.sh reads the same variable). A second cluster must not share the first one's file: the
+# remembered answers (region, domain, certificates, customer key) would carry over, see check_state_matches_cluster.
+STATE_FILE="${STRAIKER_STATE_FILE:-${HOME}/.straiker/install.json}"
+STATE_DIR="$(dirname "${STATE_FILE}")"
 STATE_SECTION="install"
 STATE_SCHEMA_VERSION=1
 INSTALLER_BUNDLE_VERSION="${STRAIKER_INSTALLER_BUNDLE_VERSION:-workspace}"
@@ -1025,6 +1028,18 @@ resolve_cluster_name() {
     fi
   fi
   CLUSTER_NAME="s6r-onprem"
+}
+
+# Refuse to run --cluster-name X against a state file that belongs to cluster Y: it would silently overwrite Y's remembered
+# answers (cluster, domain, region, customer key) and reuse its certificates and "done" phases for X.
+check_state_matches_cluster() {
+  local persisted
+  persisted="$(get_metadata "cluster_name" 2>/dev/null || true)"
+  if [[ -n "${persisted}" && -n "${CLUSTER_NAME}" && "${persisted}" != "${CLUSTER_NAME}" ]]; then
+    echo "ERROR: ${STATE_FILE} belongs to cluster '${persisted}', not '${CLUSTER_NAME}'. Each cluster needs its own state file:" >&2
+    echo "  STRAIKER_STATE_FILE=~/.straiker/install-${CLUSTER_NAME}.json scripts/install-straiker.sh ... (same prefix on every command for that cluster)" >&2
+    exit 1
+  fi
 }
 
 ensure_state_file() {
@@ -9148,6 +9163,7 @@ main() {
     exit 0
   fi
 
+  check_state_matches_cluster
   capture_install_config
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
   # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).

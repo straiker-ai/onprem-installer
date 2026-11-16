@@ -10,7 +10,7 @@ export TF_REGISTRY_CLIENT_TIMEOUT="${TF_REGISTRY_CLIENT_TIMEOUT:-30}"
 export TF_PROVIDER_DOWNLOAD_RETRY="${TF_PROVIDER_DOWNLOAD_RETRY:-5}"
 
 STATE_DIR="${HOME}/.straiker"
-STATE_FILE="${STATE_DIR}/install.json"
+STATE_FILE="${STRAIKER_STATE_FILE:-${STATE_DIR}/install.json}"
 STATE_SECTION="uninstall"
 STATE_SCHEMA_VERSION=1
 
@@ -165,7 +165,7 @@ require_command() {
 }
 
 ensure_state_file() {
-  mkdir -p "${STATE_DIR}"
+  mkdir -p "$(dirname "${STATE_FILE}")"
   if [[ ! -f "${STATE_FILE}" ]]; then
     python3 - "${STATE_FILE}" "${STATE_SCHEMA_VERSION}" <<'PY'
 import json, sys

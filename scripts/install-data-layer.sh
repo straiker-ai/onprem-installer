@@ -19,6 +19,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="${STRAIKER_INSTALLER:-${REPO_ROOT}/scripts/install-straiker.sh}"
 STATE_FILE="${STRAIKER_STATE_FILE:-${HOME}/.straiker/install.json}"
+export STRAIKER_STATE_FILE="${STATE_FILE}" # the installer must use the very file this wrapper checks and reports on
 
 CLUSTER_NAME=""
 REGION=""
@@ -277,7 +278,7 @@ fi
 
 prev_cluster="$(state_cluster)"
 if [[ -n "${prev_cluster}" && "${prev_cluster}" != "${CLUSTER_NAME}" ]]; then
-  die "${STATE_FILE} belongs to cluster '${prev_cluster}', not '${CLUSTER_NAME}'. Move it aside (it holds that install's phase state) and re-run."
+  die "${STATE_FILE} belongs to cluster '${prev_cluster}', not '${CLUSTER_NAME}'. Give this cluster its own state file: STRAIKER_STATE_FILE=~/.straiker/install-${CLUSTER_NAME}.json scripts/install-data-layer.sh ... (same prefix on every command for it)."
 fi
 
 if [[ "${ASSUME_YES}" != true ]]; then
