@@ -83,7 +83,7 @@ Options:
                              fleet, pool up to 4; needs the EC2 P-instance quota). per-model: one g5/g6e-class node
                              per server (Straiker test installs). Unset: a new install gets p4d, an existing one
                              keeps what it runs
-  --gpu-instance-type TYPE   p4d fleet only: pack it onto this EC2 type instead of p4d.24xlarge (e.g. g6e.12xlarge,
+  --gpu-instance-type TYPE[,TYPE]  p4d fleet only (several same-GPU types, largest first, e.g. g6e.4xlarge,g6e.2xlarge,g6e.xlarge: capacity is per type): pack it onto this EC2 type instead of p4d.24xlarge (e.g. g6e.12xlarge,
                              4x L40S) — a stand-in while A100/p4d capacity is being arranged; checked against
                              whichever quota that type actually falls under
   --availability-zones A,B[,C]  The Availability Zones the cluster uses, in order (2 or 3); the first is the primary (the only
@@ -240,7 +240,7 @@ gpu_plan_packed_summary() {
   local itype="${1:-p4d.24xlarge}" gpus_per_node rate
   case "${itype}" in
     p4d.24xlarge | p4de.24xlarge | p5.48xlarge) gpus_per_node=8 ;;
-    g6e.4xlarge) gpus_per_node=1 ;;
+    g6e.xlarge | g6e.2xlarge | g6e.4xlarge) gpus_per_node=1 ;;
     g6e.12xlarge) gpus_per_node=4 ;;
     g6e.48xlarge | g5.48xlarge | g6.48xlarge) gpus_per_node=8 ;;
     *) gpus_per_node=8 ;; # unknown type: same guess install-straiker.sh's quota check falls back to
@@ -249,6 +249,8 @@ gpu_plan_packed_summary() {
     p4d.24xlarge) rate=32.77 ;;
     g6e.12xlarge) rate=10.49 ;;
     g6e.4xlarge) rate=3.00 ;;
+    g6e.2xlarge) rate=2.24 ;;
+    g6e.xlarge) rate=1.86 ;;
     *) rate="" ;;
   esac
   local nodes=$(( (10 + gpus_per_node - 1) / gpus_per_node ))
@@ -262,11 +264,14 @@ gpu_plan_packed_summary() {
 report_plan() {
   local packed_itype packed_summary packed_hourly
   packed_itype="${GPU_INSTANCE_TYPE:-p4d.24xlarge}"
+  packed_itype="${packed_itype%%,*}" # a list: the first (largest) type is the basis
   packed_summary="$(gpu_plan_packed_summary "${packed_itype}")"
   case "${packed_itype}" in
     p4d.24xlarge) packed_hourly="70-75" ;;
     g6e.12xlarge) packed_hourly="30-35" ;;
     g6e.4xlarge) packed_hourly="33-38" ;;
+    g6e.2xlarge) packed_hourly="25-28" ;;
+    g6e.xlarge) packed_hourly="21-23" ;;
     *) packed_hourly="see above" ;;
   esac
   cat <<EOF

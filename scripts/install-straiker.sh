@@ -822,7 +822,9 @@ Options:
                                    (P-instance for p4d/p4de/p5; G-and-VT for g5/g6/g6e). per-model: one g4dn/g5/g6/g6e
                                    node per server, each model's validated tier (Straiker test installs). An existing
                                    install keeps what it runs. Remembered.
-  --gpu-instance-type <type>       p4d fleet only: the EC2 type to pack the fleet onto instead of p4d.24xlarge (e.g.
+  --gpu-instance-type <type[,type]> p4d fleet only: the EC2 type to pack the fleet onto instead of p4d.24xlarge. Several types with the
+                                   same GPU count may be listed, largest first (g6e.4xlarge,g6e.2xlarge,g6e.xlarge): capacity is per
+                                   type, so Karpenter uses whichever has it. (e.g.
                                    g6e.12xlarge, 4x L40S — a stand-in while A100 capacity is being arranged; same
                                    packed shape, checked against the quota that type actually falls under). Remembered.
   --gpu-max-nodes <n>              p4d fleet: most GPU nodes the pool may grow to (default 4). Remembered.
@@ -1566,6 +1568,8 @@ show_cost_estimate() {
         p4d.24xlarge) packed_rate=32.77 ;;
         g6e.12xlarge) packed_rate=10.49 ;;
         g6e.4xlarge) packed_rate=3.00 ;;
+        g6e.2xlarge) packed_rate=2.24 ;;
+        g6e.xlarge) packed_rate=1.86 ;;
         *) packed_rate="" ;;
       esac
       if [[ -n "${packed_rate}" ]]; then
@@ -3984,9 +3988,14 @@ phase_straiker_system() {
       local packed_itype
       packed_itype="$(gpu_instance_type)"
       gpu_instance_spec "${packed_itype}" || { mark_phase_blocked "Unknown --gpu-instance-type '${packed_itype}'."; return; }
+      local packed_types packed_families="" t
+      packed_types="$(gpu_instance_types)"
+      for t in ${packed_types//,/ }; do
+        [[ ",${packed_families}," == *",${t%%.*},"* ]] || packed_families+="${packed_families:+,}${t%%.*}"
+      done
       cmd+=(
-        --set "eks.gpu.instanceFamilies={${packed_itype%%.*}}"
-        --set "eks.gpu.instanceTypes={${packed_itype}}"
+        --set "eks.gpu.instanceFamilies={${packed_families}}"
+        --set "eks.gpu.instanceTypes={${packed_types}}"
         --set-string "karpenter.gpu.nodePool.limits.nvidia\\.com/gpu=$(( $(get_metadata "gpu_max_nodes") * GPU_SPEC_GPUS ))"
         --set-string "karpenter.gpu.nodePool.expireAfter=Never"
       )
@@ -6647,9 +6656,17 @@ gpu_fleet() {
   printf '%s' "${v:-p4d}"
 }
 # --gpu-instance-type: flag > remembered > p4d.24xlarge. Only meaningful when gpu_fleet is "p4d" (packed).
-gpu_instance_type() {
+# It may be a comma-separated list of types with the same GPU count (e.g. g6e.4xlarge,g6e.2xlarge,g6e.xlarge: capacity is per
+# instance type, so Karpenter may use whichever has capacity). gpu_instance_type is the FIRST (the planning/quota/price basis,
+# list the largest first); gpu_instance_types is the whole list.
+gpu_instance_types() {
   local v="${GPU_INSTANCE_TYPE:-$(get_metadata "gpu_instance_type")}"
   printf '%s' "${v:-${P4D_INSTANCE_TYPE}}"
+}
+gpu_instance_type() {
+  local v
+  v="$(gpu_instance_types)"
+  printf '%s' "${v%%,*}"
 }
 # GPU count, vCPU count, and quota family for a packed-fleet instance type. Sets GPU_SPEC_GPUS/_VCPUS/_QUOTA_CODE/_QUOTA_NAME/
 # _FAMILY_RE as globals (bash 3.2 has no local-by-reference). Must stay in sync with scripts/gpu_planner.py's INSTANCE_GPUS
@@ -6659,6 +6676,8 @@ gpu_instance_spec() {
   case "${itype}" in
     p4d.24xlarge | p4de.24xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=96 ;;
     p5.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
+    g6e.xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=4 ;;
+    g6e.2xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=8 ;;
     g6e.4xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=16 ;; # one L40S per node: 10 nodes for the fleet, far easier to get than a 12xlarge
     g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 ;;
     g6e.48xlarge | g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
@@ -6718,6 +6737,8 @@ remember_inference_settings() {
   max_nodes="${max_nodes:-4}"
   crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
   itype="$(gpu_instance_type)"
+  local itypes
+  itypes="$(gpu_instance_types)"
   case "${fleet}" in p4d | per-model) ;; *)
     echo "ERROR: --gpu-fleet must be 'p4d' or 'per-model', got '${fleet}'." >&2
     return 1
@@ -6732,8 +6753,19 @@ remember_inference_settings() {
     return 1
   fi
   if [[ "${fleet}" == "p4d" ]] && ! gpu_instance_spec "${itype}"; then
-    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.4xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
+    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.xlarge, g6e.2xlarge, g6e.4xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
     return 1
+  fi
+  if [[ "${fleet}" == "p4d" && "${itypes}" == *,* ]]; then
+    local t first_gpus
+    gpu_instance_spec "${itype}"; first_gpus=${GPU_SPEC_GPUS}
+    for t in ${itypes//,/ }; do
+      if ! gpu_instance_spec "${t}" || [[ ${GPU_SPEC_GPUS} -ne ${first_gpus} ]]; then
+        echo "ERROR: --gpu-instance-type list '${itypes}': '${t}' is unknown or has a different GPU count than '${itype}' (all must have ${first_gpus} GPU(s); list the largest first)." >&2
+        return 1
+      fi
+    done
+    gpu_instance_spec "${itype}"
   fi
   if [[ "${fleet}" == "p4d" ]] && gpu_instance_spec "${itype}"; then
     # The pool's GPU limit is max-nodes x GPUs per node. It must cover the fleet with room to double it (replicas, upgrades), or
@@ -6747,7 +6779,7 @@ remember_inference_settings() {
     fi
   fi
   set_metadata "gpu_fleet" "${fleet}"
-  set_metadata "gpu_instance_type" "${itype}"
+  set_metadata "gpu_instance_type" "${itypes}"
   set_metadata "gpu_max_nodes" "${max_nodes}"
   set_metadata "gpu_capacity_reservation" "${crs}"
   set_metadata "inference_profile" "${profile}"
@@ -6844,7 +6876,7 @@ check_gpu_reservations() {
   crs="${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}"
   [[ -n "${crs}" ]] || return 0
   [[ "$(gpu_fleet)" == "p4d" ]] || return 0
-  itype="$(gpu_instance_type)"
+  itype="$(gpu_instance_types)"
   node_azs="$(gpu_node_azs)"
   if [[ -z "${node_azs}" ]]; then
     have="$(get_metadata "availability_zones" | tr ',' ' ' | xargs)"
@@ -6870,7 +6902,8 @@ check_gpu_reservations() {
     esac
   done < <(printf '%s' "${out}" | python3 -c '
 import json, sys, datetime
-itype, nodes, azs = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
+itypes, nodes, azs = sys.argv[1].split(","), int(sys.argv[2]), sys.argv[3].split()
+itype = itypes[0]
 now = datetime.datetime.now(datetime.timezone.utc)
 def ts(v):
     try: return datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
@@ -6879,8 +6912,8 @@ total = 0
 for r in json.load(sys.stdin).get("CapacityReservations", []):
     rid, st, az = r["CapacityReservationId"], r.get("State", "?"), r.get("AvailabilityZone", "?")
     bad = []
-    if r.get("InstanceType") != itype:
-        bad.append("is for %s, not %s" % (r.get("InstanceType"), itype))
+    if r.get("InstanceType") not in itypes:
+        bad.append("is for %s, not %s" % (r.get("InstanceType"), " or ".join(itypes)))
     if r.get("InstancePlatform") not in ("Linux/UNIX", None):
         bad.append("is for %s (the nodes are Linux)" % r.get("InstancePlatform"))
     if r.get("Tenancy", "default") != "default":
