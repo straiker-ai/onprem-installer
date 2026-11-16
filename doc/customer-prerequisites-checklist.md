@@ -200,7 +200,7 @@ All of these should be answered "yes" before pressing Enter:
 | 1.13 Bedrock profile | No flag: the installer asks once on the first run (`regional` or `global`) |
 | Section 3 GPU capacity | `--gpu-fleet p4d` (default for customers) and `--gpu-capacity-reservation cr-...` |
 
-Every flag is explained in `doc/install-parameters.md`. Sample (illustrative values only):
+Sample (illustrative values only):
 
 ```bash
 scripts/install-data-layer.sh \
