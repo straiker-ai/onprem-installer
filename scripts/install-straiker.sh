@@ -5684,11 +5684,18 @@ phase_verify_data_layer() {
   os_host="$(get_metadata "opensearch_endpoint")"
   if [[ -n "${os_host}" ]]; then
     ensure_opensearch_credentials_secret "$(get_metadata "opensearch_secret_name")" || return
+    local os_try
+    # This check runs minutes after the domain's last change and right after other workloads started: the probe pod can be slow to
+    # start (image pull, node scale-up) and a single-node domain can answer late. Retry before calling it a failure.
+    for os_try in 1 2 3 4; do
     kubectl delete pod verify-opensearch -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
     result="$(kubectl run verify-opensearch -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
       --restart=Never --rm -i --quiet \
       --overrides='{"spec":{"containers":[{"name":"verify-opensearch","image":"curlimages/curl:8.11.0","command":["sh","-c","curl -s --max-time 20 -u \"$OS_USER:$OS_PASS\" https://'"${os_host}"'/_cluster/health"],"env":[{"name":"OS_USER","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"username"}}},{"name":"OS_PASS","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"password"}}}],"stdin":true}]}}' \
       </dev/null 2>&1 || true)"
+      printf '%s' "${result}" | grep -qE '"status":"(green|yellow)"' && break
+      [[ ${os_try} -lt 4 ]] && sleep 20
+    done
     if printf '%s' "${result}" | grep -qE '"status":"(green|yellow)"'; then
       log "PASS  OpenSearch (${os_host}) cluster health is green/yellow with the master login."
     else
@@ -5882,7 +5889,16 @@ phase_verify_data_layer() {
     ch_ready="$(kubectl get statefulset clickhouse -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
     kp_spec="$(kubectl get statefulset clickhouse-keeper -n "${INFRA_NAMESPACE}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
     kp_ready="$(kubectl get statefulset clickhouse-keeper -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-    ch_ro="$(kubectl exec -n "${INFRA_NAMESPACE}" clickhouse-0 -c clickhouse -- sh -c 'clickhouse-client --user admin --password "$CH_PW_ADMIN" -q "SELECT countIf(is_readonly) FROM system.replicas"' 2>/dev/null || echo unknown)"
+    # A replica is read-only until its Keeper session is up and its tables are attached: normal for a minute or two after the grid
+    # migrations created the Replicated tables or after a restart. Give it up to 3 minutes before reporting a failure.
+    local ch_try
+    for ch_try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      ch_ro="$(kubectl exec -n "${INFRA_NAMESPACE}" clickhouse-0 -c clickhouse -- sh -c 'clickhouse-client --user admin --password "$CH_PW_ADMIN" -q "SELECT countIf(is_readonly) FROM system.replicas"' 2>/dev/null || echo unknown)"
+      ch_ready="$(kubectl get statefulset clickhouse -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      kp_ready="$(kubectl get statefulset clickhouse-keeper -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      [[ "${ch_ro}" == "0" && "${ch_ready:-0}" == "${ch_spec}" && "${kp_ready:-0}" == "${kp_spec}" ]] && break
+      [[ ${ch_try} -lt 12 ]] && sleep 15
+    done
     if [[ -n "${ch_spec}" && "${ch_ready:-0}" == "${ch_spec}" && -n "${kp_spec}" && "${kp_ready:-0}" == "${kp_spec}" && "${ch_ro}" == "0" ]]; then
       log "PASS  ClickHouse replicated: ${ch_ready}/${ch_spec} servers, ${kp_ready}/${kp_spec} Keeper members, 0 read-only replicas."
     else
