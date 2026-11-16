@@ -3375,13 +3375,14 @@ EOF
   export TF_VAR_ses_domains TF_VAR_ses_existing
   if [[ "${saas_frontend_on}" == "true" ]]; then TF_VAR_saas_frontend='{}'; else TF_VAR_saas_frontend='null'; fi
   export TF_VAR_saas_frontend
-  # Cognito needs its service-linked role to send through SES; decided once and remembered (like OpenSearch's).
-  local cog_slr
-  cog_slr="$(get_metadata "cognito_create_email_slr")"
-  if [[ -z "${cog_slr}" ]]; then
-    if aws iam get-role --role-name AWSServiceRoleForAmazonCognitoIdp >/dev/null 2>&1; then cog_slr=false; else cog_slr=true; fi
-    set_metadata "cognito_create_email_slr" "${cog_slr}"
-  fi
+  # Cognito needs its service-linked role (email.cognito-idp.amazonaws.com) to send through SES. Create it only when the
+  # account has none; when it exists, keep creating it only if THIS install's Terraform state owns it (otherwise a later
+  # "exists" would make Terraform destroy a role it created, and an unowned one would fail with "has been taken").
+  local cog_slr cog_role_exists=false cog_in_state=false
+  aws iam get-role --role-name AWSServiceRoleForAmazonCognitoIdpEmailService >/dev/null 2>&1 && cog_role_exists=true
+  tofu -chdir="${DATA_DIR}" state list 2>/dev/null | grep -q '^aws_iam_service_linked_role\.cognito_email' && cog_in_state=true
+  if [[ "${cog_role_exists}" == true && "${cog_in_state}" != true ]]; then cog_slr=false; else cog_slr=true; fi
+  set_metadata "cognito_create_email_slr" "${cog_slr}"
 
   # $1 = cognito_use_ses (true once the SES identity is verified).
   data_apply() {
