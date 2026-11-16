@@ -4848,12 +4848,25 @@ phase_external_secrets() {
   helm repo add --force-update "${ESO_HELM_REPO_NAME}" "${ESO_HELM_REPO_URL}" >/dev/null
   helm repo update "${ESO_HELM_REPO_NAME}" >/dev/null
 
+  # This phase runs before Karpenter has any NodePool (straiker-system creates them later), so on a fresh cluster the only node is
+  # the tainted system node: without this toleration the three pods stay Pending until Helm's wait times out. The artifact sync
+  # jobs (the next phase) tolerate the same taint for the same reason.
+  local eso_toleration_args=() eso_scope
+  for eso_scope in "tolerations" "webhook.tolerations" "certController.tolerations"; do
+    eso_toleration_args+=(
+      --set-string "${eso_scope}[0].key=CriticalAddonsOnly"
+      --set-string "${eso_scope}[0].operator=Equal"
+      --set-string "${eso_scope}[0].value=true"
+      --set-string "${eso_scope}[0].effect=NoSchedule"
+    )
+  done
   helm upgrade --install "${ESO_RELEASE}" "${ESO_HELM_REPO_NAME}/external-secrets" \
     --version "${ESO_VERSION}" \
     --namespace "${ESO_NAMESPACE}" \
     --create-namespace \
     --set "installCRDs=true" \
     --set "serviceAccount.name=${ESO_SERVICE_ACCOUNT}" \
+    "${eso_toleration_args[@]}" \
     --wait \
     --timeout "${HELM_TIMEOUT}"
 
