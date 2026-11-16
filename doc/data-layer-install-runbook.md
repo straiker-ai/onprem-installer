@@ -172,6 +172,9 @@ no read-only replicas, and no failed Jobs. A passing run prints `All data-layer 
 | ch-sync copies `0 tables`, "no encryption" | ClickHouse's libpq could not read `/root/.postgresql` and fell back to plain text | `HOME=/var/lib/clickhouse`, `PGSSLMODE=require` on the servers |
 | grid migrations create non-replicated tables | ClickHouse 25.8 does not convert `MergeTree` DDL | init container rewrites engines to `Replicated*` (flag off by default, SaaS untouched) |
 | Aurora engine not available | old default 16.x | installer picks the newest 17.x in the region |
+| GPU nodes never appear (`InsufficientInstanceCapacity`) | EC2 has no capacity of that instance type in the AZ(s) the cluster launches in; capacity is per type per AZ and cannot be checked in advance | the inference phase watches Karpenter and stops within minutes (not the 15-minute Helm wait) with AWS's message and remedies; nothing is torn down, a re-run resumes. Remedies: `--availability-zones`, another `--gpu-instance-type`, or a capacity reservation |
+| `--gpu-capacity-reservation` ignored, or nodes still on-demand | reservation expired / wrong type / wrong AZ / shared from another account | pre-flight checks each id (active, instance type, Linux + default tenancy, AZ the nodes launch in, free instances) in the first phase and again before the inference phase, and blocks before any cost |
+| Need the nodes in specific AZs | default is the region's first 2 AZs (3 with `--provision-strategy max`) | `--availability-zones a,b[,c]` (first = primary, the only node AZ under `min`); with a reservation and no flag its AZ goes first; fixed once the cluster exists; not with `--vpc-id` |
 
 ## 5. Recovery
 

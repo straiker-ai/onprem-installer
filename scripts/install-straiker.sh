@@ -6949,6 +6949,69 @@ apply_gpu_time_slicing() {
   set_metadata "gpu_time_slicing_replicas" "${n}"
 }
 
+# Fail fast on GPU capacity: `helm --wait` alone would sit for the full --timeout (15 min per batch) while Karpenter cannot get the
+# GPU instances. This watcher runs next to the helm installs, reads Karpenter's launch failures for the straiker-gpu pool every
+# GPU_WATCH_INTERVAL seconds and, on a verdict, writes it to $1 and stops the helm runs ($3...; they mark the release failed and
+# a re-run resumes; Karpenter keeps retrying). $2 = GPU nodes the fleet needs.
+#   hard    a launch failure that waiting cannot fix (quota, permissions, bad AMI/subnet/reservation), twice
+#   pool    the pool's GPU limit is reached, twice
+#   ice     "insufficient capacity" >=5 times over >=GPU_WATCH_ICE_AFTER s and no GPU node came up at all
+#   stalled some nodes came up, ICE continues and no new node for GPU_WATCH_STALL s
+# Partial progress (some nodes up, ICE for the rest) is reported, never stopped early.
+classify_gpu_launch_failures() {
+  python3 -c '
+import json, re, sys
+ice = hard = pool = 0
+ICE = re.compile(r"InsufficientInstanceCapacity|UnfulfillableCapacity|insufficient capacity|ReservationCapacityExceeded|Insufficient capacity", re.I)
+HARD = re.compile(r"VcpuLimitExceeded|InstanceLimitExceeded|UnauthorizedOperation|AuthFailure|InvalidAMIID|InvalidSubnet|InvalidParameter|Unsupported|OptInRequired|InvalidCapacityReservation|MaxSpotInstanceCountExceeded|InsufficientFreeAddresses")
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        t = " ".join(str(d.get(k, "")) for k in ("error", "message"))
+    except Exception:
+        t = line
+    if "exceed limits for nodepool" in t:
+        pool += 1
+    elif ICE.search(t):
+        ice += 1
+    elif HARD.search(t):
+        hard += 1
+print(ice, hard, pool)'
+}
+
+watch_gpu_capacity() {
+  local verdict=$1 needed=$2; shift 2
+  local interval=${GPU_WATCH_INTERVAL:-20} ice_after=${GPU_WATCH_ICE_AFTER:-240} stall=${GPU_WATCH_STALL:-600}
+  local start=${SECONDS} last_nodes=0 last_growth=${SECONDS} last_note=${SECONDS} elapsed nodes ice hard pool reason pid alive
+  while :; do
+    sleep "${interval}"
+    alive=false
+    for pid in "$@"; do kill -0 "${pid}" 2>/dev/null && alive=true; done
+    ${alive} || return 0
+    elapsed=$((SECONDS - start))
+    read -r ice hard pool < <(kubectl -n karpenter logs deploy/karpenter --since="$((elapsed + 30))s" 2>/dev/null \
+      | grep -E 'failed launching nodeclaim|exceed limits' | grep 'straiker-gpu' | classify_gpu_launch_failures || echo "0 0 0")
+    nodes="$(kubectl get nodes -l karpenter.sh/nodepool=straiker-gpu --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    nodes=${nodes:-0}
+    if (( nodes > last_nodes )); then last_nodes=${nodes}; last_growth=${SECONDS}; fi
+    reason=""
+    if (( hard >= 2 )); then reason=hard
+    elif (( pool >= 2 )); then reason=pool
+    elif (( ice >= 5 && nodes == 0 && elapsed >= ice_after )); then reason=ice
+    elif (( ice >= 1 && nodes > 0 && nodes < needed && SECONDS - last_growth >= stall )); then reason=stalled
+    fi
+    if [[ -n "${reason}" ]]; then
+      echo "${reason}|${elapsed}|${nodes}|${needed}" > "${verdict}"
+      for pid in "$@"; do pkill -TERM -P "${pid}" 2>/dev/null || true; kill -TERM "${pid}" 2>/dev/null || true; done
+      return 0
+    fi
+    if (( ice > 0 && SECONDS - last_note >= 120 )); then
+      last_note=${SECONDS}
+      log "GPU capacity: ${nodes} of ${needed} GPU node(s) up; AWS has no capacity for the rest right now (${ice} failed launches so far). Karpenter keeps retrying."
+    fi
+  done
+}
+
 # After model pods stay Pending, say WHY when Karpenter could not get GPU instances. EC2 capacity is per instance type and per
 # Availability Zone and cannot be checked in advance; with provision-strategy min every node uses ONE AZ (the first the region
 # lists), so a shortage there blocks the whole fleet while the other AZs may have plenty. Karpenter logs the exact AWS reason.
@@ -7187,6 +7250,10 @@ phase_straiker_inference() {
   local failed=()
   local model release
   local total=${#models[@]}
+  local capacity_verdict gpu_nodes_needed
+  capacity_verdict="$(mktemp)"
+  rm -f "${capacity_verdict}"
+  if [[ "$(gpu_fleet)" == "p4d" ]]; then gpu_nodes_needed="$(p4d_nodes_for $((total * 2)))"; else gpu_nodes_needed=${total}; fi
   local i=0
   while (( i < total )); do
     local batch_models=()
@@ -7240,6 +7307,14 @@ phase_straiker_inference() {
       j=$((j + 1))
     done
 
+    # Fail fast: watch Karpenter while helm waits (see watch_gpu_capacity).
+    local watcher_pid=""
+    if [[ "${INFERENCE_NO_WAIT}" != true && "${CLOUD_PROVIDER}" != "gke" && "${STRAIKER_NO_GPU_WATCH:-}" != 1 ]]; then
+      rm -f "${capacity_verdict}"
+      watch_gpu_capacity "${capacity_verdict}" "${gpu_nodes_needed}" "${batch_pids[@]}" &
+      watcher_pid=$!
+    fi
+
     # Collect this batch's results before starting the next one. Each
     # backgrounded helm run's output was captured to its own logfile (rather
     # than left to inherit stdout/stderr directly) so concurrent runs don't
@@ -7258,9 +7333,29 @@ phase_straiker_inference() {
       rm -f "${batch_logs[k]}"
       k=$((k + 1))
     done
+    if [[ -n "${watcher_pid}" ]]; then
+      kill "${watcher_pid}" 2>/dev/null || true
+      wait "${watcher_pid}" 2>/dev/null || true
+    fi
+    [[ -s "${capacity_verdict}" ]] && break
   done
 
   rm -f "${INFERENCE_PLAN_FILE}"
+  if [[ -s "${capacity_verdict}" ]]; then
+    local v_reason v_elapsed v_nodes v_needed
+    IFS='|' read -r v_reason v_elapsed v_nodes v_needed < "${capacity_verdict}"
+    rm -f "${capacity_verdict}"
+    diagnose_gpu_capacity
+    local why
+    case "${v_reason}" in
+      hard) why="AWS refused to launch the GPU instances for a reason that waiting will not fix (see the AWS message above: quota, permission, image, subnet or reservation)." ;;
+      pool) why="the GPU node pool's limit is reached, so Karpenter will not create more GPU nodes (raise --gpu-max-nodes)." ;;
+      stalled) why="only ${v_nodes} of ${v_needed} GPU nodes came up and AWS has had no capacity for the rest for ${GPU_WATCH_STALL:-600}s." ;;
+      *) why="AWS has no capacity for the GPU instances right now (no GPU node came up)." ;;
+    esac
+    mark_phase_blocked "Stopped waiting for the model servers after $((v_elapsed / 60)) min instead of the full Helm timeout: ${why} Nothing is broken: the releases stay, Karpenter keeps retrying, and re-running this phase (--phase straiker-inference --rerun-phase) continues from here."
+    return
+  fi
   if [[ ${#failed[@]} -gt 0 ]]; then
     diagnose_gpu_capacity
     mark_phase_blocked "Inference model(s) failed to install: ${failed[*]}. Each model is its own Helm release named 'inference-<model>' — check GPU node/capacity availability for the failed one(s), then re-run --phase straiker-inference --rerun-phase (already-succeeded models are just re-verified, not disrupted)."
