@@ -143,6 +143,11 @@ the shell already has, so the customer must give the AWS CLI working credentials
   Before the cluster is built, a zone probe does the same in a temporary VPC (one subnet per zone that offers the GPU type; also needs
   `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity, and stops
   before building anything when no zone has. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
+- **High availability:** the default `--provision-strategy min` is a single-zone proof of concept. With `ha` (2 zones) or `max`
+  (3 zones) the installer runs 2 replicas of the platform services (foundation, grid, portico, registry, api-gateway), defend, edge
+  and the ascend control plane, spreads them over zones (soft rule, so a zone without capacity cannot leave a pod Pending), and adds
+  a PodDisruptionBudget to the platform charts. Not covered yet: the platform connect and databridge services, ascend workers and
+  ingest stay at 1 replica, and the GPU pool is only as zone-spread as the available capacity (one replica per zone is not forced).
 - **Egress:** the private subnets reach Straiker's artifact source in us-east-1 (no regional endpoint can), Docker Hub (verify
   probes, the multi-arch override) and the Helm repository.
 - **DNS:** a Route53 zone in the account needs no manual step; otherwise the customer must add the validation records.
