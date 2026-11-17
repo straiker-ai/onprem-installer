@@ -3309,6 +3309,7 @@ phase_aws_data() {
       "namespace": "'"${INFRA_NAMESPACE}"'",
       "service_account": "straiker-frontend",
       "cognito_admin": true,
+      "ses_send": true,
       "saas_frontend_data": '"${saas_frontend_data}"'
     },'
 
@@ -6655,6 +6656,10 @@ phase_straiker_core() {
         --set-string "straiker-frontend.frontend.bootstrap.adminEmail=${cg_email}"
         --set-string "straiker-frontend.frontend.bootstrap.disablePasswordLogin=true"
       )
+      # Invitation emails come from the customer's SES sender, not Straiker's own domain (which this account cannot send from).
+      local ses_from
+      ses_from="$(get_metadata "ses_sender")"
+      [[ -n "${ses_from}" ]] && cmd+=(--set-string "straiker-frontend.frontend.email.sourceEmail=Straiker <${ses_from}>")
       # "Sign in with SSO": the customer's provider (federated into the pool). Its users are created as viewers on
       # first sign-in, limited to the allowed email domains plus the first admin's own domain.
       local sso_name sso_domains

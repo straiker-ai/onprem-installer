@@ -196,6 +196,10 @@ frontend:
   # DEX_OIDC_CLIENT_ID/SECRET identity) stays deployed regardless, since it's
   # also the always-on login fallback if the customer's own IdP breaks (see
   # frontend-deployment.yaml).
+  # Email the console sends (user invitations). sourceEmail: the From address, e.g. "Straiker <no-reply@example.com>";
+  # empty = the frontend's built-in default (only valid on Straiker's own SES account).
+  email:
+    sourceEmail: ""
   # Cognito user pool the console manages users in (set by the installer when Cognito is the login).
   cognito:
     userPoolId: ""

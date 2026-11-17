@@ -68,6 +68,11 @@ spec:
             # instead of the pod's own role (EKS Pod Identity).
             - name: NODE_DEPLOY
               value: "true"
+            {{- if .Values.frontend.email.sourceEmail }}
+            # From address of the invitation and notification emails (must be an identity SES can send from).
+            - name: SES_SOURCE_EMAIL
+              value: {{ .Values.frontend.email.sourceEmail | quote }}
+            {{- end }}
             {{- if .Values.frontend.cognito.userPoolId }}
             # Console user management (invite, SSO providers) calls Cognito admin APIs on this pool.
             - name: COGNITO_USER_POOL_ID
