@@ -43,6 +43,29 @@ the installer's hidden prompt.
 | 2.5 | SES production access requested (new accounts are in the sandbox: 200 mails/day, verified recipients only). Cognito sign-up and reset emails need it | `aws sesv2 get-account --query ProductionAccessEnabled` is `true`. Approval takes about a day | Customer |
 | 2.6 | No other install uses the same cluster name or prefix in this account and region | Section 1.2 and 1.3 | Customer |
 
+**2.5 How to request SES production access** (once per account and region; use the install region)
+
+- **Step 1.** Sign in to the AWS console as an administrator and select the install region. SES access is per region.
+- **Step 2.** Open **Amazon SES > Account dashboard**. A yellow banner says the account is in the sandbox. Choose **Request production access**.
+- **Step 3.** Fill in the form: **Mail type** `Transactional`; **Website URL** your company site; **Use case description** as below; **Additional contacts** a monitored mailbox; **Acknowledge** the AWS policies.
+- **Step 4.** Submit. AWS replies by email, usually within 24 hours. If they ask for more detail, answer on the same support case.
+- **Step 5.** Check that it worked with the command below. It must print `true`.
+
+Suggested use case text: *"Transactional email only, sent by the Straiker AI security platform running in our own AWS account: sign-up verification, password reset and account notifications for our staff, a few hundred messages a month. Recipients are our own employees who asked for an account. We do not send marketing mail. Bounces and complaints are monitored through SES and handled the same day."*
+
+```bash
+# Instead of Steps 2-4, the same request from the command line
+aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL \
+  --website-url https://<your-company-site> --contact-language EN \
+  --additional-contact-email-addresses <ops@your-company.com> \
+  --use-case-description "<the text above>" --region <r> --profile <profile>
+
+# Check (true = approved)
+aws sesv2 get-account --region <r> --profile <profile> --query ProductionAccessEnabled
+```
+
+Requesting access is separate from verifying the sending domain (section 1.12), which the installer handles.
+
 ---
 
 ## 3. GPU capacity (the step that fails most often)
