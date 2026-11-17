@@ -6193,6 +6193,20 @@ phase_platform_services() {
         if ha_enabled; then
           extra+=(--set "${key}.replicas=2" --set "${key}.topologySpread.enabled=true"
             --set-string "${key}.topologySpread.whenUnsatisfiable=ScheduleAnyway" --set "${key}.topologySpread.minDomains=null")
+          # Autoscale from 2 on CPU/memory (needs the metrics API: the metrics-server EKS add-on).
+          extra+=(--set "${key}.hpa.enabled=true" --set "${key}.hpa.minReplicas=2" --set "${key}.hpa.maxReplicas=4")
+        fi
+        ;;
+      databridge)
+        # api autoscales; ingest, reconcile and the delivery pipeline (Benthos) run 2 each.
+        if ha_enabled; then
+          extra+=(--set "${key}.roles.api.replicas=2" --set "${key}.roles.ingest.replicas=2" --set "${key}.roles.reconcile.replicas=2"
+            --set "${key}.benthos.replicas=2" --set "${key}.hpa.enabled=true" --set "${key}.hpa.minReplicas=2" --set "${key}.hpa.maxReplicas=4")
+        fi
+        ;;
+      connect)
+        if ha_enabled; then
+          extra+=(--set "${key}.roles.connect.replicas=3" --set "${key}.roles.notify-api.replicas=3" --set "${key}.roles.notify-worker.replicas=3")
         fi
         ;;
     esac
@@ -6491,6 +6505,11 @@ phase_straiker_core() {
   # from the parent release needs the "<subchart-name>." prefix (unlike
   # global.* above); a bare "frontend.internalApiKey...=" would silently
   # create an unused top-level key instead.
+  # HA: the console autoscales from 2 (needs the metrics API), the LLM gateway runs 2.
+  if ha_enabled; then
+    cmd+=(--set "straiker-frontend.frontend.hpa.enabled=true" --set "straiker-frontend.frontend.hpa.minReplicas=2"
+      --set "straiker-frontend.frontend.hpa.maxReplicas=4" --set "straiker-bifrost.replicaCount=2")
+  fi
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretName=${SHARED_SECRETS_NAME}")
   cmd+=(--set "straiker-frontend.frontend.internalApiKey.secretKey=INTERNAL_API_KEY")
 
@@ -7830,6 +7849,8 @@ phase_straiker_argus_v3() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
+  # HA: the transcript compactor runs 2 (a consumer group: the topic's partitions are shared between the pods).
+  ha_enabled && cmd+=(--set "argus.compactor.replicaCount=2")
   # MSK (IAM): every producer/consumer block gets the same brokers and region.
   local block
   for block in agentConfig grid transcript metricsStream compactor; do
@@ -8050,7 +8071,13 @@ phase_straiker_ascend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
-  ha_enabled && cmd+=(--set "controlPlane.replicaCount=2")
+  if ha_enabled; then
+    # control plane 2, probe workers 4, recon and report workers 2; each autoscales from there (needs the metrics API).
+    cmd+=(--set "controlPlane.replicaCount=2" --set "controlPlane.hpa.enabled=true" --set "controlPlane.hpa.minReplicas=2"
+      --set "probeWorker.replicaCount=4" --set "probeWorker.hpa.enabled=true" --set "probeWorker.hpa.minReplicas=4"
+      --set "reconWorker.replicaCount=2" --set "reconWorker.hpa.enabled=true" --set "reconWorker.hpa.minReplicas=2"
+      --set "reportWorker.replicaCount=2" --set "reportWorker.hpa.enabled=true" --set "reportWorker.hpa.minReplicas=2")
+  fi
   cmd+=("${ascend_data_layer_args[@]+"${ascend_data_layer_args[@]}"}")
   cmd+=("${ascend_v3_args[@]+"${ascend_v3_args[@]}"}")
   # See helm_ssa_conflict_flags's declaration above for why these can't just

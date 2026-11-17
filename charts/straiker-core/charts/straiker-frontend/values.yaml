@@ -79,6 +79,13 @@ frontend:
 
   replicaCount: 1
 
+  # Needs the metrics API (metrics-server). When enabled the HPA owns the replica count.
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+
   resources:
     requests:
       cpu: "250m"
