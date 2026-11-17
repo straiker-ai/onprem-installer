@@ -312,6 +312,7 @@ GPU_CAPACITY_RESERVATION="${GPU_CAPACITY_RESERVATION:-}"
 AVAILABILITY_ZONES_OPT="${AVAILABILITY_ZONES_OPT:-}"
 # Skips the GPU capacity probe (a brief real launch of the fleet's GPU instances right after the cluster is built).
 SKIP_CAPACITY_PROBE="${SKIP_CAPACITY_PROBE:-false}"
+PRODUCTION_SIZING="${PRODUCTION_SIZING:-false}"
 P4D_INSTANCE_TYPE="p4d.24xlarge"
 P4D_GPUS_PER_NODE=8
 P4D_NODE_VCPUS=96
@@ -1936,6 +1937,10 @@ parse_args() {
         ;;
       --skip-capacity-probe)
         SKIP_CAPACITY_PROBE=true
+        shift
+        ;;
+      --production-sizing)
+        PRODUCTION_SIZING=true
         shift
         ;;
       --rotate-admin-password)
@@ -6190,7 +6195,7 @@ phase_platform_services() {
     # databridge group their replicas per component and stay at 1).
     case "${svc}" in
       foundation | grid | portico | registry)
-        if ha_enabled; then
+        if production_sizing; then
           extra+=(--set "${key}.replicas=2" --set "${key}.topologySpread.enabled=true"
             --set-string "${key}.topologySpread.whenUnsatisfiable=ScheduleAnyway" --set "${key}.topologySpread.minDomains=null")
           # Autoscale from 2 on CPU/memory (needs the metrics API: the metrics-server EKS add-on).
@@ -6199,13 +6204,13 @@ phase_platform_services() {
         ;;
       databridge)
         # api autoscales; ingest, reconcile and the delivery pipeline (Benthos) run 2 each.
-        if ha_enabled; then
+        if production_sizing; then
           extra+=(--set "${key}.roles.api.replicas=2" --set "${key}.roles.ingest.replicas=2" --set "${key}.roles.reconcile.replicas=2"
             --set "${key}.benthos.replicas=2" --set "${key}.hpa.enabled=true" --set "${key}.hpa.minReplicas=2" --set "${key}.hpa.maxReplicas=4")
         fi
         ;;
       connect)
-        if ha_enabled; then
+        if production_sizing; then
           extra+=(--set "${key}.roles.connect.replicas=3" --set "${key}.roles.notify-api.replicas=3" --set "${key}.roles.notify-worker.replicas=3")
         fi
         ;;
@@ -6506,7 +6511,7 @@ phase_straiker_core() {
   # global.* above); a bare "frontend.internalApiKey...=" would silently
   # create an unused top-level key instead.
   # HA: the console autoscales from 2 (needs the metrics API), the LLM gateway runs 2.
-  if ha_enabled; then
+  if production_sizing; then
     cmd+=(--set "straiker-frontend.frontend.hpa.enabled=true" --set "straiker-frontend.frontend.hpa.minReplicas=2"
       --set "straiker-frontend.frontend.hpa.maxReplicas=4" --set "straiker-bifrost.replicaCount=2")
   fi
@@ -6997,6 +7002,9 @@ check_p4d_offered() {
 # The spread is soft (ScheduleAnyway): a zone with no capacity must not leave a pod Pending, but Karpenter and the scheduler still
 # prefer another zone for the second replica. Under 'min' nothing changes (one zone, one replica).
 ha_enabled() { [[ "${PROVISION_STRATEGY:-min}" != "min" ]]; }
+# Production replica counts and HPAs (the screenshot's starting sizes): on for an HA cluster, or on any cluster with
+# --production-sizing (to try the sizing on a min cluster; it does not change zones or GPU placement).
+production_sizing() { ha_enabled || [[ "${PRODUCTION_SIZING:-false}" == true ]]; }
 
 # PodDisruptionBudgets (maxUnavailable 1) for the vendored platform charts, which ship none: without one, a node drain
 # (Karpenter consolidation, upgrades) may evict both replicas at once. Applied with kubectl, not Helm (the charts are synced from
@@ -7850,7 +7858,7 @@ phase_straiker_argus_v3() {
     --timeout "${HELM_TIMEOUT}"
   )
   # HA: the transcript compactor runs 2 (a consumer group: the topic's partitions are shared between the pods).
-  ha_enabled && cmd+=(--set "argus.compactor.replicaCount=2")
+  production_sizing && cmd+=(--set "argus.compactor.replicaCount=2")
   # MSK (IAM): every producer/consumer block gets the same brokers and region.
   local block
   for block in agentConfig grid transcript metricsStream compactor; do
@@ -8071,7 +8079,7 @@ phase_straiker_ascend() {
     --wait
     --timeout "${HELM_TIMEOUT}"
   )
-  if ha_enabled; then
+  if production_sizing; then
     # control plane 2, probe workers 4, recon and report workers 2; each autoscales from there (needs the metrics API).
     cmd+=(--set "controlPlane.replicaCount=2" --set "controlPlane.hpa.enabled=true" --set "controlPlane.hpa.minReplicas=2"
       --set "probeWorker.replicaCount=4" --set "probeWorker.hpa.enabled=true" --set "probeWorker.hpa.minReplicas=4"

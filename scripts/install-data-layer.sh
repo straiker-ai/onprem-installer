@@ -37,6 +37,7 @@ GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
 AVAILABILITY_ZONES=""
 SKIP_CAPACITY_PROBE=""
+PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
 SSO_TYPE=""
 GPU_CAPACITY_RESERVATION=""
@@ -97,6 +98,7 @@ Options:
   --sso-type T               federate the customer's identity provider into Cognito: google | facebook | amazon | apple | saml | oidc,
                              with --sso-domains a.com,b.com, --sso-client-id ID (secret: env SSO_CLIENT_SECRET, or a hidden prompt here),
                              and the type's other --sso-* flags (see install-straiker.sh --help)
+  --production-sizing        production replica counts and HPAs (already on with --provision-strategy ha|max)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
   --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
@@ -135,6 +137,7 @@ while [[ $# -gt 0 ]]; do
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --availability-zones) AVAILABILITY_ZONES="${2:-}"; shift 2 ;;
     --skip-capacity-probe) SKIP_CAPACITY_PROBE=true; shift ;;
+    --production-sizing) PRODUCTION_SIZING=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
       | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
@@ -349,6 +352,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
 [[ "${SKIP_CAPACITY_PROBE}" == true ]] && run_args+=(--skip-capacity-probe)
+[[ "${PRODUCTION_SIZING}" == true ]] && run_args+=(--production-sizing)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ ${#EXTRA_FLAGS[@]} -gt 0 ]] && run_args+=("${EXTRA_FLAGS[@]}")
