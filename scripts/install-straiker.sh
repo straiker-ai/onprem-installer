@@ -5998,6 +5998,42 @@ phase_verify_data_layer() {
     fi
   done
 
+  # 3a. HA: nodes in every zone, and each service's replicas in more than one zone.
+  if ha_enabled; then
+    local want_zones have_zones svc_az
+    want_zones="$(get_metadata "availability_zones" | tr ',' '\n' | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+    have_zones="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}{end}' 2>/dev/null | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+    if [[ "${want_zones}" -gt 0 && "${have_zones}" -ge "${want_zones}" ]]; then
+      log "PASS  HA: nodes run in ${have_zones}/${want_zones} zones."
+    else
+      log "FAIL  HA: nodes run in ${have_zones:-0} of ${want_zones} zones: an Availability Zone has no node (capacity or subnet problem)."
+      fail_count=$((fail_count + 1))
+    fi
+    svc_az="$(kubectl get pods -n "${INFRA_NAMESPACE}" -o json 2>/dev/null | python3 -c '
+import json, sys
+pods = json.load(sys.stdin)["items"]
+nodes = json.loads(sys.argv[1])
+z = {n["metadata"]["name"]: n["metadata"]["labels"].get("topology.kubernetes.io/zone", "") for n in nodes}
+by = {}
+for p in pods:
+    if p["status"].get("phase") != "Running":
+        continue
+    app = p["metadata"].get("labels", {}).get("app.straiker.io/app") or p["metadata"].get("labels", {}).get("app")
+    if not app:
+        continue
+    by.setdefault(app, []).append(z.get(p["spec"].get("nodeName", ""), ""))
+for app, zs in sorted(by.items()):
+    if len(zs) >= 2 and len(set(zs)) < 2:
+        print(app)
+' "$(kubectl get nodes -o json 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["items"]))')" 2>/dev/null || true)"
+    if [[ -z "${svc_az}" ]]; then
+      log "PASS  HA: every service with 2+ replicas runs them in more than one zone."
+    else
+      log "FAIL  HA: replicas share one zone for: $(printf '%s' "${svc_az}" | tr '\n' ' ')."
+      fail_count=$((fail_count + 1))
+    fi
+  fi
+
   # 3b. ClickHouse as replicas + Keeper: every replica and Keeper member ready, no read-only replica.
   if [[ "$(clickhouse_replicated)" == "true" ]]; then
     local ch_spec ch_ready kp_spec kp_ready ch_ro
@@ -7655,6 +7691,7 @@ phase_straiker_inference() {
       elif [[ "$(gpu_fleet)" == "p4d" ]]; then
         cmd+=(--set "gpuProfile=$(gpu_chart_profile_for_instance_type "$(gpu_instance_type)")") # the packed fleet's GPU tier
       fi
+      ha_enabled && cmd+=(--set-string "zoneSpread=strict") # one replica of each model per zone (needs GPU capacity in both)
       if [[ -n "${CHART_VERSION}" ]]; then
         cmd+=(--version "${CHART_VERSION}")
       fi

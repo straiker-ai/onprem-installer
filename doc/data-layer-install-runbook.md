@@ -146,8 +146,11 @@ the shell already has, so the customer must give the AWS CLI working credentials
 - **High availability:** the default `--provision-strategy min` is a single-zone proof of concept. With `ha` (2 zones) or `max`
   (3 zones) the installer runs 2 replicas of the platform services (foundation, grid, portico, registry, api-gateway), defend, edge
   and the ascend control plane, spreads them over zones (soft rule, so a zone without capacity cannot leave a pod Pending), and adds
-  a PodDisruptionBudget to the platform charts. Not covered yet: the platform connect and databridge services, ascend workers and
-  ingest stay at 1 replica, and the GPU pool is only as zone-spread as the available capacity (one replica per zone is not forced).
+  a PodDisruptionBudget to the platform charts. GPU inference is strict: the two replicas of each model must be in different zones
+  (`DoNotSchedule`), so a model replica stays Pending if the second zone has no GPU capacity (the pre-build zone probe only checks one
+  zone). The system node group is an Auto Scaling group over all zones, and the verify phase fails if any zone has no node or a
+  service's replicas share one zone. Not covered yet: the platform connect and databridge services, ascend workers and ingest stay
+  at 1 replica.
 - **Egress:** the private subnets reach Straiker's artifact source in us-east-1 (no regional endpoint can), Docker Hub (verify
   probes, the multi-arch override) and the Helm repository.
 - **DNS:** a Route53 zone in the account needs no manual step; otherwise the customer must add the validation records.

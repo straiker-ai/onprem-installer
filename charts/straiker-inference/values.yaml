@@ -28,6 +28,8 @@ cloudProvider: eks
 
 # 2 per model, as decided: one replica keeps serving while the other is replaced. Each replica takes its own GPU.
 replicas: 2
+# soft (default): prefer different zones. strict: replicas must be in different zones (DoNotSchedule).
+zoneSpread: soft
 
 imagePullSecrets: []
 

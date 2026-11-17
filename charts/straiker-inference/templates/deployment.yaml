@@ -98,7 +98,9 @@ spec:
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: ScheduleAnyway
+          {{- /* zoneSpread=strict (installer, --provision-strategy ha|max): replicas must land in different zones; Karpenter then
+                 launches the GPU node in the other zone, and the pod stays Pending if that zone has no GPU capacity. */}}
+          whenUnsatisfiable: {{ if eq (.Values.zoneSpread | default "soft") "strict" }}DoNotSchedule{{ else }}ScheduleAnyway{{ end }}
           labelSelector:
             matchLabels:
               app: {{ include "straiker-inference.fullname" . }}
