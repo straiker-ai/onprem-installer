@@ -3298,15 +3298,19 @@ phase_aws_data() {
 
   # SaaS frontend backends: remembered, one-way (a later run without the flag must not make Terraform destroy them).
   [[ "${SAAS_FRONTEND}" == "true" ]] && set_metadata "saas_frontend" "true"
-  local saas_frontend_on=false saas_frontend_identity=""
+  # The frontend always gets a role: the console's user management calls the Cognito admin APIs (without a role the
+  # pod would run as the node role and be refused). SaaS backends are added to it with --saas-frontend.
+  local saas_frontend_on=false saas_frontend_data=false
   if [[ "$(get_metadata "saas_frontend")" == "true" ]]; then
     saas_frontend_on=true
-    saas_frontend_identity='"frontend": {
+    saas_frontend_data=true
+  fi
+  local saas_frontend_identity='"frontend": {
       "namespace": "'"${INFRA_NAMESPACE}"'",
       "service_account": "straiker-frontend",
-      "saas_frontend_data": true
+      "cognito_admin": true,
+      "saas_frontend_data": '"${saas_frontend_data}"'
     },'
-  fi
 
   # Argus v3 engine role (chart straiker-argus-v3's ServiceAccount): Bedrock for its context reviewer. Same grant as the SaaS
   # argus pods: the inference profile, the foundation model behind it, and the account's default Bedrock project (the
@@ -6634,6 +6638,7 @@ phase_straiker_core() {
       ensure_cognito_admin_user "${cg_email}" || return
       cmd+=(
         --set "straiker-frontend.dex.enabled=false"
+        --set "straiker-frontend.frontend.serviceAccount.create=true"
         --set-string "straiker-frontend.frontend.oidc.issuer=$(get_metadata "cognito_issuer")"
         --set-string "straiker-frontend.frontend.oidc.clientId=$(get_metadata "cognito_client_id")"
         --set-string "straiker-frontend.frontend.oidc.clientSecretSecret.name=cognito-oidc"

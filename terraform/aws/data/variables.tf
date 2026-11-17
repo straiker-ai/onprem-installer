@@ -507,6 +507,7 @@ variable "pod_identities" {
       secret_prefixes_read   Secrets Manager name prefixes this role may read (get/describe)
       dynamodb_query         keys of dynamodb_tables whose apiKey-index this role may query
       saas_frontend_data     read/write the SaaS environment + guardrail tables (and their indexes) and put audit records
+      cognito_admin          manage users in the Cognito user pools (console invites, SSO providers, role changes)
       ses_send               allow ses:SendEmail/SendRawEmail on identities in this account (connect email)
       bedrock_invoke         Bedrock model / inference-profile / project ARNs this role may bedrock:InvokeModel on (argus-v3 context review)
       assume_roles           allow sts:AssumeRole on any role (databridge sink probes/delivery into customer accounts)
@@ -528,6 +529,7 @@ variable "pod_identities" {
     saas_frontend_data   = optional(bool, false)
     bedrock_invoke       = optional(list(string), [])
     ses_send             = optional(bool, false)
+    cognito_admin        = optional(bool, false)
     assume_roles         = optional(bool, false)
     policy_json          = optional(string)
     tags                 = optional(map(string), {})

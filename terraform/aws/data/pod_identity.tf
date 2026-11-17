@@ -141,6 +141,24 @@ data "aws_iam_policy_document" "pod" {
   }
 
   dynamic "statement" {
+    for_each = each.value.cognito_admin ? [1] : []
+    content {
+      sid = "CognitoUserAdmin"
+      actions = [
+        "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminDeleteUser",
+        "cognito-idp:AdminUpdateUserAttributes", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminEnableUser",
+        "cognito-idp:AdminDisableUser", "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup",
+        "cognito-idp:AdminListGroupsForUser", "cognito-idp:AdminResetUserPassword", "cognito-idp:ListUsers",
+        "cognito-idp:ListUsersInGroup", "cognito-idp:ListGroups", "cognito-idp:DescribeUserPool",
+        "cognito-idp:DescribeUserPoolClient", "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateIdentityProvider", "cognito-idp:UpdateIdentityProvider", "cognito-idp:DeleteIdentityProvider",
+        "cognito-idp:DescribeIdentityProvider", "cognito-idp:GetIdentityProviderByIdentifier",
+      ]
+      resources = [for p in aws_cognito_user_pool.this : p.arn]
+    }
+  }
+
+  dynamic "statement" {
     for_each = each.value.ses_send ? [1] : []
     content {
       sid     = "SesSend"
