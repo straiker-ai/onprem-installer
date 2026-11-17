@@ -874,10 +874,10 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
-  --skip-capacity-probe            Skip the GPU capacity probe: right after the cluster is built (p4d fleet, no reservation) the
-                                   installer launches the fleet's GPU instances for about a minute in the cluster's node AZ(s)
-                                   to prove AWS has capacity now (about $1-2 for 2 p4d.24xlarge, cents for g6e), then terminates
-                                   them. Needs ec2:RunInstances/TerminateInstances. Fails early with remedies when there is none.
+  --skip-capacity-probe            Skip the pre-build GPU zone probe (a brief real launch of the fleet's GPU instances in a temporary
+                                   VPC, one zone at a time, to start the cluster in a zone that has capacity). Needs
+                                   ec2:RunInstances/TerminateInstances. It never blocks: with no capacity anywhere the install
+                                   continues and waits for GPU nodes (up to 6 hours, any type listed in --gpu-instance-type).
   --skip-sso-preflight             Skip the reachability / certificate checks of the SAML metadata or OIDC issuer
                                    (use when this machine cannot reach a provider that AWS can).
   --ses-domain <domain>            With --data-layer: sending domain in Amazon SES. Cognito invitations / password
@@ -2923,7 +2923,6 @@ phase_karpenter() {
     --set "controller.resources.limits.memory=1Gi" \
     --wait --timeout "${HELM_TIMEOUT}"
 
-  probe_gpu_capacity || return
 }
 
 phase_karpenter_gke() {
@@ -7126,7 +7125,7 @@ select_gpu_zone() {
   if [[ -n "${chosen}" ]]; then
     set_metadata "gpu_first_az" "${chosen}"
     set_metadata "gpu_zone_probe" "ok|${chosen}|$(date +%s)"
-    (( best < nodes )) && log "WARNING: the best zone (${chosen}) could give ${best} of the ${nodes} GPU nodes right now; the rest launch as AWS frees capacity, and the install stops waiting after 10 minutes without progress."
+    (( best < nodes )) && log "WARNING: the best zone (${chosen}) could give ${best} of the ${nodes} GPU nodes right now; the rest launch as AWS frees capacity, and the install keeps waiting for them (up to ${GPU_WAIT_HOURS:-6} hours)."
     log "The cluster will be built with ${chosen} as its first (and, with provision strategy 'min', only node) zone."
     return 0
   fi
@@ -7134,96 +7133,8 @@ select_gpu_zone() {
     log "WARNING: the GPU zone probe could not run (${note:-no usable zone}); continuing without it."
     return 0
   fi
-  mark_phase_blocked "AWS has no capacity for ${nodes} x ${types} right now in any zone (tried: ${tried% }). Nothing was built. Re-run in a while (capacity changes by the hour), or (1) reserve capacity (EC2 Capacity Reservation or Capacity Block) and pass --gpu-capacity-reservation cr-..., or (2) list more instance types in --gpu-instance-type (capacity is per type). Use --skip-capacity-probe to build anyway."
-  return 1
-}
-
-# GPU capacity probe: AWS has no call that reports free on-demand capacity, so launch the fleet's GPU instances for real (all or
-# nothing: the whole node count at once), once per usable zone and type, and terminate them at once. Runs right after the cluster
-# is built (it needs the subnets), before the data layer and the models, and blocks with remedies when no zone has capacity.
-# Skipped with a reservation (that capacity is checked separately), for non-p4d fleets, with --skip-capacity-probe, and when a
-# probe passed in the last 2 hours. Permission or other errors only warn: the probe must never fail an install by itself.
-probe_gpu_capacity() {
-  [[ "${SKIP_CAPACITY_PROBE}" != true && "${CLOUD_PROVIDER}" != "gke" ]] || return 0
-  [[ "$(gpu_fleet)" == "p4d" && "$(inference_mode)" == "vllm" ]] || return 0
-  [[ -z "${GPU_CAPACITY_RESERVATION:-$(get_metadata "gpu_capacity_reservation")}" ]] || return 0
-  # An install whose models already run needs no probe (it would only compete with its own nodes).
-  [[ "$(get_phase_status straiker-inference)" != "done" ]] || return 0
-  local last
-  last="$(get_metadata "gpu_capacity_probe")"
-  if [[ "${last}" == ok\|* ]]; then
-    local at="${last##*|}"
-    if [[ "${at}" =~ ^[0-9]+$ ]] && (( $(date +%s) - at < 7200 )); then
-      log "GPU capacity probe passed less than 2 hours ago: skipping."
-      return 0
-    fi
-  fi
-  local nodes types itype have azs
-  local count=0 line
-  while IFS= read -r line; do [[ -n "${line}" ]] && count=$((count + 1)); done < <(inference_models_for_products)
-  [[ ${count} -gt 0 ]] || return 0
-  nodes="$(p4d_nodes_for $((count * 2)))" # the fleet: 2 replicas of each model
-  types="$(gpu_instance_types)"
-  have="$(get_metadata "availability_zones" | tr ',' ' ' | xargs)"
-  azs="${have}"
-  [[ "${PROVISION_STRATEGY}" == "min" && -n "${azs}" ]] && azs="${azs%% *}"
-  local pairs
-  pairs="$(aws ec2 describe-subnets --region "${AWS_REGION}" --filters "Name=tag:karpenter.sh/discovery,Values=${CLUSTER_NAME}" \
-    --query 'Subnets[].[AvailabilityZone,SubnetId]' --output text 2>/dev/null || true)"
-  if [[ -z "${pairs}" ]]; then
-    log "WARNING: capacity probe skipped: no subnets tagged karpenter.sh/discovery=${CLUSTER_NAME} found."
-    return 0
-  fi
-  if [[ "${AUTO_YES}" != true ]]; then
-    local ans
-    ans="$(prompt_line "Probe GPU capacity now? This launches ${nodes} x ${types%%,*} for about a minute per zone (about \$1-2 for p4d, cents for g6e) and terminates them [Y/n]: " || true)"
-    case "${ans}" in n | N | no | NO) log "GPU capacity probe skipped at your request."; return 0 ;; esac
-  fi
-  local ami
-  ami="$(aws ssm get-parameter --region "${AWS_REGION}" --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
-    --query Parameter.Value --output text 2>/dev/null || true)"
-  if [[ -z "${ami}" || "${ami}" == "None" ]]; then
-    log "WARNING: capacity probe skipped: could not look up the Amazon Linux AMI in ${AWS_REGION}."
-    return 0
-  fi
-  # Instances a previous, interrupted probe left behind.
-  local stale
-  stale="$(aws ec2 describe-instances --region "${AWS_REGION}" --filters "Name=tag:straiker-capacity-probe,Values=${CLUSTER_NAME}" \
-    "Name=instance-state-name,Values=pending,running" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)"
-  [[ -n "${stale}" && "${stale}" != "None" ]] && aws ec2 terminate-instances --region "${AWS_REGION}" --instance-ids ${stale} >/dev/null 2>&1 || true
-
-  local az subnet got tried="" passed="" failed="" note=""
-  PROBE_IDS=""
-  while read -r az subnet; do
-    [[ -n "${az}" ]] || continue
-    if [[ -n "${azs}" && " ${azs} " != *" ${az} "* ]]; then continue; fi
-    for itype in ${types//,/ }; do
-      probe_launch "${ami}" "${itype}" "${nodes}" "${subnet}" && got=0 || got=$?
-      tried+="${az}/${itype} "
-      if [[ ${got} -eq 0 ]]; then
-        passed+="${az}/${itype} "
-        log "GPU capacity probe: ${PROBE_LAUNCHED} of ${nodes} x ${itype} launched in ${az} and terminated: AWS has capacity there now."
-        (( PROBE_LAUNCHED < nodes )) && log "WARNING: only ${PROBE_LAUNCHED} of ${nodes} GPU nodes are available right now; the rest launch as AWS frees capacity."
-        break 2 # one proof is enough; probing every zone would only cost more
-      elif [[ ${got} -eq 1 ]]; then
-        failed+="${az}/${itype} "
-        log "GPU capacity probe: no capacity for ${nodes} x ${itype} in ${az} right now."
-      else
-        note="${PROBE_NOTE}"
-        log "WARNING: GPU capacity probe could not run in ${az} for ${itype}: ${note}"
-      fi
-    done
-  done <<< "${pairs}"
-  if [[ -n "${passed}" ]]; then
-    set_metadata "gpu_capacity_probe" "ok|${passed% }|$(date +%s)"
-    return 0
-  fi
-  if [[ -z "${failed}" ]]; then
-    log "WARNING: the GPU capacity probe could not run (${note:-no usable zone}); continuing without it."
-    return 0
-  fi
-  mark_phase_blocked "AWS has no capacity for ${nodes} x ${types} right now in the cluster's node zone(s) (tried: ${tried% }). The cluster is built and nothing else needs to change: re-run in a while (capacity changes by the hour), or (1) reserve capacity (EC2 Capacity Reservation or Capacity Block) and pass --gpu-capacity-reservation cr-..., (2) list more instance types in --gpu-instance-type (capacity is per type), or (3) for a NEW install choose zones with --availability-zones. Use --skip-capacity-probe to continue anyway."
-  return 1
+  log "WARNING: no zone has capacity for ${nodes} x ${types} right now (tried: ${tried% }). Continuing: the install waits for GPU nodes (up to ${GPU_WAIT_HOURS:-6} hours), trying every instance type in --gpu-instance-type."
+  return 0
 }
 
 # --gpu-capacity-reservation pre-flight: every reservation must be usable by this fleet BEFORE any cost is incurred. Checks each
@@ -7349,9 +7260,7 @@ apply_gpu_time_slicing() {
 # a re-run resumes; Karpenter keeps retrying). $2 = GPU nodes the fleet needs.
 #   hard    a launch failure that waiting cannot fix (quota, permissions, bad AMI/subnet/reservation), twice
 #   pool    the pool's GPU limit is reached, twice
-#   ice     "insufficient capacity" >=5 times over >=GPU_WATCH_ICE_AFTER s and no GPU node came up at all
-#   stalled some nodes came up, ICE continues and no new node for GPU_WATCH_STALL s
-# Partial progress (some nodes up, ICE for the rest) is reported, never stopped early.
+# "Insufficient capacity" never stops the wait (only the 6-hour limit does, see phase_straiker_inference); it is just reported.
 classify_gpu_launch_failures() {
   python3 -c '
 import json, re, sys
@@ -7375,7 +7284,7 @@ print(ice, hard, pool)'
 
 watch_gpu_capacity() {
   local verdict=$1 needed=$2; shift 2
-  local interval=${GPU_WATCH_INTERVAL:-20} ice_after=${GPU_WATCH_ICE_AFTER:-240} stall=${GPU_WATCH_STALL:-600}
+  local interval=${GPU_WATCH_INTERVAL:-20}
   local start=${SECONDS} last_nodes=0 last_growth=${SECONDS} last_note=${SECONDS} elapsed nodes ice hard pool reason pid alive
   while :; do
     sleep "${interval}"
@@ -7391,9 +7300,7 @@ watch_gpu_capacity() {
     reason=""
     if (( hard >= 2 )); then reason=hard
     elif (( pool >= 2 )); then reason=pool
-    elif (( ice >= 5 && nodes == 0 && elapsed >= ice_after )); then reason=ice
-    elif (( ice >= 1 && nodes > 0 && nodes < needed && SECONDS - last_growth >= stall )); then reason=stalled
-    fi
+    fi # capacity shortages never stop the wait: Karpenter keeps trying every listed type until the overall limit
     if [[ -n "${reason}" ]]; then
       echo "${reason}|${elapsed}|${nodes}|${needed}" > "${verdict}"
       for pid in "$@"; do pkill -TERM -P "${pid}" 2>/dev/null || true; kill -TERM "${pid}" 2>/dev/null || true; done
@@ -7607,6 +7514,7 @@ phase_straiker_inference() {
 
   ensure_k8s_ready_for_charts || return
 
+  local gpu_wait_start=${SECONDS}
   local models_csv
   models_csv="$(IFS=','; echo "${models[*]}")"
   if [[ "$(gpu_fleet)" == "p4d" ]]; then
@@ -7672,6 +7580,9 @@ phase_straiker_inference() {
       # names in this chart (see straiker-inference.fullname), keeps the K8s
       # resource names consistent with the release name rather than bare.
       release="inference-${model}"
+      # Capacity can take hours: every release waits for its pods until the 6-hour limit (GPU_WAIT_HOURS) from the start of this phase.
+      local gpu_wait_left=$(( ${GPU_WAIT_HOURS:-6} * 3600 - (SECONDS - gpu_wait_start) ))
+      (( gpu_wait_left < 60 )) && gpu_wait_left=60
       log "Installing inference model '${model}' as release '${release}'..."
       local cmd=(
         helm upgrade --install "${release}" "$(chart_ref "${INFERENCE_CHART_NAME}")"
@@ -7681,7 +7592,7 @@ phase_straiker_inference() {
         --set-string "modelCache.awsRegion=${AWS_REGION}" # the models bucket lives in the install region (chart falls back to us-east-1)
         --set "global.dockerRegistry=${ecr_registry_prefixed}"
         --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
-        --timeout "${HELM_TIMEOUT}"
+        --timeout "${gpu_wait_left}s"
       )
       if [[ "${INFERENCE_NO_WAIT}" != true ]]; then
         cmd+=(--wait)
@@ -7755,7 +7666,6 @@ phase_straiker_inference() {
     case "${v_reason}" in
       hard) why="AWS refused to launch the GPU instances for a reason that waiting will not fix (see the AWS message above: quota, permission, image, subnet or reservation)." ;;
       pool) why="the GPU node pool's limit is reached, so Karpenter will not create more GPU nodes (raise --gpu-max-nodes)." ;;
-      stalled) why="only ${v_nodes} of ${v_needed} GPU nodes came up and AWS has had no capacity for the rest for ${GPU_WATCH_STALL:-600}s." ;;
       *) why="AWS has no capacity for the GPU instances right now (no GPU node came up)." ;;
     esac
     mark_phase_blocked "Stopped waiting for the model servers after $((v_elapsed / 60)) min instead of the full Helm timeout: ${why} Nothing is broken: the releases stay, Karpenter keeps retrying, and re-running this phase (--phase straiker-inference --rerun-phase) continues from here."

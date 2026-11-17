@@ -136,10 +136,10 @@ the shell already has, so the customer must give the AWS CLI working credentials
 - **GPU capacity:** EC2 capacity is per instance type and per Availability Zone and cannot be checked ahead. For a customer, reserve
   2-4 `p4d.24xlarge` (EC2 Capacity Reservation or Capacity Block) and pass `--gpu-capacity-reservation`; the installer checks it
   first (active, type, AZ, free count). Choose the zones with `--availability-zones`.
-- **Capacity checks without a reservation:** the first phase prints Capacity Blocks you could buy (information only). Right after
-  the cluster is built, a capacity probe launches the fleet's GPU instances for about a minute in the node zone(s) and terminates them
-  (about $1-2 for 2 `p4d.24xlarge`, cents for g6e; needs `ec2:RunInstances`/`TerminateInstances`). It proves capacity exists *now*,
-  not later, and blocks with remedies before the data layer is built when there is none. `--skip-capacity-probe` turns it off.
+- **Capacity checks without a reservation:** the first phase prints Capacity Blocks you could buy (information only). There is no
+  probe after the cluster is built. When GPU nodes are not available the install keeps waiting for them, up to 6 hours
+  (`GPU_WAIT_HOURS`), and Karpenter tries every instance type listed in `--gpu-instance-type`. It stops early only for errors that
+  waiting cannot fix (quota, permissions, bad image or subnet). `--skip-capacity-probe` turns off the zone probe below.
   Before the cluster is built, a zone probe does the same in a temporary VPC (one subnet per zone that offers the GPU type; also needs
   `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity, and stops
   before building anything when no zone has. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
