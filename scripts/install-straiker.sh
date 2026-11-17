@@ -6747,19 +6747,38 @@ gpu_instance_type() {
 gpu_instance_spec() {
   local itype=$1
   case "${itype}" in
-    p4d.24xlarge | p4de.24xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=96 ;;
-    p5.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
-    g6e.xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=4 ;;
-    g6e.2xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=8 ;;
-    g6e.4xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=16 ;; # one L40S per node: 10 nodes for the fleet, far easier to get than a 12xlarge
-    g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 ;;
-    g6e.48xlarge | g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 ;;
+    p4d.24xlarge | p4de.24xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=96 GPU_SPEC_MEM_GIB=1152 ;;
+    p5.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 GPU_SPEC_MEM_GIB=2048 ;;
+    g6e.xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=4 GPU_SPEC_MEM_GIB=32 ;;
+    g6e.2xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=8 GPU_SPEC_MEM_GIB=64 ;;
+    g6e.4xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=16 GPU_SPEC_MEM_GIB=128 ;; # one L40S per node: 10 nodes for the fleet, far easier to get than a 12xlarge
+    g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 GPU_SPEC_MEM_GIB=384 ;;
+    g6e.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 GPU_SPEC_MEM_GIB=1536 ;;
+    g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 GPU_SPEC_MEM_GIB=768 ;;
     *) return 1 ;;
   esac
   case "${itype}" in
     p4d.* | p4de.* | p5.*) GPU_SPEC_QUOTA_CODE="${P_VCPU_QUOTA_CODE}" GPU_SPEC_QUOTA_NAME="Running On-Demand P instances" GPU_SPEC_FAMILY_RE='^p[0-9]' ;;
     *) GPU_SPEC_QUOTA_CODE="${GPU_VCPU_QUOTA_CODE}" GPU_SPEC_QUOTA_NAME="Running On-Demand G and VT instances" GPU_SPEC_FAMILY_RE='^(g|vt)[0-9]' ;;
   esac
+}
+# Per-pod CPU/memory requests that fit EVERY type in --gpu-instance-type. The chart asks 8 vCPU / 32 GiB per model server, which
+# a g6e.xlarge (4 vCPU, 32 GiB) or g6e.2xlarge (8 vCPU, minus system daemons) can never offer: Karpenter would silently skip those
+# sizes. So size the request to the smallest listed type (one server per GPU: node vCPU minus 1 for the node's daemons, memory at
+# 75%), and only ever LOWER the chart's value. Prints "cpu mem" (e.g. "3 24") or nothing when no lowering is needed.
+gpu_pod_requests_for_types() {
+  local t min_cpu=999 min_mem=99999 c m
+  for t in $(gpu_instance_types | tr ',' ' '); do
+    gpu_instance_spec "${t}" || continue
+    c=$(( (GPU_SPEC_VCPUS - 1) / GPU_SPEC_GPUS ))
+    m=$(( GPU_SPEC_MEM_GIB * 3 / 4 / GPU_SPEC_GPUS ))
+    (( c < min_cpu )) && min_cpu=${c}
+    (( m < min_mem )) && min_mem=${m}
+  done
+  (( min_cpu < 8 || min_mem < 32 )) || return 0
+  (( min_cpu < 8 )) || min_cpu=8
+  (( min_mem < 32 )) || min_mem=32
+  echo "${min_cpu} ${min_mem}"
 }
 # charts/straiker-inference's gpuProfiles key for a packed-fleet instance type (its nodeSelector is keyed by EC2
 # instance-family, not type): p4d.24xlarge's own "p4d" profile is tuned for it (A100 40GB, bf16, 32768 context); the
@@ -6839,6 +6858,11 @@ remember_inference_settings() {
       fi
     done
     gpu_instance_spec "${itype}"
+    local fam
+    for t in ${itypes//,/ }; do
+      [[ -z "${fam:-}" || "${t%%.*}" == "${fam}" ]] || { echo "ERROR: --gpu-instance-type list '${itypes}' mixes GPU families ('${fam}' and '${t%%.*}'). The model servers are pinned to the first type's family (their GPU tier settings differ), so only sizes of ONE family can be used together, e.g. g6e.4xlarge,g6e.2xlarge,g6e.xlarge." >&2; return 1; }
+      fam="${t%%.*}"
+    done
   fi
   if [[ "${fleet}" == "p4d" ]] && gpu_instance_spec "${itype}"; then
     # The pool's GPU limit is max-nodes x GPUs per node. It must cover the fleet with room to double it (replicas, upgrades), or
@@ -7601,6 +7625,13 @@ phase_straiker_inference() {
         cmd+=(--set "cloudProvider=gke")
       elif [[ "$(gpu_fleet)" == "p4d" ]]; then
         cmd+=(--set "gpuProfile=$(gpu_chart_profile_for_instance_type "$(gpu_instance_type)")") # the packed fleet's GPU tier
+      fi
+      if [[ "$(gpu_fleet)" == "p4d" ]]; then
+        local req_cpu req_mem
+        read -r req_cpu req_mem <<< "$(gpu_pod_requests_for_types)"
+        if [[ -n "${req_cpu:-}" ]]; then # a small size is in the list: requests must fit it, or Karpenter never picks that size
+          cmd+=(--set-string "resources.requests.cpu=${req_cpu}" --set-string "resources.requests.memory=${req_mem}Gi")
+        fi
       fi
       ha_enabled && cmd+=(--set-string "zoneSpread=strict") # one replica of each model per zone (needs GPU capacity in both)
       if [[ -n "${CHART_VERSION}" ]]; then

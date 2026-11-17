@@ -139,7 +139,8 @@ the shell already has, so the customer must give the AWS CLI working credentials
 - **Capacity checks without a reservation:** the first phase prints Capacity Blocks you could buy (information only). There is no
   probe after the cluster is built. When GPU nodes are not available the install keeps waiting for them, up to 6 hours
   (`GPU_WAIT_HOURS`), and Karpenter tries every instance type listed in `--gpu-instance-type`. It stops early only for errors that
-  waiting cannot fix (quota, permissions, bad image or subnet). `--skip-capacity-probe` turns off the zone probe below.
+  waiting cannot fix (quota, permissions, bad image or subnet). Sizes of one family can be mixed (e.g. `g6e.4xlarge,g6e.2xlarge,g6e.xlarge`): the
+  per-server CPU/memory request is lowered to fit the smallest listed size, so a node of any listed size gets pods as soon as it exists. `--skip-capacity-probe` turns off the zone probe below.
   Before the cluster is built, a zone probe does the same in a temporary VPC (one subnet per zone that offers the GPU type; also needs
   `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity. When no zone has any it warns and
   continues. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
