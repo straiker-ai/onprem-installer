@@ -324,6 +324,20 @@ API through the api-gateway with the console's own signed session. All automatic
 **Merge to api-gateway `main`:** only the auth commits (`4a813e0`, `edfd29a`), not `chore/onprem-release`'s build changes.
 Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/straiker-artifact`.
 
+## 6c. Sizing against the reference architecture
+
+- **Metrics API:** the `metrics-server` EKS add-on is installed by phase `eks-cluster`, and `verify-data-layer` checks it
+  (`kubectl top nodes`). Every HPA needs it: without it replica counts never change.
+- **Production replicas and HPAs:** on with `--provision-strategy ha|max`, or with `--production-sizing` on any cluster. Console
+  and platform services (foundation, registry, grid, portico, databridge) start at 2 and autoscale; connect/notify 3 per role;
+  Bifrost 2; Argus compactor 2; Ascend control plane 2, probe workers 4, recon and report workers 2, each with an HPA.
+  Re-run the service phases to apply it to an existing install.
+- **Not done yet (decisions or other repositories):** Ascend adjustment worker (not in the Ascend chart), Argo CD / OTel / Grafana,
+  Helm charts in ECR, a second Aurora cluster for Ascend/Bifrost (the services must be repointed), six KMS keys and the
+  transcripts/exports/logs buckets (moving existing EFS/secrets to new keys replaces or re-encrypts them), CloudTrail and VPC
+  Flow Logs (account-level policy), EKS 1.36, Graviton system nodes (m7g.xlarge x2) and the pool names general/defend/ascend
+  (they are shared/argus/iris here), and the GPU model mix (vision 4 replicas, wanda).
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).
