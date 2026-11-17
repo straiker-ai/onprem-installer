@@ -165,6 +165,8 @@ data "aws_iam_policy_document" "pod" {
       actions = ["ses:SendEmail", "ses:SendRawEmail"]
       resources = concat(
         ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/*"],
+        # An identity with a default configuration set needs the send permission on the set too.
+        ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:configuration-set/*"],
         var.ses_existing == null ? [] : [var.ses_existing.identity_arn],
       )
     }
