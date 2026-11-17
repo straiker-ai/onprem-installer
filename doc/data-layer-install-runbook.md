@@ -342,6 +342,17 @@ Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/stra
   Flow Logs (account-level policy), EKS 1.36, Graviton system nodes (m7g.xlarge x2) and the pool names general/defend/ascend
   (they are shared/argus/iris here), and the GPU model mix (vision 4 replicas, wanda).
 
+## 6d. Audit trail (opt-in): VPC Flow Logs and CloudTrail
+
+Both are off unless asked for; they are applied by phase `observability` and remembered.
+
+| Flag | What it creates | Cost / notes |
+|---|---|---|
+| `--vpc-flow-logs` (`--flow-logs-traffic ALL\|ACCEPT\|REJECT`) | VPC Flow Logs of the cluster VPC into CloudWatch Logs group `/aws/vpc/<cluster>/flow-logs` (90-day retention) with its own IAM role | Billed per GB ingested. `REJECT` records only refused connections and is far cheaper |
+| `--cloudtrail` (`--cloudtrail-multi-region`) | Trail `<cluster>-trail` (management events, log-file validation, global service events) into a private, TLS-only, SSE-encrypted, versioned S3 bucket `<cluster>-<account>-cloudtrail` (365-day expiry) | A second trail in an account that already has one, or an organization trail, is billed: check first. Audit logs outlive an `--destroy-eks` teardown unless the bucket is emptied |
+
+Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase observability --rerun-phase --yes`.
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).

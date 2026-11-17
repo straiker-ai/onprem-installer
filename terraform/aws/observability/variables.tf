@@ -57,3 +57,64 @@ variable "alarms" {
   }))
   default = {}
 }
+
+# ---------------------------------------------------------------- Audit (opt-in)
+
+variable "enable_vpc_flow_logs" {
+  description = "Record the cluster VPC's network traffic metadata (accepted and rejected connections) in CloudWatch Logs. Off by default: it costs per GB ingested."
+  type        = bool
+  default     = false
+}
+
+variable "vpc_id" {
+  description = "VPC to record when enable_vpc_flow_logs is true (the cluster's VPC)."
+  type        = string
+  default     = ""
+}
+
+variable "flow_log_traffic_type" {
+  description = "ALL, ACCEPT or REJECT. REJECT records only refused traffic: far cheaper, and what a security review looks at first."
+  type        = string
+  default     = "ALL"
+
+  validation {
+    condition     = contains(["ALL", "ACCEPT", "REJECT"], var.flow_log_traffic_type)
+    error_message = "flow_log_traffic_type must be ALL, ACCEPT or REJECT."
+  }
+}
+
+variable "flow_log_retention_days" {
+  description = "Retention of the flow-log group /aws/vpc/<cluster>/flow-logs, in days (a value CloudWatch Logs accepts, e.g. 30, 90, 365)."
+  type        = number
+  default     = 90
+}
+
+variable "enable_cloudtrail" {
+  description = "Create a CloudTrail trail for this install's account and region (management events) with its own encrypted, private S3 bucket. Off by default: skip it when the account or AWS Organization already has a trail covering it (a second trail is billed)."
+  type        = bool
+  default     = false
+}
+
+variable "cloudtrail_multi_region" {
+  description = "Record every region, not just this one. Leave false when an organization trail already covers the other regions."
+  type        = bool
+  default     = false
+}
+
+variable "cloudtrail_include_global_events" {
+  description = "Include global service events (IAM, STS, CloudFront). Turn on in exactly one trail of the account to avoid paying for duplicates."
+  type        = bool
+  default     = true
+}
+
+variable "cloudtrail_retention_days" {
+  description = "Days the trail's log files are kept in S3 before they expire."
+  type        = number
+  default     = 365
+}
+
+variable "cloudtrail_force_destroy" {
+  description = "Let terraform destroy the trail bucket even when it holds log files. Off: audit logs outlive the install unless you ask otherwise."
+  type        = bool
+  default     = false
+}

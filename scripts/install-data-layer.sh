@@ -37,6 +37,10 @@ GPU_FLEET=""
 GPU_INSTANCE_TYPE=""
 AVAILABILITY_ZONES=""
 SKIP_CAPACITY_PROBE=""
+ENABLE_VPC_FLOW_LOGS=""
+FLOW_LOGS_TRAFFIC=""
+ENABLE_CLOUDTRAIL=""
+CLOUDTRAIL_MULTI_REGION=""
 PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
 SSO_TYPE=""
@@ -99,6 +103,8 @@ Options:
                              with --sso-domains a.com,b.com, --sso-client-id ID (secret: env SSO_CLIENT_SECRET, or a hidden prompt here),
                              and the type's other --sso-* flags (see install-straiker.sh --help)
   --production-sizing        production replica counts and HPAs (already on with --provision-strategy ha|max)
+  --vpc-flow-logs            opt-in audit: VPC Flow Logs into CloudWatch Logs (--flow-logs-traffic ALL|ACCEPT|REJECT)
+  --cloudtrail               opt-in audit: a CloudTrail trail into a private S3 bucket (--cloudtrail-multi-region for all regions)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
   --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
   --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
@@ -137,6 +143,10 @@ while [[ $# -gt 0 ]]; do
     --gpu-instance-type) GPU_INSTANCE_TYPE="${2:-}"; shift 2 ;;
     --availability-zones) AVAILABILITY_ZONES="${2:-}"; shift 2 ;;
     --skip-capacity-probe) SKIP_CAPACITY_PROBE=true; shift ;;
+    --vpc-flow-logs) ENABLE_VPC_FLOW_LOGS=true; shift ;;
+    --flow-logs-traffic) FLOW_LOGS_TRAFFIC="${2:-}"; shift 2 ;;
+    --cloudtrail) ENABLE_CLOUDTRAIL=true; shift ;;
+    --cloudtrail-multi-region) CLOUDTRAIL_MULTI_REGION=true; shift ;;
     --production-sizing) PRODUCTION_SIZING=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
@@ -352,6 +362,10 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ -n "${GPU_FLEET}" ]] && run_args+=(--gpu-fleet "${GPU_FLEET}")
 [[ -n "${GPU_INSTANCE_TYPE}" ]] && run_args+=(--gpu-instance-type "${GPU_INSTANCE_TYPE}")
 [[ "${SKIP_CAPACITY_PROBE}" == true ]] && run_args+=(--skip-capacity-probe)
+[[ "${ENABLE_VPC_FLOW_LOGS}" == true ]] && run_args+=(--vpc-flow-logs)
+[[ -n "${FLOW_LOGS_TRAFFIC}" ]] && run_args+=(--flow-logs-traffic "${FLOW_LOGS_TRAFFIC}")
+[[ "${ENABLE_CLOUDTRAIL}" == true ]] && run_args+=(--cloudtrail)
+[[ "${CLOUDTRAIL_MULTI_REGION}" == true ]] && run_args+=(--cloudtrail-multi-region)
 [[ "${PRODUCTION_SIZING}" == true ]] && run_args+=(--production-sizing)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")

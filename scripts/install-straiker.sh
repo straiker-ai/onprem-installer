@@ -125,6 +125,11 @@ ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 # metrics + container logs), alarms and their SNS topic. --alarm-email (repeatable, or comma-separated) subscribes
 # addresses to the topic; each must confirm AWS's subscription mail. Remembered (later values are added).
 ALARM_EMAILS="${ALARM_EMAILS:-}"
+# Opt-in audit trail (phase observability): VPC Flow Logs -> CloudWatch Logs, and a CloudTrail trail -> a private S3 bucket. Remembered.
+ENABLE_VPC_FLOW_LOGS="${ENABLE_VPC_FLOW_LOGS:-}"
+FLOW_LOGS_TRAFFIC="${FLOW_LOGS_TRAFFIC:-}"
+ENABLE_CLOUDTRAIL="${ENABLE_CLOUDTRAIL:-}"
+CLOUDTRAIL_MULTI_REGION="${CLOUDTRAIL_MULTI_REGION:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -875,6 +880,13 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
+  --vpc-flow-logs                  Opt-in audit: record the cluster VPC's accepted/rejected connections in CloudWatch Logs
+                                   (/aws/vpc/<cluster>/flow-logs, 90-day retention; billed per GB). Applied by phase observability.
+                                   Remembered. --flow-logs-traffic ALL|ACCEPT|REJECT (default ALL; REJECT is far cheaper).
+  --cloudtrail                     Opt-in audit: a CloudTrail trail (<cluster>-trail, management events, log-file validation) into its own
+                                   private, encrypted S3 bucket <cluster>-<account>-cloudtrail (365-day expiry). Skip it when the account or
+                                   AWS Organization already has a trail: a second trail is billed. --cloudtrail-multi-region records every
+                                   region. Remembered. Empty the bucket before an --destroy-eks teardown (audit logs are kept).
   --skip-capacity-probe            Skip the pre-build GPU zone probe (a brief real launch of the fleet's GPU instances in a temporary
                                    VPC, one zone at a time, to start the cluster in a zone that has capacity). Needs
                                    ec2:RunInstances/TerminateInstances. It never blocks: with no capacity anywhere the install
@@ -1814,6 +1826,22 @@ parse_args() {
       --alarm-email)
         ALARM_EMAILS="${ALARM_EMAILS:+${ALARM_EMAILS},}${2:-}"
         shift 2
+        ;;
+      --vpc-flow-logs)
+        ENABLE_VPC_FLOW_LOGS=true
+        shift
+        ;;
+      --flow-logs-traffic)
+        FLOW_LOGS_TRAFFIC=${2:-}
+        shift 2
+        ;;
+      --cloudtrail)
+        ENABLE_CLOUDTRAIL=true
+        shift
+        ;;
+      --cloudtrail-multi-region)
+        CLOUDTRAIL_MULTI_REGION=true
+        shift
         ;;
       --admin-email)
         ADMIN_EMAIL=${2:-}
@@ -8773,6 +8801,26 @@ ids = json.load(sys.stdin) if sys.stdin.readable() else []
 print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
 ' 2>/dev/null || echo '[]')"
 
+  # Opt-in audit trail: a flag turns it on and it is remembered (turning it off means destroying it on purpose).
+  local want_flow want_trail flow_traffic trail_multi vpc_id_for_logs=""
+  want_flow="${ENABLE_VPC_FLOW_LOGS:-$(get_metadata "audit_vpc_flow_logs")}"
+  want_trail="${ENABLE_CLOUDTRAIL:-$(get_metadata "audit_cloudtrail")}"
+  flow_traffic="${FLOW_LOGS_TRAFFIC:-$(get_metadata "audit_flow_logs_traffic")}"
+  flow_traffic="${flow_traffic:-ALL}"
+  trail_multi="${CLOUDTRAIL_MULTI_REGION:-$(get_metadata "audit_cloudtrail_multi_region")}"
+  case "${flow_traffic}" in ALL | ACCEPT | REJECT) ;; *)
+    mark_phase_blocked "--flow-logs-traffic must be ALL, ACCEPT or REJECT, got '${flow_traffic}'."
+    return
+    ;;
+  esac
+  if [[ "${want_flow}" == true ]]; then
+    vpc_id_for_logs="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)"
+    if [[ -z "${vpc_id_for_logs}" || "${vpc_id_for_logs}" == "None" ]]; then
+      mark_phase_blocked "VPC Flow Logs: could not read the VPC of cluster '${CLUSTER_NAME}'."
+      return
+    fi
+  fi
+
   local emails_json
   emails_json="$(EMAILS="${emails}" python3 -c 'import json,os; print(json.dumps([e for e in os.environ["EMAILS"].split(",") if e]))')"
 
@@ -8783,6 +8831,11 @@ print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
     -var="alb_arn_suffix=${alb_suffix}"
     -var="aurora_cluster_ids=${aurora_json}"
     -var="alarm_emails=${emails_json}"
+    -var="enable_vpc_flow_logs=${want_flow:-false}"
+    -var="vpc_id=${vpc_id_for_logs}"
+    -var="flow_log_traffic_type=${flow_traffic}"
+    -var="enable_cloudtrail=${want_trail:-false}"
+    -var="cloudtrail_multi_region=${trail_multi:-false}"
   )
 
   # Adopt what already exists outside this state (log groups the agent created, an add-on installed by hand), so the
@@ -8810,6 +8863,17 @@ print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
   local topic
   topic="$(tofu -chdir="${OBSERVABILITY_DIR}" output -raw alarm_topic_arn 2>/dev/null || true)"
   set_metadata "alarm_topic_arn" "${topic}"
+  set_metadata "audit_vpc_flow_logs" "${want_flow:-false}"
+  set_metadata "audit_cloudtrail" "${want_trail:-false}"
+  set_metadata "audit_flow_logs_traffic" "${flow_traffic}"
+  set_metadata "audit_cloudtrail_multi_region" "${trail_multi:-false}"
+  if [[ "${want_flow}" == true ]]; then
+    log "Audit: VPC Flow Logs (${flow_traffic}) -> CloudWatch Logs group $(tofu -chdir="${OBSERVABILITY_DIR}" output -raw vpc_flow_log_group 2>/dev/null || true)."
+  fi
+  if [[ "${want_trail}" == true ]]; then
+    log "Audit: CloudTrail trail $(tofu -chdir="${OBSERVABILITY_DIR}" output -raw cloudtrail_name 2>/dev/null || true) -> S3 bucket $(tofu -chdir="${OBSERVABILITY_DIR}" output -raw cloudtrail_bucket 2>/dev/null || true) (private, encrypted, log-file validation on)."
+    log "NOTE: a second CloudTrail trail in an account that already has one (or an organization trail) is billed; check that you need it."
+  fi
   log "CloudWatch: Container Insights on, container logs in /aws/containerinsights/${CLUSTER_NAME}/application, alarms -> ${topic}."
   if [[ -n "${emails}" ]]; then
     log "MANUAL STEP: each alarm address (${emails}) gets an 'AWS Notification - Subscription Confirmation' mail; alarms reach it only after the link in it is clicked."
