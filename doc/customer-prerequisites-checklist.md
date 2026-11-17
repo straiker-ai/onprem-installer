@@ -87,10 +87,10 @@ The models need 10 GPU servers (5 models x 2 replicas). Customers run **2 x `p4d
 | # | Item | Notes | Who |
 |---|---|---|---|
 | 4.1 | Domain with a **public Route 53 hosted zone in this same account**, and `--domain` equal to that zone's name | Fully automatic: certificates, validation records and every DNS name | Customer |
-| 4.2 | If DNS is elsewhere (Cloudflare, corporate DNS, Route 53 in another account) | **Manual**: someone adds the records. The installer prints the certificate validation record early (add it while the rest installs) and later the CNAMEs to the load balancer. They are also saved in `~/.straiker/gateway-dns-handoff-<cluster>.md` for the DNS admin. Supply an ISSUED ACM certificate for the three console names with `--certificate-arn` | Customer |
+| 4.2 | If DNS is elsewhere (Cloudflare, corporate DNS, Route 53 in another account) | **Manual**: someone adds the records. The installer prints the certificate validation record early (add it while the rest installs) and later the CNAMEs to the load balancer. Supply an ISSUED ACM certificate for the three console names with `--certificate-arn` | Customer |
 | 4.3 | Own certificate for the API | `--gateway-cert-arn` (ISSUED, same region) | Customer |
 | 4.4 | SES sending domain: the DNS records the installer prints (DKIM, mail-from) are added if the zone is not in this account | Needed before Cognito email works | Customer |
-| 4.5 | Sign-in provider: redirect URI `https://<prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse` registered, OAuth consent screen set (Google: Internal for a Workspace-only audience), scopes `openid email profile` | The installer writes a hand-off sheet with the exact values: `~/.straiker/sso-handoff-<cluster>.md` | Customer |
+| 4.5 | Sign-in provider: redirect URI `https://<prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse` registered, OAuth consent screen set (Google: Internal for a Workspace-only audience), scopes `openid email profile` | The installer prints the exact values to register | Customer |
 
 ---
 
@@ -108,7 +108,7 @@ Your network team opens these doors in the firewall, proxy or AWS NAT gateway (t
 | 5.4 | **Private-only cluster API** (only with `--private-api-endpoint`) | The cluster's management address is hidden inside your network, so the installer's computer needs a route in | VPN, Direct Connect or Transit Gateway to the VPC, and a rule allowing 443 from that computer | `kubectl get nodes` lists the nodes |
 | 5.5 | **No address clash** | The new network uses `10.0.0.0/16`. An overlap with your company ranges breaks traffic and cannot be fixed later | Compare with your ranges; tell us a free range if it clashes | Network team confirms no overlap |
 | 5.6 | **Own VPC: a way out** (only with `--vpc-id`) | In this mode we create no NAT or internet route. Without one, servers cannot fetch software and fail about an hour in | Each private subnet routes `0.0.0.0/0` to a NAT or your firewall, with free addresses | Route is `active`; 200 or more free addresses |
-| 5.7 | **Users can reach the product** | Staff open `straiker.<domain>`, apps call `api.<domain>`. Wrong allowed ranges or a firewall make "the site does not load" | Office and server ranges are in `--internal-lb-source-ranges` (website) and `--gateway-allowed-cidrs` (API); outbound 443 to the 4 names | 4 lines `OK` (a login page or auth error is normal) |
+| 5.7 | **Users can reach the product** | Staff open `straiker.<domain>`. Wrong allowed ranges or a firewall make "the site does not load" | Office ranges are in `--internal-lb-source-ranges`; outbound 443 to that name | 1 line `OK` (a login page or auth error is normal) |
 | 5.8 | **Own LLM keys** (only if not using Bedrock) | Prompts and answers go to the provider's public service | Outbound 443 to `api.openai.com`, `api.x.ai`, `api.anthropic.com` (only those you use) | Not `000` |
 
 **Where to run the checks:** from a machine behind the **same firewall or proxy as the cluster**: best a small temporary EC2 test server in
@@ -155,8 +155,8 @@ aws ec2 describe-route-tables --region $R --filters Name=association.subnet-id,V
   --query 'RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`]' --output json
 aws ec2 describe-subnets --region $R --subnet-ids <subnet-id> --query 'Subnets[].[SubnetId,CidrBlock,AvailableIpAddressCount]' --output table
 
-# 5.7 Users can reach the product (run from a user's computer and an application server, after the install)
-chk straiker.$D straiker-defend.$D straiker-ascend.$D api.$D
+# 5.7 Users can reach the product (run from a user's computer, after the install)
+chk straiker.$D
 
 # 5.8 Own LLM keys only
 chk api.openai.com api.x.ai api.anthropic.com
