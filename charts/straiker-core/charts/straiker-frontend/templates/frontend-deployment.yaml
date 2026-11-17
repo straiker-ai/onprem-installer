@@ -63,6 +63,11 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.frontend.service.targetPort | quote }}
+            # The image sets NODE_DEPLOY only in its build stage, but the server reads it at runtime: without it the
+            # AWS clients ask for a Vercel OIDC token (user invite fails with "x-vercel-oidc-token header is missing")
+            # instead of the pod's own role (EKS Pod Identity).
+            - name: NODE_DEPLOY
+              value: "true"
             # On-prem mode is baked into the image (see docker-compose's
             # PUBLIC_ENV: onprem) — not a runtime toggle.
             - name: PUBLIC_ENV
