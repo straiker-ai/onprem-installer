@@ -16,7 +16,7 @@ Legend: **[Customer]** you do it, **[Straiker]** we do it, **[Both]** agree on i
 | 1.2 | Cluster name | Lowercase, starts with a letter, at most 24 characters (example `acme-prod`) | Customer |
 | 1.3 | Resource prefix (`--tf-prefix`) | IAM role names are account-wide. A second install in the same account needs a different prefix | Both |
 | 1.4 | Customer name for Straiker | The tenant name we create on our side (`--customer-name`) | Straiker |
-| 1.5 | Base domain, and where its DNS lives | `acme.com`. The console is `straiker.`, `straiker-defend.`, `straiker-ascend.<domain>`; the API is `api.<domain>`. See section 4 | Customer |
+| 1.5 | Base domain, and where its DNS lives | `acme.com`. The console URL will be `straiker.<domain>`. See section 4 | Customer |
 | 1.6 | Who may reach the product | Allowed IP ranges for the console (`--internal-lb-source-ranges`) and for the API (`--gateway-allowed-cidrs`). The installer warns when the API is public with no ranges | Customer |
 | 1.7 | Own VPC or a new one | New VPC (default, `10.0.0.0/16`), or give: VPC ID, private and public subnet IDs. Own-VPC private subnets must already have outbound internet (NAT/IGW) | Customer |
 | 1.8 | Products | Ascend, Defend, or both. Defend engine `v3` is needed for the console's Controls page | Both |
