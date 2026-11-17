@@ -103,7 +103,7 @@ Use **OpenID Connect (OIDC)**: Cognito's built-in OIDC provider talks to PingOne
 |---|---|---|---|
 | a | **Environment ID** and **region** (the issuer URL) | Environments > your environment > Settings > Environment Properties. Or the application's *Configuration* tab, field *OIDC Discovery Endpoint*, minus the ending | Issuer `https://auth.pingone.com/<environment-id>/as`. Other regions use another ending: `.eu`, `.asia`, `.ca`, `.com.au`, `.sg` instead of `.com` |
 | b | **Client ID** | Applications > the Straiker app > *Overview* | A UUID |
-| c | **Client secret** | Same page (*Configuration* tab). **Not by email or chat**: password manager or the installer's hidden prompt (`SSO_CLIENT_SECRET`) | |
+| c | **Client secret** | Same page (*Configuration* tab). **Keep it handy: we might need it during the deployment** (the installer asks for it at a hidden prompt, or reads `SSO_CLIENT_SECRET`). Do not send it by email or chat | |
 | d | **Email domain(s)** allowed to sign in | Your company's mail domains | `acme.com` (becomes `--sso-domains`) |
 | e | A short **provider name** | You choose: 3-32 letters, digits and hyphens | `pingone` (becomes `--sso-name`) |
 | f | Custom domain, if the issuer is not `auth.pingone.com` | Only if you use a PingOne custom domain | The issuer must be reachable from the internet |
