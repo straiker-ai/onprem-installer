@@ -103,6 +103,13 @@ resource "aws_iam_role_policy" "bifrost_bedrock_invoke" {
         # not resource-scopable, so a separate statement with Resource "*".
         Action   = ["bedrock:ListFoundationModels"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        # The same self-check also lists the models of Bedrock's OpenAI-compatible endpoint (Mantle); without this the log fills
+        # with "bedrock-mantle:ListModels ... access_denied" warnings. List only: it grants no invocation.
+        Action   = ["bedrock-mantle:ListModels"]
+        Resource = "*"
       }
     ]
   })

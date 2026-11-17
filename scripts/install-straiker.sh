@@ -3759,6 +3759,13 @@ phase_artifacts_sync() {
 # mirror is untouched. Re-applied on every artifacts-sync pass, because re-running
 # the mirror Job copies the single-arch image back over it. Needs `crane` locally.
 ensure_multiarch_images() {
+  # Not set at all (a direct run, not through install-data-layer.sh): default to the Bifrost fix, which every Graviton install needs.
+  # Set but empty (--multiarch-override none) stays off.
+  if [[ -z "${MULTIARCH_OVERRIDES+x}" ]]; then
+    local bifrost_tag
+    bifrost_tag="$(awk '/onprem-base\/maximhq\/bifrost/{f=1;next} f&&/tag:/{print $2; exit}' "${REPO_ROOT}/charts/straiker-artifact/values.yaml" 2>/dev/null || true)"
+    [[ -n "${bifrost_tag}" ]] && MULTIARCH_OVERRIDES="maximhq/bifrost:${bifrost_tag}=docker.io/maximhq/bifrost:${bifrost_tag}"
+  fi
   [[ -n "${MULTIARCH_OVERRIDES:-}" ]] || return 0
   if ! command -v crane >/dev/null 2>&1; then
     log "WARN  MULTIARCH_OVERRIDES is set but 'crane' is not installed (brew install crane); skipping the multi-arch fix."
@@ -6510,6 +6517,8 @@ phase_straiker_core() {
   # from the parent release needs the "<subchart-name>." prefix (unlike
   # global.* above); a bare "frontend.internalApiKey...=" would silently
   # create an unused top-level key instead.
+  # Always: a mirrored image that is replaced under the same tag (the multi-arch fix) must be re-pulled, not served from a node's cache.
+  cmd+=(--set "straiker-bifrost.image.pullPolicy=Always")
   # HA: the console autoscales from 2 (needs the metrics API), the LLM gateway runs 2.
   if production_sizing; then
     cmd+=(--set "straiker-frontend.frontend.hpa.enabled=true" --set "straiker-frontend.frontend.hpa.minReplicas=2"

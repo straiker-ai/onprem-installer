@@ -44,8 +44,8 @@ module "eks" {
       # fail with "failed to assign an IP address to container". Keep only a few spare IPs per node instead.
       configuration_values = jsonencode({
         env = {
-          WARM_IP_TARGET    = "2"
-          MINIMUM_IP_TARGET = "8"
+          WARM_IP_TARGET    = tostring(local.cni_warm_ip_target)
+          MINIMUM_IP_TARGET = tostring(local.cni_minimum_ip_target)
         }
       })
     }

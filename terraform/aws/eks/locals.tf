@@ -41,6 +41,11 @@ locals {
   # needed on the chart side. karpenter_azs is that AZ list.
   karpenter_azs = var.provision_strategy == "min" ? [local.azs[0]] : local.azs
 
+  # Spare IPs each node keeps (VPC CNI). "min" runs every node in ONE private /24 (251 IPs): with many nodes (GPU, ClickHouse) 8 spare
+  # each exhausted the subnet ("failed to assign an IP address to container"), so keep fewer there; ha/max spread nodes over zones.
+  cni_warm_ip_target    = var.provision_strategy == "min" ? 1 : 2
+  cni_minimum_ip_target = var.provision_strategy == "min" ? 3 : 8
+
   # local.private_subnet_ids is real subnet IDs (module.vpc's output, or the
   # customer-supplied ones in BYO mode), not the CIDR list above -- needed
   # directly (not via a tag) since eks_managed_node_groups takes real
