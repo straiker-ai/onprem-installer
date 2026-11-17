@@ -3436,7 +3436,11 @@ EOF
   tofu_init "${DATA_DIR}" -upgrade -input=false -migrate-state -force-copy
   local cog_slr cog_role_exists=false cog_in_state=false
   aws iam get-role --role-name AWSServiceRoleForAmazonCognitoIdpEmailService >/dev/null 2>&1 && cog_role_exists=true
-  tofu -chdir="${DATA_DIR}" state list 2>/dev/null | grep -q '^aws_iam_service_linked_role\.cognito_email' && cog_in_state=true
+  # Read the list into a variable: "tofu state list | grep -q" lets grep exit early, tofu dies of SIGPIPE, and under pipefail
+  # the whole test reads as "not in state" (Terraform then plans to destroy a role it owns).
+  local cog_state_list
+  cog_state_list="$(tofu -chdir="${DATA_DIR}" state list 2>/dev/null || true)"
+  [[ "${cog_state_list}" == *"aws_iam_service_linked_role.cognito_email"* ]] && cog_in_state=true
   if [[ "${cog_role_exists}" == true && "${cog_in_state}" != true ]]; then cog_slr=false; else cog_slr=true; fi
   set_metadata "cognito_create_email_slr" "${cog_slr}"
 
