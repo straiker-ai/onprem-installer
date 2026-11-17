@@ -141,8 +141,8 @@ the shell already has, so the customer must give the AWS CLI working credentials
   (`GPU_WAIT_HOURS`), and Karpenter tries every instance type listed in `--gpu-instance-type`. It stops early only for errors that
   waiting cannot fix (quota, permissions, bad image or subnet). `--skip-capacity-probe` turns off the zone probe below.
   Before the cluster is built, a zone probe does the same in a temporary VPC (one subnet per zone that offers the GPU type; also needs
-  `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity, and stops
-  before building anything when no zone has. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
+  `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc`), builds the cluster with the first zone that has capacity. When no zone has any it warns and
+  continues. It is skipped with `--availability-zones`, `--vpc-id` or a reservation.
 - **High availability:** the default `--provision-strategy min` is a single-zone proof of concept. With `ha` (2 zones) or `max`
   (3 zones) the installer runs 2 replicas of the platform services (foundation, grid, portico, registry, api-gateway), defend, edge
   and the ascend control plane, spreads them over zones (soft rule, so a zone without capacity cannot leave a pod Pending), and adds
