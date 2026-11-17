@@ -3431,6 +3431,9 @@ EOF
   # Cognito needs its service-linked role (email.cognito-idp.amazonaws.com) to send through SES. Create it only when the
   # account has none; when it exists, keep creating it only if THIS install's Terraform state owns it (otherwise a later
   # "exists" would make Terraform destroy a role it created, and an unowned one would fail with "has been taken").
+  # Init first: the state is read below, and the backend config was just rewritten (an uninitialised read fails
+  # silently, looks like "not owned", and makes Terraform try to destroy the role).
+  tofu_init "${DATA_DIR}" -upgrade -input=false -migrate-state -force-copy
   local cog_slr cog_role_exists=false cog_in_state=false
   aws iam get-role --role-name AWSServiceRoleForAmazonCognitoIdpEmailService >/dev/null 2>&1 && cog_role_exists=true
   tofu -chdir="${DATA_DIR}" state list 2>/dev/null | grep -q '^aws_iam_service_linked_role\.cognito_email' && cog_in_state=true
@@ -3452,7 +3455,6 @@ EOF
       -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
   }
 
-  tofu_init "${DATA_DIR}" -upgrade -input=false -migrate-state -force-copy
   local use_ses=false
   ses_identity_verified && use_ses=true
   data_apply "${use_ses}"
