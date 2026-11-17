@@ -62,6 +62,14 @@ module "eks" {
     eks-pod-identity-agent = {
       most_recent = true
     }
+    # The metrics API (kubectl top, and every HPA: without it an HPA never changes a replica count). It runs on the
+    # tainted system node, so it tolerates CriticalAddonsOnly like the other add-ons.
+    metrics-server = {
+      most_recent = true
+      configuration_values = jsonencode({
+        tolerations = [{ key = "CriticalAddonsOnly", operator = "Exists" }]
+      })
+    }
   }
 
   # Minimal node group exclusively for system workloads (Karpenter + addons).

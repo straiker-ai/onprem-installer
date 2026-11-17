@@ -5765,6 +5765,23 @@ phase_verify_data_layer() {
     fail_count=$((fail_count + 1))
   fi
 
+  # 1b. Metrics API (metrics-server): every HPA needs it to see CPU/memory; without it replicas never change.
+  local metrics_ok=false metrics_try
+  for metrics_try in 1 2 3 4 5 6; do
+    if [[ "$(kubectl get apiservice v1beta1.metrics.k8s.io -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true)" == "True" ]] \
+      && kubectl top nodes >/dev/null 2>&1; then
+      metrics_ok=true
+      break
+    fi
+    sleep 20
+  done
+  if [[ "${metrics_ok}" == true ]]; then
+    log "PASS  Metrics API (metrics-server) answers: HPAs can read CPU and memory."
+  else
+    log "FAIL  The metrics API (v1beta1.metrics.k8s.io) is not available, so HPAs cannot scale. Re-run phase eks-cluster (it installs the metrics-server EKS add-on) or install metrics-server."
+    fail_count=$((fail_count + 1))
+  fi
+
   # 2. ElastiCache accepts TLS (rediss://). Serverless caches are TLS-only.
   kubectl delete pod verify-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   result="$(kubectl run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
