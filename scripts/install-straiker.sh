@@ -7650,7 +7650,18 @@ phase_straiker_inference() {
 
       local logfile
       logfile="$(mktemp)"
-      ( "${cmd[@]}" ) >"${logfile}" 2>&1 &
+      # A Deployment that was marked Failed by an earlier run keeps that condition until its controller re-evaluates it, so helm can
+      # report "Progress deadline exceeded" at once on a re-run even though the new (long) deadline is in place. Retry a few times.
+      (
+        for _attempt in 1 2 3 4; do
+          _out="$("${cmd[@]}" 2>&1)" && _rc=0 || _rc=$?
+          printf '%s\n' "${_out}"
+          [[ ${_rc} -eq 0 ]] && exit 0
+          [[ "${_out}" == *"Progress deadline exceeded"* ]] || exit "${_rc}"
+          sleep 30
+        done
+        exit 1
+      ) >"${logfile}" 2>&1 &
       batch_models+=("${model}")
       batch_pids+=("$!")
       batch_logs+=("${logfile}")
