@@ -22,7 +22,7 @@ Legend: **[Customer]** you do it, **[Straiker]** we do it, **[Both]** agree on i
 | 1.8 | Products | Ascend, Defend, or both. Defend engine `v3` is needed for the console's Controls page | Both |
 | 1.9 | Admin email | First console administrator (a Cognito user is created) | Customer |
 | 1.10 | Alarm email(s) | Receive CloudWatch alarms. Each address must click AWS's "Subscription Confirmation" link (manual) | Customer |
-| 1.11 | Sign-in method | Google, Facebook, Amazon, Apple, OIDC or SAML: provider, client ID, **client secret**, allowed email domains. The redirect URI we print must be registered with the provider first | Customer |
+| 1.11 | Sign-in method | Google, Facebook, Amazon, Apple, OIDC or SAML: provider, client ID, **client secret**, allowed email domains. The redirect URI we print must be registered with the provider first. **PingOne: use OIDC and see section 4.6** | Customer |
 | 1.12 | Email sending (SES) | Either a sending domain whose DNS you control, or your own verified SES identity ARN plus From address | Customer |
 | 1.13 | Bedrock inference profile | `regional` (stays in the geography, recommended for data residency) or `global` | Customer |
 | 1.14 | Production grade (high availability)? | **Yes**: `ha` (2 zones) or `max` (3 zones): replicas spread over zones, survives the loss of one zone, needs GPU capacity in each zone. **No** (trial or test): `min`, one zone, cheaper, a zone outage stops the product. Chosen on the first run, cannot be changed later | Customer |
@@ -91,6 +91,45 @@ The models need 10 GPU servers (5 models x 2 replicas). Customers run **2 x `p4d
 | 4.3 | Own certificate for the API | `--gateway-cert-arn` (ISSUED, same region) | Customer |
 | 4.4 | SES sending domain: the DNS records the installer prints (DKIM, mail-from) are added if the zone is not in this account | Needed before Cognito email works | Customer |
 | 4.5 | Sign-in provider: redirect URI `https://<prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse` registered, OAuth consent screen set (Google: Internal for a Workspace-only audience), scopes `openid email profile` | The installer prints the exact values to register | Customer |
+| 4.6 | **PingOne single sign-on** (the customer's sign-in provider) | Details in the next section | Both |
+
+### 4.6 PingOne sign-in: what we need and what to set up
+
+Use **OpenID Connect (OIDC)**: Cognito's built-in OIDC provider talks to PingOne directly, and we only need the issuer, client ID and client secret from you, plus a few details. SAML also works but needs a public metadata URL and more attribute mapping, so choose it only if your policy requires SAML.
+
+**What to send us** (Customer to Straiker)
+
+| # | Item | Where to find it in PingOne | Example |
+|---|---|---|---|
+| a | **Environment ID** and **region** (the issuer URL) | Environments > your environment > Settings > Environment Properties. Or the application's *Configuration* tab, field *OIDC Discovery Endpoint*, minus the ending | Issuer `https://auth.pingone.com/<environment-id>/as`. Other regions use another ending: `.eu`, `.asia`, `.ca`, `.com.au`, `.sg` instead of `.com` |
+| b | **Client ID** | Applications > the Straiker app > *Overview* | A UUID |
+| c | **Client secret** | Same page (*Configuration* tab). **Not by email or chat**: password manager or the installer's hidden prompt (`SSO_CLIENT_SECRET`) | |
+| d | **Email domain(s)** allowed to sign in | Your company's mail domains | `acme.com` (becomes `--sso-domains`) |
+| e | A short **provider name** | You choose: 3-32 letters, digits and hyphens | `pingone` (becomes `--sso-name`) |
+| f | Custom domain, if the issuer is not `auth.pingone.com` | Only if you use a PingOne custom domain | The issuer must be reachable from the internet |
+
+**What you set up in PingOne** (Customer; we give you the redirect URI once the install has created the sign-in pool, or earlier if we agree the prefix in 1.3)
+
+- **Step 1.** Applications > Applications > **+** > **Web App** > **OIDC** (a *confidential* client with a client secret).
+- **Step 2.** On *Configuration*: **Response type** `Code`, **Grant type** `Authorization Code`, **Token endpoint auth method** `Client Secret Basic` (if sign-in later fails with `invalid_client`, switch to `Client Secret Post`).
+- **Step 3.** **Redirect URI** `https://<prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse`. It must match exactly. No sign-out URL is needed.
+- **Step 4.** **Scopes** `openid`, `email`, `profile`. Users' **email address must be filled in** and returned in the ID token as `email` (PingOne default). If your policy returns it under another claim, tell us the claim name (`--sso-email-claim`).
+- **Step 5.** **Access**: choose which populations or groups may use the application. Anyone who is not allowed gets a PingOne error, not a Straiker one.
+- **Step 6.** **Turn the application on** (the toggle at the top right of the application page is off by default).
+- **Step 7.** Check from any computer that the issuer answers: `curl -s https://auth.pingone.com/<environment-id>/as/.well-known/openid-configuration` returns JSON (`issuer`, `authorization_endpoint`, `token_endpoint`). Cognito reads this from the internet, so a PingOne network or IP allow-list must not block AWS.
+
+**How sign-in behaves.** Users open `https://straiker.<domain>`, choose **Sign in with SSO**, authenticate at PingOne (including your MFA policy), and return signed in. A user whose email domain is in `--sso-domains` is created on the first sign-in with the read-only **viewer** role; an administrator raises roles in the console. The first administrator (1.9) still gets a Cognito user so that someone can sign in before SSO is tested. One identity provider per install; changing it later needs `--allow-sso-change` and orphans users who signed in through the old one.
+
+**Flags the installer takes** (the secret is never a flag):
+
+```bash
+--sso-type oidc --sso-name pingone \
+--sso-oidc-issuer https://auth.pingone.com/<environment-id>/as \
+--sso-client-id <client-id> --sso-domains acme.com
+# optional: --sso-email-claim <claim>     secret: export SSO_CLIENT_SECRET=... or the hidden prompt
+```
+
+**If you choose SAML instead:** create a **SAML** application in PingOne, set **ACS URL** to the value the installer prints (`https://<prefix>.auth.<region>.amazoncognito.com/saml2/idpresponse`), **Entity ID** to the one it prints (`urn:amazon:cognito:sp:<user-pool-id>`), **SAML subject** to the user's email (Name ID format `emailAddress`), send the email as an attribute, sign the assertion, and send us the **metadata URL** (public) or the metadata XML file (`--sso-saml-metadata-url` / `--sso-saml-metadata-file`). No client secret is needed.
 
 ---
 
@@ -196,7 +235,7 @@ All of these should be answered "yes" before pressing Enter:
 - [ ] Bedrock answers in the playground for the two Claude models (and the gpt-5.6 pair for Defend v3); no policy or SCP denies `bedrock:InvokeModel`
 - [ ] SES production access is on, or the sandbox is accepted for the first day (verified recipients only)
 - [ ] The Route 53 zone is in this account, or the DNS admin is on call for the two records
-- [ ] The sign-in redirect URI is registered at the identity provider
+- [ ] The sign-in redirect URI is registered at the identity provider (PingOne: application is on, email scope returned, populations assigned, issuer URL answers, section 4.6)
 - [ ] Every check in section 5 passed (5.1 the us-east-1 addresses, 5.2 the installer's computer, 5.3 in-region AWS services, 5.4-5.6 as they apply)
 - [ ] The customer key is at hand, and the workstation will not sleep
 - [ ] Everyone knows a pause ("blocked") is not a failure: fix the named item and run the same command again
@@ -219,7 +258,7 @@ All of these should be answered "yes" before pressing Enter:
 | 1.8 Products | `--products ascend,defend` (default both) and `--defend-engine v3` (default) |
 | 1.9 Admin email | `--installer-arg --admin-email --installer-arg <admin@customer.com>` |
 | 1.10 Alarm email(s) | `--alarm-email <ops@customer.com>` (repeat per address) |
-| 1.11 Sign-in method | `--sso-type <google\|facebook\|amazon\|apple\|saml\|oidc>`, `--sso-client-id <id>`, `--sso-domains <customer.com>`; `saml`/`oidc` also `--sso-name`, `--sso-saml-metadata-url` or `--sso-oidc-issuer`. The client secret is **not** a flag: set `SSO_CLIENT_SECRET` or type it at the hidden prompt |
+| 1.11 Sign-in method | `--sso-type <google\|facebook\|amazon\|apple\|saml\|oidc>`, `--sso-client-id <id>`, `--sso-domains <customer.com>`; `saml`/`oidc` also `--sso-name`, `--sso-saml-metadata-url` or `--sso-oidc-issuer` (PingOne: `--sso-type oidc --sso-name pingone --sso-oidc-issuer https://auth.pingone.com/<environment-id>/as`, section 4.6). The client secret is **not** a flag: set `SSO_CLIENT_SECRET` or type it at the hidden prompt |
 | 1.12 Email sending | `--ses-domain <customer.com>`, **or** `--ses-identity-arn <arn> --ses-from <address>` |
 | 1.13 Bedrock profile | No flag: the installer asks once on the first run (`regional` or `global`) |
 | 1.14 Production grade | `--provision-strategy <min\|ha\|max>` (default `min`; use `ha` or `max` for production) |
