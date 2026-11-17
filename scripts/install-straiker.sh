@@ -6752,6 +6752,8 @@ gpu_instance_spec() {
     g6e.xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=4 GPU_SPEC_MEM_GIB=32 ;;
     g6e.2xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=8 GPU_SPEC_MEM_GIB=64 ;;
     g6e.4xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=16 GPU_SPEC_MEM_GIB=128 ;; # one L40S per node: 10 nodes for the fleet, far easier to get than a 12xlarge
+    g6e.8xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=32 GPU_SPEC_MEM_GIB=256 ;;
+    g6e.16xlarge) GPU_SPEC_GPUS=1 GPU_SPEC_VCPUS=64 GPU_SPEC_MEM_GIB=512 ;;
     g6e.12xlarge) GPU_SPEC_GPUS=4 GPU_SPEC_VCPUS=48 GPU_SPEC_MEM_GIB=384 ;;
     g6e.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 GPU_SPEC_MEM_GIB=1536 ;;
     g5.48xlarge | g6.48xlarge) GPU_SPEC_GPUS=8 GPU_SPEC_VCPUS=192 GPU_SPEC_MEM_GIB=768 ;;
@@ -6845,7 +6847,7 @@ remember_inference_settings() {
     return 1
   fi
   if [[ "${fleet}" == "p4d" ]] && ! gpu_instance_spec "${itype}"; then
-    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.xlarge, g6e.2xlarge, g6e.4xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
+    echo "ERROR: --gpu-instance-type '${itype}' is not a known packed-fleet type (p4d.24xlarge, p4de.24xlarge, p5.48xlarge, g6e.xlarge, g6e.2xlarge, g6e.4xlarge, g6e.8xlarge, g6e.16xlarge, g6e.12xlarge, g6e.48xlarge, g5.48xlarge, g6.48xlarge)." >&2
     return 1
   fi
   if [[ "${fleet}" == "p4d" && "${itypes}" == *,* ]]; then
