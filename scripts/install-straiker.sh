@@ -8793,8 +8793,7 @@ show_access_info() {
     log ""
     log "Straiker is installed. Edge type is 'alb' — reachable at:"
     log "  Frontend : https://$(custom_domain_hostname straiker)/"
-    log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
-    log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    log "  (Defend and Ascend are used from the console above; their own hostnames are backend endpoints, not web pages.)"
     log ""
     if [[ "$(get_metadata "alb_route53_automation")" == "true" ]]; then
       log "Certificate is real and DNS-validated — no browser trust warning."
@@ -8825,10 +8824,9 @@ show_access_info() {
     log ""
     log "Straiker is installed. Edge type is 'xalb' — reachable at:"
     log "  Frontend : https://$(custom_domain_hostname straiker)/"
-    log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
-    log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    log "  (Defend and Ascend are used from the console above; their own hostnames are backend endpoints, not web pages.)"
     if gateway_via_alb; then
-      log "  API      : https://$(get_metadata "gateway_domain")/  (api-gateway: SDKs, agents, Detect API; same ALB)"
+      log "  API      : https://$(get_metadata "gateway_domain")/  (api-gateway for SDKs, agents and the Detect API; answers 401 without API credentials; same ALB)"
     fi
     log "AWS WAF  : $(get_metadata "waf_web_acl_arn")"
     log "           request logs in CloudWatch Logs group $(get_metadata "waf_log_group")"
@@ -8852,8 +8850,7 @@ show_access_info() {
     log "one-time Tailscale-side setup in examples/edge/tailscale.md (custom DNS"
     log "records pointing your hostnames at the IP below), reachable at:"
     log "  Frontend : https://$(custom_domain_hostname straiker)/"
-    log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
-    log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
+    log "  (Defend and Ascend are used from the console above; their own hostnames are backend endpoints, not web pages.)"
     log ""
     log "Certificate is real (Let's Encrypt via cert-manager/Route53 DNS-01) — no"
     log "browser trust warning, once the certificate has finished issuing"
