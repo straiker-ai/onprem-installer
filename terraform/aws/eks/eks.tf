@@ -94,6 +94,19 @@ module "eks" {
     }
   }
 
+  # The EKS metrics-server add-on serves on 10251 (not 10250/443), which the module's recommended node rules do not open: without
+  # this the API server cannot reach it and the metrics API stays "FailedDiscoveryCheck" (HPAs show <unknown>).
+  node_security_group_additional_rules = {
+    ingress_cluster_metrics_server = {
+      description                   = "Cluster API to metrics-server"
+      protocol                      = "tcp"
+      from_port                     = 10251
+      to_port                       = 10251
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
+  }
+
   node_security_group_tags = {
     "karpenter.sh/discovery" = var.cluster_name
   }
