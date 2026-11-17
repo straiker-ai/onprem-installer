@@ -25,6 +25,7 @@ Legend: **[Customer]** you do it, **[Straiker]** we do it, **[Both]** agree on i
 | 1.11 | Sign-in method | Google, Facebook, Amazon, Apple, OIDC or SAML: provider, client ID, **client secret**, allowed email domains. The redirect URI we print must be registered with the provider first | Customer |
 | 1.12 | Email sending (SES) | Either a sending domain whose DNS you control, or your own verified SES identity ARN plus From address | Customer |
 | 1.13 | Bedrock inference profile | `regional` (stays in the geography, recommended for data residency) or `global` | Customer |
+| 1.14 | Production grade (high availability)? | **Yes**: `ha` (2 zones) or `max` (3 zones): replicas spread over zones, survives the loss of one zone, needs GPU capacity in each zone. **No** (trial or test): `min`, one zone, cheaper, a zone outage stops the product. Chosen on the first run, cannot be changed later | Customer |
 
 Never send secrets by email or chat: the client secret, the AWS keys and the Straiker customer key go through a password manager or
 the installer's hidden prompt.
@@ -198,6 +199,7 @@ All of these should be answered "yes" before pressing Enter:
 | 1.11 Sign-in method | `--sso-type <google\|facebook\|amazon\|apple\|saml\|oidc>`, `--sso-client-id <id>`, `--sso-domains <customer.com>`; `saml`/`oidc` also `--sso-name`, `--sso-saml-metadata-url` or `--sso-oidc-issuer`. The client secret is **not** a flag: set `SSO_CLIENT_SECRET` or type it at the hidden prompt |
 | 1.12 Email sending | `--ses-domain <customer.com>`, **or** `--ses-identity-arn <arn> --ses-from <address>` |
 | 1.13 Bedrock profile | No flag: the installer asks once on the first run (`regional` or `global`) |
+| 1.14 Production grade | `--provision-strategy <min\|ha\|max>` (default `min`; use `ha` or `max` for production) |
 | Section 3 GPU capacity | `--gpu-fleet p4d` (default for customers) and `--gpu-capacity-reservation cr-...` |
 
 Sample (illustrative values only):

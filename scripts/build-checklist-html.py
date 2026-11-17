@@ -171,7 +171,7 @@ ul.boxes li.done span{opacity:.55;text-decoration:line-through}
 footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--secondary-foreground);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 @page{size:Letter landscape;margin:12mm;background:#050505}
 @media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}html{background:var(--background)}
-body::before,.actions,.progress,.copy{display:none!important}.wrap{padding:0;max-width:none}section{break-inside:auto}.code,tr,.callout,ul.boxes li{break-inside:avoid}.card{break-inside:auto}
+body::before,.actions,.progress,.copy{display:none!important}.wrap{padding:0;max-width:none}section{break-inside:auto}tr,.callout,ul.boxes li{break-inside:avoid}.code{break-inside:auto}.card{break-inside:auto}
 .h2{break-after:avoid}input[type=text]{border:0;border-bottom:1px solid var(--secondary-foreground);background:transparent}.tt{font-size:11.5px}.code pre{white-space:pre-wrap;word-break:break-all}}
 @media(max-width:700px){.h1{font-size:30px}.wrap{padding:0 14px 64px}}
 """
