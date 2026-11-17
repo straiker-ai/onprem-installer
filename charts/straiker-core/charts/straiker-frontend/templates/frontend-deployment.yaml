@@ -68,6 +68,15 @@ spec:
             # instead of the pod's own role (EKS Pod Identity).
             - name: NODE_DEPLOY
               value: "true"
+            {{- if .Values.frontend.cognito.userPoolId }}
+            # Console user management (invite, SSO providers) calls Cognito admin APIs on this pool.
+            - name: COGNITO_USER_POOL_ID
+              value: {{ .Values.frontend.cognito.userPoolId | quote }}
+            - name: COGNITO_CLIENT_ID
+              value: {{ .Values.frontend.cognito.clientId | quote }}
+            - name: COGNITO_EXTERNAL_PROVIDERS_CLIENT_ID
+              value: {{ .Values.frontend.cognito.clientId | quote }}
+            {{- end }}
             # On-prem mode is baked into the image (see docker-compose's
             # PUBLIC_ENV: onprem) — not a runtime toggle.
             - name: PUBLIC_ENV

@@ -196,6 +196,10 @@ frontend:
   # DEX_OIDC_CLIENT_ID/SECRET identity) stays deployed regardless, since it's
   # also the always-on login fallback if the customer's own IdP breaks (see
   # frontend-deployment.yaml).
+  # Cognito user pool the console manages users in (set by the installer when Cognito is the login).
+  cognito:
+    userPoolId: ""
+    clientId: ""
   oidc:
     enabled: true
     issuer: ""

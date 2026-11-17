@@ -6639,6 +6639,8 @@ phase_straiker_core() {
         --set-string "straiker-frontend.frontend.oidc.clientSecretSecret.name=cognito-oidc"
         --set-string "straiker-frontend.frontend.oidc.displayName=Sign in"
         --set-string "straiker-frontend.frontend.oidc.emailIdp=COGNITO"
+        --set-string "straiker-frontend.frontend.cognito.userPoolId=$(get_metadata "cognito_pool_id")"
+        --set-string "straiker-frontend.frontend.cognito.clientId=$(get_metadata "cognito_client_id")"
         --set-string "straiker-frontend.frontend.bootstrap.adminEmail=${cg_email}"
         --set-string "straiker-frontend.frontend.bootstrap.disablePasswordLogin=true"
       )
