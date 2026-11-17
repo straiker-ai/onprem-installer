@@ -7635,6 +7635,9 @@ phase_straiker_inference() {
           cmd+=(--set-string "resources.requests.cpu=${req_cpu}" --set-string "resources.requests.memory=${req_mem}Gi")
         fi
       fi
+      # A Deployment is marked Failed when its pods get no node within progressDeadlineSeconds (chart default 30 min), which makes
+      # helm --wait fail long before the 6-hour limit. Let it run as long as the install waits.
+      cmd+=(--set "progressDeadlineSeconds=$(( ${GPU_WAIT_HOURS:-6} * 3600 ))")
       ha_enabled && cmd+=(--set-string "zoneSpread=strict") # one replica of each model per zone (needs GPU capacity in both)
       if [[ -n "${CHART_VERSION}" ]]; then
         cmd+=(--version "${CHART_VERSION}")

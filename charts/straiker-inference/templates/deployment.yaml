@@ -72,7 +72,7 @@ spec:
   # cold-start pod (fresh GPU node + multi-GB model sync + vLLM compile) can
   # ever become ready, even though the pod itself goes on to succeed; `helm
   # upgrade --wait` then reports a false failure despite a healthy rollout.
-  progressDeadlineSeconds: 1800
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | default 1800 }}
   {{- if gt (int .Values.replicas) 1 }}
   # GPUs are the scarce resource, so no surge pod: replace one replica at a time, the other keeps serving.
   strategy:
