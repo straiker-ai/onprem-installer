@@ -1645,6 +1645,20 @@ run_phase() {
   fi
 
   CURRENT_PHASE="${phase}"
+
+  # A long teardown can outlive an SSO session: check before each AWS phase, and on a terminal wait for a re-login instead of failing mid-destroy.
+  if [[ "${CLOUD_PROVIDER}" != "gke" && "${phase}" != "preflight" ]] && command -v aws >/dev/null 2>&1; then
+    while ! aws sts get-caller-identity >/dev/null 2>&1; do
+      if [[ -t 0 ]]; then
+        log "AWS credentials expired before '${phase}' (profile '${AWS_PROFILE:-<default>}'). Run: aws sso login --profile ${AWS_PROFILE:-<name>}"
+        read -r -p "Press Enter once logged in (Ctrl-C to stop; re-run resumes here): " _ || break
+      else
+        mark_phase_blocked "AWS credentials expired before '${phase}'. Log in (aws sso login --profile ${AWS_PROFILE:-<name>}) and re-run; it resumes here."
+        return
+      fi
+    done
+  fi
+
   set_phase_status "${phase}" "in_progress"
   log "Phase '${phase}'..."
 
