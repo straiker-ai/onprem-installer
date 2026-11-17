@@ -39,7 +39,7 @@ the installer's hidden prompt.
 | 2.1 | AWS CLI credentials that last 2-3 hours (SSO profile, assumed role or keys). The installer has no login of its own | `aws sts get-caller-identity --profile <p>` prints the right account | Customer |
 | 2.2 | The identity can create: IAM roles and service-linked roles, VPC, EC2, EKS, ECR, S3, Aurora, MSK, OpenSearch, ElastiCache, EFS, DynamoDB, KMS, Secrets Manager, Cognito, SES, WAF, ACM, Route 53, CloudWatch, SNS, SQS, EventBridge | Easiest: AdministratorAccess for the install window. No service control policy (SCP) may block these. Missing IAM-role creation is the most common gap | Customer |
 | 2.3 | Extra permissions the installer uses: `ec2:RunInstances`/`TerminateInstances` (GPU capacity probe), `ec2:CreateVpc`/`CreateSubnet`/`DeleteSubnet`/`DeleteVpc` (zone probe, own-VPC mode does not need them), `bedrock:InvokeModel` (preflight), `servicequotas:GetServiceQuota` | Part of 2.2 if admin | Customer |
-| 2.4 | Bedrock model access granted in the region (console only, once per account): `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`. With Defend v3 also `global.openai.gpt-5.6-sol` and `-terra` | Bedrock console > Model access shows "Access granted". The installer's preflight stops with a clear message if missing | Customer |
+| 2.4 | Bedrock models usable in the region: `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`. With Defend v3 also `global.openai.gpt-5.6-sol` and `-terra`. The old "Model access" page is retired: models switch on automatically at first use. Anthropic may ask first-time accounts for a short use-case form (Bedrock console > Model catalog > open the model in the playground). No IAM policy or Organizations SCP may deny `bedrock:InvokeModel` | Open each model in the Bedrock playground once and get an answer. The installer's preflight makes a real call and stops with a clear message if it fails | Customer |
 | 2.5 | SES production access requested (new accounts are in the sandbox: 200 mails/day, verified recipients only). Cognito sign-up and reset emails need it | `aws sesv2 get-account --query ProductionAccessEnabled` is `true`. Approval takes about a day | Customer |
 | 2.6 | No other install uses the same cluster name or prefix in this account and region | Section 1.2 and 1.3 | Customer |
 
@@ -170,7 +170,7 @@ All of these should be answered "yes" before pressing Enter:
 - [ ] `aws sts get-caller-identity` shows the right account, and the login lasts 3 hours
 - [ ] P-instance quota is 384 vCPUs or more, and `p4d.24xlarge` is offered in the chosen zones
 - [ ] A capacity reservation exists and is `active` (or the customer accepts the capacity probe)
-- [ ] Bedrock model access shows granted for the two Claude models (and the gpt-5.6 pair for Defend v3)
+- [ ] Bedrock answers in the playground for the two Claude models (and the gpt-5.6 pair for Defend v3); no policy or SCP denies `bedrock:InvokeModel`
 - [ ] SES production access is on, or the sandbox is accepted for the first day (verified recipients only)
 - [ ] The Route 53 zone is in this account, or the DNS admin is on call for the two records
 - [ ] The sign-in redirect URI is registered at the identity provider

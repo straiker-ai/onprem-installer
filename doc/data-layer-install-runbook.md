@@ -64,9 +64,10 @@ the shell already has, so the customer must give the AWS CLI working credentials
   and SES resources; check that no service control policy (SCP) blocks them. Missing IAM-role creation is the most common gap.
 
 ### In the AWS account
-- Bedrock model access for `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`
-  (Bedrock console > Model access; **console only, one time per account**). The installer's preflight blocks with a
-  clear message if it is missing.
+- Bedrock usable for `anthropic.claude-haiku-4-5-20251001-v1:0` and `anthropic.claude-sonnet-4-6`. The "Model access" page
+  is retired: models switch on at first use, and Anthropic may ask first-time accounts for a use-case form (open the model
+  once in the Bedrock playground). No IAM policy or SCP may deny `bedrock:InvokeModel`. The installer's preflight makes a
+  real call and blocks with a clear message if it fails.
 - **GPU fleet and its quota, requested before the install** (a new account usually has 0-8 vCPUs, and the models cannot
   start without it). The fleet is 10 model servers (5 models x 2 replicas), one GPU each. Two shapes (`--gpu-fleet`,
   remembered):
@@ -127,7 +128,7 @@ the shell already has, so the customer must give the AWS CLI working credentials
 | Admin email and alarm email | First Cognito admin; CloudWatch alarm topic |
 | SES: sending domain and who controls its DNS, or their own verified identity ARN and From address | New SES accounts are in sandbox (200 mails/day, verified recipients only): request production access early |
 | SSO: provider type, client ID, client secret, allowed email domains | The Cognito redirect URI must be registered with the provider |
-| Bedrock: model access granted in the region; global or regional inference profile | The installer prompts for the profile |
+| Bedrock: models invokable in the region (first-use form done); global or regional inference profile | The installer prompts for the profile |
 | Products (Ascend, Defend) and Defend engine | Defend engine v3 is needed for the console's Controls page |
 | Own VPC or ours | Own VPC: private and public subnet IDs; the private subnets need outbound routing |
 
@@ -326,7 +327,7 @@ Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/stra
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).
-- **Bedrock model access** is console-only.
+- **Bedrock**: the Model access page is retired; a first-time Anthropic use-case form (console) may still be needed.
 - **Private subnet size.** The `min` layout uses one `/24`. The CNI setting keeps it workable, but GPU plus ClickHouse
   nodes leave little headroom; use `ha` (more AZs) or bring your own larger subnets for anything bigger than a test.
 - **Aurora port 3306** matches SaaS. Changing the port of an existing cluster restarts it and every consumer.

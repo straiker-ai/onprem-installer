@@ -6361,7 +6361,7 @@ phase_ai_provider_secrets() {
         fi
       done
       if [[ "${bedrock_preflight_failed}" == true ]]; then
-        mark_phase_blocked "Bedrock preflight failed (see above) — either an AWS Organizations SCP is denying bedrock:InvokeModel for this account, one/both pinned models (anthropic.claude-haiku-4-5-20251001-v1:0, anthropic.claude-sonnet-4-6) haven't been granted access under Bedrock > Model access in the AWS Console for region '${bedrock_region}', or (if inference profile '${bedrock_inference_profile}' isn't 'global') that profile family has no endpoint for one of these models. Fix in AWS (or re-run with --ai-provider-mode bedrock to pick a different profile), then re-run this phase (--phase ai-provider-secrets --rerun-phase)."
+        mark_phase_blocked "Bedrock preflight failed (see above) — either an AWS Organizations SCP is denying bedrock:InvokeModel for this account, one/both pinned models (anthropic.claude-haiku-4-5-20251001-v1:0, anthropic.claude-sonnet-4-6) haven't been enabled yet (open each once in the Bedrock playground; Anthropic may ask first-time accounts for a use-case form) for region '${bedrock_region}', or (if inference profile '${bedrock_inference_profile}' isn't 'global') that profile family has no endpoint for one of these models. Fix in AWS (or re-run with --ai-provider-mode bedrock to pick a different profile), then re-run this phase (--phase ai-provider-secrets --rerun-phase)."
         return
       fi
       log "Bedrock preflight OK: bedrock:InvokeModel confirmed usable for both pinned models via the '${bedrock_inference_profile}' profile in '${bedrock_region}'."
@@ -7471,7 +7471,7 @@ preflight_argus_v3_bedrock() {
     fi
   done
   if [[ ${#failed[@]} -gt 0 ]]; then
-    mark_phase_blocked "Bedrock is not usable for: ${failed[*]} in ${region}. Enable the models under Bedrock > Model access in that account and region (and check any SCP that denies bedrock:InvokeModel), then re-run."
+    mark_phase_blocked "Bedrock is not usable for: ${failed[*]} in ${region}. Open each model once in the Bedrock playground in that account and region (Anthropic may ask first-time accounts for a use-case form) and check any IAM policy or SCP that denies bedrock:InvokeModel, then re-run."
     return 1
   fi
 }
@@ -9686,9 +9686,9 @@ Bedrock mode: the installer will create a dedicated IAM role with
 bedrock:InvokeModel/InvokeModelWithResponseStream and bind it to bifrost's
 ServiceAccount via EKS Pod Identity — no static keys needed.
 
-You'll still need to request access to these two specific models under
-Bedrock > Model access in the AWS Console (per-model, one-time,
-console-only — no CLI equivalent). Ascend is pinned to exactly these two
+The Bedrock "Model access" page is retired: models switch on at first use,
+but first-time Anthropic users may need to submit a use-case form (open the
+model once in the Bedrock playground). Ascend is pinned to exactly these two
 model IDs and won't use any others, so there's no need to enable more:
   - anthropic.claude-haiku-4-5-20251001-v1:0
   - anthropic.claude-sonnet-4-6
