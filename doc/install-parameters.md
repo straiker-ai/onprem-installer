@@ -38,7 +38,7 @@ Environment variables: `STRAIKER_STATE_FILE` (state file per install), `AWS_PROF
 | `--certificate-arn ARN` | Without `--route53`: your ACM certificate (same region) covering the console hosts; the `api.D` certificate is still requested (DNS records are printed) | none |
 | `--edge-type T` | `xalb` (internet-facing ALB + ACM + WAF), `alb` (internal), `internal` (Caddy, offline tests), `none`, `tailscale` | `xalb` |
 | `--products LIST` | Products to install: `ascend`, `defend` | `ascend,defend` |
-| `--defend-engine v3` | Accepted and ignored: Argus v1 was removed, Argus v3 is the only detection engine (needs `--data-layer`); `v1` is refused | `v3` |
+| `--defend-engine v3` | Accepted and ignored: Argus v1 was removed, Argus v3 is the only detection engine (it runs on the AWS data tier); `v1` is refused | `v3` |
 | `--ai-provider-mode M` | `bedrock`, `own-keys`, `trial-key` | `bedrock` |
 | `--provision-strategy S` | `min` (one zone, PoC), `ha` (two zones), `max` (three zones, more headroom). First run only | `min` |
 | `--availability-zones A,B[,C]` | Zones the cluster uses, in order (first = primary, the only node zone under `min`). Fixed once the cluster exists | region's first 2 |
@@ -108,7 +108,7 @@ Environment variables: `STRAIKER_STATE_FILE` (state file per install), `AWS_PROF
 | `--namespace NAME` | Namespace for every Straiker chart (default `straiker`) |
 | `--tf-prefix P` | State bucket and account-wide IAM role prefix (default `s6r-onprem`) |
 | `--install-eks` | Also create the EKS cluster with Terraform |
-| `--data-layer` | Also create the AWS data tier: Aurora, ElastiCache, MSK, EFS, KMS, Secrets Manager (phase `aws-data`) |
+| `--data-layer` | Accepted and does nothing: on AWS the data tier (Aurora, ElastiCache, MSK, EFS, KMS, Secrets Manager; phase `aws-data`) is always created. GKE has none |
 | `--provision-strategy min\|ha\|max` | Footprint: zones, NAT gateways, system nodes (first run only) |
 | `--availability-zones a,b[,c]` | Zones in order; not with `--vpc-id`; fixed once the cluster exists |
 

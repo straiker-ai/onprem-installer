@@ -283,8 +283,10 @@ in it, anything not created by this install. It is irreversible; delete `~/.stra
 
 ## 6. Defend v3 (Argus v3): what it can detect, and Ascend on v3
 
-**Argus v3 is the only Argus engine on-prem; Argus v1 (`straiker-defend`) was removed** (section 6i). It needs `--data-layer` (MSK, ElastiCache,
-Secrets Manager); without the data layer an install has no Defend detection engine. Argus v3 serves only `/api/v3/*` (detect, the Copilot
+**Argus v3 is the only Argus engine on-prem; Argus v1 (`straiker-defend`) was removed** (section 6i). It runs on the AWS data tier (MSK,
+ElastiCache, Secrets Manager), exactly as in Frankfurt (its own ElastiCache `prod-euc1-argus`, MSK `prod-euc1-databridge`, S3 and Secrets Manager
+bundle, read through a Pod Identity role). The data tier is always installed on AWS (`--data-layer` is accepted and does nothing); GKE has none, so
+the Defend product is refused there. Argus v3 serves only `/api/v3/*` (detect, the Copilot
 webhooks, `/api/v3/health`) and the internal controls routes. The gateway sends `/api/v3/detect` and the integration detect paths to
 `argus-service` (Argus v3). `/api/v1/detect` is unavailable (the gateway chart still carries that route, as in the SaaS regions that run v3
 only; clients must use `/api/v3/detect`).
@@ -353,7 +355,7 @@ session-key ExternalSecret and Secret) after it has moved the graders to v3; wit
 and Ascend's workers roll onto v3. Kept on purpose: the empty ECR chart repository `<prefix>/charts/straiker-defend` (Terraform cannot delete a
 non-empty repository on an existing install), the `defend` name in older ACM certificates, and the `straiker-defend` entries of the uninstaller (so
 an old install can still be removed). A later `aws-data` run on an old install deletes the unused `argus/session` secret (7-day recovery window).
-The non-AWS (GKE) path has no Argus v3, so it no longer has a Defend engine.
+The non-AWS (GKE) path has no Argus v3, so the Defend product is refused there (Ascend alone still installs, with its Argus-based grading off).
 
 
 ## 6b. Console: new Defend overview and Controls (platform API)

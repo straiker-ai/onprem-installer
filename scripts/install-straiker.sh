@@ -396,10 +396,9 @@ GCP_PROJECT_OPT="${GOOGLE_CLOUD_PROJECT:-}"
 # meaningful when this installer provisions the cluster (--install-eks).
 PROVISION_STRATEGY="${PROVISION_STRATEGY:-min}"
 
-# Opt-in (--data-layer): provision the AWS-managed data tier (Aurora PostgreSQL,
-# ElastiCache Serverless Redis, MSK Serverless, EFS model cache, KMS, Secrets
-# Manager) via terraform/aws/data, in phase 'aws-data'. Off by default so
-# existing installs (in-cluster Postgres/Valkey) are untouched.
+# The AWS-managed data tier (Aurora PostgreSQL, ElastiCache Serverless Redis, MSK Serverless, EFS model cache, KMS, Secrets Manager; terraform/aws/data,
+# phase 'aws-data') is the only supported AWS install: Argus v3, the platform services and ClickHouse all run on it, as in the SaaS regions. DATA_LAYER
+# is therefore true on AWS whatever is passed (--data-layer is still accepted and does nothing) and false only on GKE, which has no data tier.
 DATA_LAYER="${DATA_LAYER:-false}"
 # Platform services installed by phase platform-services (also drives platform-sa's IAM grants).
 PLATFORM_SERVICES_EXPLICIT=false
@@ -659,10 +658,10 @@ Options:
   --phase <name>[,<name>...]       Run only the given phase(s), in the listed order.
   --from-phase <name>             Run from phase through the end.
   --rerun-phase                   Re-run selected phases even if already marked done.
-  --data-layer                    Also provision the AWS-managed data tier (Aurora PostgreSQL,
-                                   ElastiCache Serverless Redis, MSK Serverless, EFS, KMS, Secrets
-                                   Manager) in phase 'aws-data'. Sized by --provision-strategy.
-                                   Needs an existing EKS cluster (ours or --cluster-name).
+  --data-layer                    Accepted and does nothing: on AWS the data tier (Aurora PostgreSQL, ElastiCache
+                                   Serverless Redis, MSK Serverless, EFS, KMS, Secrets Manager) is always provisioned, in phase
+                                   'aws-data', sized by --provision-strategy; GKE has none. Needs an existing EKS cluster
+                                   (ours or --cluster-name).
   --install-eks                   Also provision an EKS cluster via Terraform (the AWS
                                    bootstrap phase runs regardless of this flag).
   --install-tofu                  Download and install OpenTofu ${TOFU_VERSION} to
@@ -830,8 +829,8 @@ Options:
   --saas-frontend                  With --data-layer: also create the AWS backends of the SaaS frontend (DynamoDB
                                    environment + guardrail tables, Kinesis audit stream) and a Pod Identity role for
                                    the frontend. Remembered in install state; needs a SaaS-style frontend image.
-  --defend-engine v3               Accepted and ignored (Argus v1 was removed; Argus v3 is the only detection engine and needs
-                                   --data-layer). v1 is refused.
+  --defend-engine v3               Accepted and ignored (Argus v1 was removed; Argus v3 is the only detection engine and runs on
+                                   the AWS data tier). v1 is refused.
   --inference-profile <production|test>
                                    production (default): one model server per GPU, never shared or quantized, on the GPU
                                    tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
@@ -905,7 +904,7 @@ Options:
                                    cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
                                    install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
                                    (dump/restore it first: runbook 6f).
-  --no-iris-grader-mint            Do not create the iris-grader agent and key. By default phase straiker-ascend (with --data-layer) creates them
+  --no-iris-grader-mint            Do not create the iris-grader agent and key. By default phase straiker-ascend (on AWS) creates them
                                    through the registry's onboarding API from inside the cluster, checks Argus v3 accepts the key, and
                                    stores it as ARGUS_V3_API_KEY, so Ascend's workers grade through v3. Idempotent: a re-run reuses the agent.
   --encrypt-node-volumes           Encrypt the node root volumes (system node group and every Karpenter node) with a customer-managed KMS key
@@ -1150,11 +1149,13 @@ validate_cluster_name() {
   fi
 }
 
-# Argus v3 is the only Defend detection engine on-prem (Argus v1 was removed) and it runs on the data tier: without --data-layer there is no
-# detection engine, and Ascend's Argus-based grading stays off.
-note_argus_v3_scope() {
-  [[ "${DATA_LAYER}" == "true" ]] \
-    || log "NOTE: Argus v1 was removed from on-prem and Argus v3 needs --data-layer: this install has no Defend detection engine."
+# Argus v3 is the only Defend detection engine on-prem (Argus v1 was removed) and it runs on the AWS data tier (MSK, ElastiCache, Secrets Manager).
+# GKE has no data tier, so the Defend product is refused there instead of installing with no detection engine.
+require_defend_prereqs() {
+  if [[ "${DATA_LAYER}" != "true" && ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
+    echo "ERROR: the Defend product needs Argus v3, which runs on the AWS data tier (MSK, ElastiCache, Secrets Manager) that ${CLOUD_PROVIDER} does not have. Install Ascend only (--products ascend) or use AWS." >&2
+    exit 1
+  fi
   return 0
 }
 
@@ -1364,7 +1365,7 @@ Installer phases:
   5) aws-artifacts        - create the ECR image mirror + models S3 bucket + hauler IAM role
                              (EKS Pod Identity). Always runs; needs a cluster to already exist
                              (ours via eks-cluster, or the customer's own via --cluster-name).
-  5b) aws-data            - (optional, requires --data-layer) provision Aurora PostgreSQL, ElastiCache
+  5b) aws-data            - (AWS data tier) provision Aurora PostgreSQL, ElastiCache
                              Serverless Redis, MSK Serverless, EFS, KMS and Secrets Manager via
                              terraform/aws/data, in the cluster's private subnets. Endpoints are
                              saved to install state for the later chart phases.
@@ -1387,25 +1388,25 @@ Installer phases:
                              frontend, and VLLM_API_KEY / SYS__INFERENCE_API_KEY (same value)
                              for argus calling straiker-inference. All three charts read
                              this same Secret name; this phase is what creates it.
-  8a) clickhouse          - (optional, requires --data-layer) install chart 'straiker-clickhouse': single-node
+  8a) clickhouse          - (AWS data tier) install chart 'straiker-clickhouse': single-node
                              ClickHouse pod (PVC), users and Secret 'clickhouse-credentials', database grid.
                              Runs before data-bootstrap, which projects its address/credentials into
                              'platform-secret'. Ingestion into it is not included.
-  8b) data-bootstrap      - (optional, requires --data-layer) create the Aurora admin Secret and install
+  8b) data-bootstrap      - (AWS data tier) create the Aurora admin Secret and install
                              chart 'straiker-data': per-service databases/roles + DSN Secret
                              'straiker-db-dsn', and the MSK topics (Jobs, SASL/IAM via Pod Identity).
-  8b2) ch-sync            - (optional, requires --data-layer) install chart 'straiker-ch-sync': creates the grid.*
+  8b2) ch-sync            - (AWS data tier) install chart 'straiker-ch-sync': creates the grid.*
                              CDC replica tables in ClickHouse and syncs them every minute from the registry
                              Postgres DB (read-only role grid_cdc). Replaces the ClickPipes Postgres pipe.
-  8c) platform-services   - (optional, requires --data-layer) install the vendored platform charts
+  8c) platform-services   - (AWS data tier) install the vendored platform charts
                              (charts/platform-<svc>, overlay values-onprem.yaml) from the ECR mirror:
                              PLATFORM_SERVICES, default "foundation databridge portico api-gateway", plus registry and
                              grid with --data-layer (they need ClickHouse). connect needs SES, so it is opt-in.
-  8d) ingest              - (optional, requires --data-layer) install chart 'straiker-ingest': Redpanda Connect
+  8d) ingest              - (AWS data tier) install chart 'straiker-ingest': Redpanda Connect
                              streams s6r.events / s6r.findings / platform.audit -> ClickHouse grid.* landing
                              tables (MSK SASL/IAM; rejects go to <topic>.dlq). Replaces the ClickPipes Kafka pipes.
                              Needs grid's migration to have created the tables (phase platform-services with grid).
-  8e) verify-data-layer   - (optional, requires --data-layer) post-install checks, run before the app
+  8e) verify-data-layer   - (AWS data tier) post-install checks, run before the app
                              charts: EFS CSI driver + models PVC Bound, ElastiCache PING over TLS,
                              Aurora sslmode=require (iris role), and no failed Jobs. Any FAIL blocks the run.
   9) ai-provider-secrets  - only when 'ascend' is selected. Writes whichever provider
@@ -1913,7 +1914,7 @@ parse_args() {
         case "${2:-}" in
           v3) ;;
           v1)
-            echo "ERROR: Argus v1 was removed from on-prem: Argus v3 is the only detection engine (it needs --data-layer)." >&2
+            echo "ERROR: Argus v1 was removed from on-prem: Argus v3 is the only detection engine (it runs on the AWS data tier)." >&2
             exit 2
             ;;
           *)
@@ -8304,7 +8305,7 @@ phase_straiker_inference() {
 # Runs next to v1 until Ascend is moved to v3 (its current image calls v1 directly); enabled with --defend-engine v3.
 phase_straiker_argus_v3() {
   if [[ "${DATA_LAYER}" != "true" ]]; then
-    log "Argus v3 needs --data-layer (MSK, ElastiCache, Secrets Manager) — skipping."
+    log "Argus v3 needs the AWS data tier (MSK, ElastiCache, Secrets Manager) — skipping."
     set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
     return
   fi
@@ -10715,7 +10716,9 @@ main() {
   trap on_exit_report EXIT
 
   parse_args "$@"
-  # --data-layer provisions ClickHouse and Aurora, which registry and grid need (grid's migration creates the
+  # The data tier is always on for AWS (see DATA_LAYER above).
+  if [[ "${CLOUD_PROVIDER}" == "aws" ]]; then DATA_LAYER=true; else DATA_LAYER=false; fi
+  # The data tier provisions ClickHouse and Aurora, which registry and grid need (grid's migration creates the
   # tables ingest writes to), so they join the default set. An explicit PLATFORM_SERVICES always wins.
   if [[ "${DATA_LAYER}" == "true" && "${PLATFORM_SERVICES_EXPLICIT}" != true ]]; then
     PLATFORM_SERVICES="foundation registry databridge portico grid api-gateway"
@@ -10748,8 +10751,8 @@ main() {
 
   check_state_matches_cluster
   validate_cluster_name
-  note_argus_v3_scope
   capture_install_config
+  require_defend_prereqs
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
   # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).
   if [[ "${DATA_LAYER}" == "true" ]]; then
