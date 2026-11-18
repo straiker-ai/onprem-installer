@@ -143,6 +143,9 @@ ENABLE_OTEL="${ENABLE_OTEL:-}"
 # iris and bifrost databases). Decided once and remembered. --bifrost-postgres: Bifrost keeps its config and logs in Postgres.
 AURORA_LAYOUT="${AURORA_LAYOUT:-}"
 BIFROST_POSTGRES="${BIFROST_POSTGRES:-}"
+# Ascend's FP adjustment worker (applies finding disputes to reports). Needs an iris image that contains run_adjustment_worker.py
+# (onprem-v2026.11.18 or newer). Remembered.
+ASCEND_ADJUSTMENT_WORKER="${ASCEND_ADJUSTMENT_WORKER:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -905,6 +908,8 @@ Options:
                                    cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
                                    install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
                                    (dump/restore it first: runbook 6f).
+  --ascend-adjustment-worker       Run Ascend's adjustment worker (applies finding disputes to reports; always one replica). Needs an iris image
+                                   that contains run_adjustment_worker.py (onprem-v2026.11.18 or newer). Remembered; off by default.
   --bifrost-postgres               Bifrost keeps its configuration and request logs in its Postgres database (needed to share state
                                    between its replicas). Off by default; remembered.
   --kms-layout single|split        Encryption keys. split = own customer-managed keys for EFS (models), Secrets Manager and EBS
@@ -1892,6 +1897,10 @@ parse_args() {
         ;;
       --bifrost-postgres)
         BIFROST_POSTGRES=true
+        shift
+        ;;
+      --ascend-adjustment-worker)
+        ASCEND_ADJUSTMENT_WORKER=true
         shift
         ;;
       --admin-email)
@@ -8403,6 +8412,8 @@ phase_straiker_ascend() {
       --set "reconWorker.replicaCount=2" --set "reconWorker.hpa.enabled=true" --set "reconWorker.hpa.minReplicas=2"
       --set "reportWorker.replicaCount=2" --set "reportWorker.hpa.enabled=true" --set "reportWorker.hpa.minReplicas=2")
   fi
+  [[ "${ASCEND_ADJUSTMENT_WORKER}" == true ]] && set_metadata "ascend_adjustment_worker" "true"
+  [[ "$(get_metadata "ascend_adjustment_worker")" == "true" ]] && cmd+=(--set "adjustmentWorker.enabled=true")
   cmd+=("${ascend_data_layer_args[@]+"${ascend_data_layer_args[@]}"}")
   cmd+=("${ascend_v3_args[@]+"${ascend_v3_args[@]}"}")
   # See helm_ssa_conflict_flags's declaration above for why these can't just
