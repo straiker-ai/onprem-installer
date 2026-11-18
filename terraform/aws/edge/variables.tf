@@ -141,6 +141,8 @@ variable "waf_managed_rule_groups" {
         "GenericRFI_BODY",
         "GenericLFI_BODY",
         "EC2MetaDataSSRF_BODY",
+        # The console's own cookies (login redirect, session) can match this rule: it blocked a sign-in page load.
+        "EC2MetaDataSSRF_COOKIE",
       ]
     }
     AWSManagedRulesKnownBadInputsRuleSet = {
