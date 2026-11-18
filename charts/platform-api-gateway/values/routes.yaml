@@ -406,7 +406,7 @@ routes:
     uri: http://registry.{{ .Release.Namespace }}:80
     order: -10
     predicates:
-      - Path=/api/v3/integrations/**,/api/v3/onboard/**,/api/v3/controls/**,/api/v3/settings/**,/api/v3/scans/**,/api/v3/operator/catalog/**,/api/v3/operator/registry/**,/api/v3/operator/estate/**
+      - Path=/api/v3/integrations/**,/api/v3/onboard/**,/api/v3/controls/**,/api/v3/settings/**,/api/v3/directory/**,/api/v3/scans/**,/api/v3/operator/catalog/**,/api/v3/operator/registry/**,/api/v3/operator/estate/**
     filters:
       - RemoveRequestHeader=Authorization
   # Registry controls for platform services (S2S). The /internal/** chain takes a
