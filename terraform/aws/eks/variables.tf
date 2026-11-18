@@ -206,3 +206,23 @@ variable "kms_layout" {
     error_message = "kms_layout must be \"single\" or \"split\"."
   }
 }
+
+variable "encrypt_node_volumes" {
+  description = <<-EOT
+    Encrypt the node root volumes (the system node group's and every Karpenter node's) with the customer-managed "ebs" KMS key
+    instead of the AWS-managed default. Creates the ebs key if kms_layout is not "split", lets the Auto Scaling service-linked role
+    and the Karpenter controller use it, and sets the system node group's root volume (encrypted, kms_key_id).
+    The Karpenter nodes pick the key up from the straiker-system chart (eks.ebsKmsKeyId, set by the installer).
+    CHANGING THIS ON A RUNNING CLUSTER REPLACES EVERY NODE (the launch template and the node classes change), so the installer only
+    sets it on a fresh install. The Auto Scaling service-linked role (AWSServiceRoleForAutoScaling) must exist before the apply:
+    the installer creates it when missing; `aws iam create-service-linked-role --aws-service-name autoscaling.amazonaws.com`.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "system_node_volume_size_gb" {
+  description = "Root volume size (GiB) of the system node group when encrypt_node_volumes is set (the module default is 20)."
+  type        = number
+  default     = 50
+}

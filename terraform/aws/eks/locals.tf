@@ -1,6 +1,9 @@
 locals {
   create_vpc = var.vpc_id == null
 
+  # The customer-managed EBS key exists for the split layout (PersistentVolumes) and/or encrypted node volumes.
+  ebs_cmk = var.kms_layout == "split" || var.encrypt_node_volumes
+
   # In BYO mode (create_vpc = false), AZs come from the supplied subnets
   # (see data.aws_subnet.private in network.tf) instead of this variable --
   # Terraform's conditional operator short-circuits, so var.availability_zones

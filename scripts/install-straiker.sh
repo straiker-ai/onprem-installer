@@ -146,6 +146,9 @@ BIFROST_POSTGRES="${BIFROST_POSTGRES:-}"
 # Ascend's FP adjustment worker (applies finding disputes to reports). Needs an iris image that contains run_adjustment_worker.py
 # (onprem-v2026.11.18 or newer). Remembered.
 ASCEND_ADJUSTMENT_WORKER="${ASCEND_ADJUSTMENT_WORKER:-}"
+# Node root volumes (system node group and every Karpenter node) on the customer-managed EBS key. Decided once, FRESH installs only:
+# changing it on a running cluster replaces every node. ENCRYPT_NODE_VOLUMES_FORCE=true overrides that guard.
+ENCRYPT_NODE_VOLUMES="${ENCRYPT_NODE_VOLUMES:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -908,6 +911,10 @@ Options:
                                    cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
                                    install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
                                    (dump/restore it first: runbook 6f).
+  --encrypt-node-volumes           Encrypt the node root volumes (system node group and every Karpenter node) with a customer-managed KMS key
+                                   (alias <cluster>-ebs) instead of the AWS-managed default. FRESH installs only: on a running cluster it would
+                                   replace every node, so the flag is then ignored (ENCRYPT_NODE_VOLUMES_FORCE=true overrides). Creates the Auto
+                                   Scaling service-linked role when the account has none. Decided once and remembered.
   --ascend-adjustment-worker       Run Ascend's adjustment worker (applies finding disputes to reports; always one replica). Needs an iris image
                                    that contains run_adjustment_worker.py (onprem-v2026.11.18 or newer). Remembered; off by default.
   --bifrost-postgres               Bifrost keeps its configuration and request logs in its Postgres database (needed to share state
@@ -1903,6 +1910,10 @@ parse_args() {
         ASCEND_ADJUSTMENT_WORKER=true
         shift
         ;;
+      --encrypt-node-volumes)
+        ENCRYPT_NODE_VOLUMES=true
+        shift
+        ;;
       --admin-email)
         ADMIN_EMAIL=${2:-}
         shift 2
@@ -2385,6 +2396,31 @@ csv_to_tf_list() {
 # (bring-your-own-VPC and create-VPC). Each line is omitted rather than
 # written empty when the operator said nothing, so terraform's own defaults
 # stay authoritative and this installer doesn't silently re-assert them.
+# Node-volume encryption, decided ONCE per install and remembered. Moving the nodes' root volumes to a customer-managed key changes the
+# system node group's launch template and every Karpenter node class, which replaces every node (GPU nodes included): so a cluster that
+# already exists keeps what it has unless ENCRYPT_NODE_VOLUMES_FORCE=true.
+resolve_node_volume_encryption() {
+  local stored
+  stored="$(get_metadata "encrypt_node_volumes")"
+  if [[ -n "${stored}" ]]; then
+    if [[ "${ENCRYPT_NODE_VOLUMES}" == true && "${stored}" != "true" ]]; then
+      log "WARNING: --encrypt-node-volumes ignored: this install was created without it (turning it on would replace every node)."
+    fi
+    ENCRYPT_NODE_VOLUMES="${stored}"
+    return
+  fi
+  if [[ "${ENCRYPT_NODE_VOLUMES}" == true ]] \
+    && [[ "${ENCRYPT_NODE_VOLUMES_FORCE:-false}" != true ]] \
+    && aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    log "WARNING: --encrypt-node-volumes ignored: cluster '${CLUSTER_NAME}' already exists and the change would replace every node. Do it in a maintenance window with ENCRYPT_NODE_VOLUMES_FORCE=true."
+    ENCRYPT_NODE_VOLUMES=false
+  fi
+  [[ "${ENCRYPT_NODE_VOLUMES}" == true ]] || ENCRYPT_NODE_VOLUMES=false
+  set_metadata "encrypt_node_volumes" "${ENCRYPT_NODE_VOLUMES}"
+  [[ "${ENCRYPT_NODE_VOLUMES}" == true ]] && log "Node root volumes will be encrypted with the customer-managed key ${CLUSTER_NAME}-ebs."
+  return 0
+}
+
 # KMS layout, decided ONCE per install and remembered: "split" gives EFS, Secrets Manager and EBS volumes their own customer-managed
 # keys (the reference layout); "single" keeps the one shared data key. Changing it later would replace the EFS model cache and
 # re-key every secret, so an install that already has a cluster or a data key is always "single"; only a fresh one gets "split".
@@ -2455,6 +2491,8 @@ resolve_aurora_layout() {
 emit_eks_endpoint_tfvars() {
   resolve_kms_layout
   echo "kms_layout = \"${KMS_LAYOUT}\""
+  resolve_node_volume_encryption
+  echo "encrypt_node_volumes = ${ENCRYPT_NODE_VOLUMES}"
   echo "cluster_endpoint_public_access = ${CLUSTER_PUBLIC_ACCESS}"
 
   local public_cidrs allowed_cidrs
@@ -2922,6 +2960,12 @@ then re-run this phase."
   fi
 
   tofu_init "${EKS_DIR}" -upgrade -input=false -migrate-state -force-copy
+  # Encrypted node volumes: the Auto Scaling service-linked role must exist before the key policy names it (a brand-new account has none
+  # until its first Auto Scaling group). Created here, outside Terraform: it is account-wide and must never be destroyed with this cluster.
+  if [[ "${ENCRYPT_NODE_VOLUMES}" == true ]] && ! aws iam get-role --role-name AWSServiceRoleForAutoScaling >/dev/null 2>&1; then
+    log "Creating the Auto Scaling service-linked role (needed for encrypted node volumes)."
+    aws iam create-service-linked-role --aws-service-name autoscaling.amazonaws.com >/dev/null
+  fi
   tofu -chdir="${EKS_DIR}" apply -auto-approve -input=false
 
   local cluster_name cluster_endpoint node_role_arn queue_name
@@ -2963,6 +3007,7 @@ YAML
   set_metadata "cluster_endpoint" "${cluster_endpoint}"
   set_metadata "karpenter_node_role_arn" "${node_role_arn}"
   set_metadata "karpenter_queue_name" "${queue_name}"
+  set_metadata "ebs_kms_key_arn" "$(tofu -chdir="${EKS_DIR}" output -raw ebs_kms_key_arn 2>/dev/null || true)"
 }
 
 phase_eks_cluster_gke() {
@@ -4099,6 +4144,10 @@ phase_straiker_system() {
     if [[ -n "${tf_node_role_arn}" ]]; then
       log "Auto-filling eks.nodeRole from this installer's Terraform outputs."
       cmd+=(--set "eks.nodeRole=${tf_node_role_arn}")
+      # Encrypted node volumes: the Karpenter node classes carry the customer-managed key (the system node group has it from Terraform).
+      if [[ "$(get_metadata "encrypt_node_volumes")" == "true" && -n "$(get_metadata "ebs_kms_key_arn")" ]]; then
+        cmd+=(--set-string "eks.ebsKmsKeyId=$(get_metadata "ebs_kms_key_arn")")
+      fi
     else
       # Bring-your-own-cluster: no Terraform-managed node role exists. k8s-preflight
       # already confirmed Karpenter is running, so reuse whatever node role its

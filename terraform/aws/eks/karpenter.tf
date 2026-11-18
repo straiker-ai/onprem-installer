@@ -47,3 +47,28 @@ resource "aws_iam_role_policy" "karpenter_instance_profile" {
     }]
   })
 }
+
+# Node root volumes on the customer-managed EBS key (encrypt_node_volumes): Karpenter launches the instances, so its controller
+# role must be allowed to use the key and to create the grant EC2 needs to attach the volume.
+resource "aws_iam_role_policy" "karpenter_ebs_key" {
+  count = var.encrypt_node_volumes ? 1 : 0
+
+  name = "karpenter-ebs-kms"
+  role = module.karpenter.iam_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "kms:CreateGrant",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey*",
+        "kms:ReEncrypt*",
+      ]
+      Resource = aws_kms_key.ebs[0].arn
+    }]
+  })
+}

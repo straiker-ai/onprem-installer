@@ -91,3 +91,22 @@ spec:
   limits:
     {{- toYaml .pool.limits | nindent 4 }}
 {{- end }}
+
+{{/*
+Root-volume block device mappings for an EC2NodeClass. With eks.ebsKmsKeyId set (installer: --encrypt-node-volumes) every EBS
+mapping is encrypted with that customer-managed key; otherwise the mappings are rendered exactly as configured.
+Usage: include "infra.blockDeviceMappings" (dict "root" $ "mappings" $nc.blockDeviceMappings)
+*/}}
+{{- define "infra.blockDeviceMappings" -}}
+{{- $key := default "" .root.Values.eks.ebsKmsKeyId -}}
+{{- $out := list -}}
+{{- range .mappings -}}
+{{- $m := deepCopy . -}}
+{{- if and $key $m.ebs -}}
+{{- $_ := set $m.ebs "encrypted" true -}}
+{{- $_ := set $m.ebs "kmsKeyID" $key -}}
+{{- end -}}
+{{- $out = append $out $m -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end -}}

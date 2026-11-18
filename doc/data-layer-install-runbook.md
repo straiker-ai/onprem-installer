@@ -343,9 +343,10 @@ Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/stra
   Re-run the service phases to apply it to an existing install.
 - **Done since:** Ascend adjustment worker (6g), Helm charts in ECR and OpenTelemetry (6e), the second Aurora cluster for Ascend/Bifrost (6f),
   the extra KMS keys and the transcripts/exports/logs buckets (6e), CloudTrail and VPC Flow Logs (6d).
-- **Not done yet (decisions or disruptive on a running cluster):** Grafana, EKS 1.36, Graviton system nodes (m7g.xlarge x2), the pool
-  names general/defend/ascend (they are shared/argus/iris here), ClickHouse on r7g.4xlarge, the GPU model mix (vision 4 replicas, wanda),
-  and node root volumes on a customer-managed key. Argo CD is not applicable to customer installs (no Straiker git source of truth).
+- **Skipped on purpose:** Grafana, EKS 1.36, Graviton system nodes (m7g.xlarge x2), ClickHouse on r7g.4xlarge and the pool names
+  general/defend/ascend (they are shared/argus/iris here). Argo CD is not applicable to customer installs (no Straiker git source of truth).
+- **GPU mix is intentionally different:** the reference shows vision at 4 replicas; here every local model (thanos, vision, wanda, Kev
+  agentic and non-agentic) runs 2 replicas, the list and count fixed by the manager on 2026-11-13. Changing it is a product decision.
 
 ## 6d. Audit trail (opt-in): VPC Flow Logs and CloudTrail
 
@@ -364,6 +365,14 @@ Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase obs
 - `split` (default on a **fresh** install): EFS (model cache) uses the `models` key, Secrets Manager the `secrets` key, new EBS volumes (the `gp3` StorageClass) the `ebs` key; Aurora, ElastiCache, MSK, DynamoDB and OpenSearch keep the `data` key. The `transcripts` and `logs` keys exist too.
 - `single` (an install that already has a cluster or a `data` key): nothing is re-keyed. Changing it would replace the EFS file system (the ~65 GB model cache is re-downloaded) and re-key every secret, so it is never done automatically. Node root volumes use the default EBS key in both layouts.
 - Existing installs get only the additive part on the next `aws-data` run: the `transcripts` and `logs` keys, the three buckets below, and a wider `kms:Decrypt` grant on the pod roles. No existing resource changes.
+
+**Node root volumes on the customer-managed key (`--encrypt-node-volumes`, opt-in, remembered, fresh installs only).** The system node group's
+root volume and every Karpenter node's (`eks.ebsKmsKeyId` in the `straiker-system` chart) are encrypted with the `<cluster>-ebs` key instead of the
+AWS-managed default. The key policy lets the Auto Scaling service-linked role use it, the Karpenter controller role gets `kms:CreateGrant`/`Decrypt`/
+`GenerateDataKey*`, and the installer creates `AWSServiceRoleForAutoScaling` when the account has none (outside Terraform: it is account-wide). The
+system node group's root volume becomes 50 GiB (`system_node_volume_size_gb`). On a cluster that already exists the flag is ignored: it changes the
+launch template and every node class, which replaces every node (GPU nodes included); `ENCRYPT_NODE_VOLUMES_FORCE=true` overrides it for a planned
+maintenance window. Not verified on a running cluster yet: see the fresh-install checklist below.
 
 **Buckets.** `<cluster>-<account>-transcripts` (key `transcripts`, versioned), `-exports` (data key), `-logs` (key `logs`) next to `-grid-artifacts`. Private, TLS-only. No service writes to them yet: they exist for the reference layout and for the services that adopt them.
 
@@ -387,6 +396,25 @@ Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase obs
 **Image.** The first on-prem iris image (`onprem-v2026.11.6.1`) did not contain `run_adjustment_worker.py` (the on-prem build file `onprem/Dockerfile` in the iris repo did not copy it; SaaS builds from a different Dockerfile that does). Fixed in iris PR #653; image `onprem-v2026.11.18` (built by hand: the `onprem-iris-build` project reads `buildspec.yml` at the repo root while iris keeps `onprem/buildspec.yml`, so tag-push builds fail; start it with `--source-version <tag> --buildspec-override onprem/buildspec.yml`, then `crane tag` the version name onto the commit-SHA image). The chart value `adjustmentWorker.enabled` stays **false** until you have mirrored that image and checked it holds the file (`kubectl run ... --image=<ecr>/straiker/iris:onprem-v2026.11.18 -- ls /app`); then enable it with `--ascend-adjustment-worker` (remembered; the chart value stays false by default).
 
 It is **always one replica** (the iris code does a read-modify-write per assessment and says so): no HPA, `--production-sizing` does not change it, and the Deployment is `Recreate`, so an upgrade has a short gap in which disputes wait in the stream and are processed afterwards. Once enabled, check it: `kubectl -n straiker get deploy straiker-ascend-adjustment-worker`, then dispute a finding in an Ascend report and see the counts change. Not verified yet.
+
+## 6h. Fresh-install checklist (what only a new cluster can prove)
+
+Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-node-volumes --bifrost-postgres --charts-from-ecr --otel --ascend-adjustment-worker
+--production-sizing` (the layout flags are decided once; the others are remembered). Then check:
+
+| Area | Check | Expect |
+|---|---|---|
+| KMS | `aws kms list-aliases` (cluster name in the alias) | `data`, `ebs`, `models`, `secrets`, `transcripts`, `logs` |
+| EFS / secrets | `aws efs describe-file-systems`, `aws secretsmanager describe-secret` | EFS on the `models` key, secrets on the `secrets` key |
+| Buckets | `aws s3 ls` | `-grid-artifacts`, `-transcripts`, `-exports`, `-logs` |
+| Aurora | `aws rds describe-db-clusters` | `<cluster>-aurora` and `<cluster>-aurora-ascend`; Ascend and Bifrost on the second |
+| PVs | `kubectl get storageclass gp3 -o jsonpath='{.parameters}'` | `encrypted` and a `kmsKeyId` |
+| Node volumes | `aws ec2 describe-volumes --filters Name=attachment.instance-id,Values=<node>` for a system and a Karpenter node | `Encrypted: true`, `KmsKeyId` = the `ebs` key |
+| Charts | installer log | "Charts deployed from ECR (...): N pushed, N pulled" with no fallback warning |
+| Bifrost | `kubectl logs deploy/straiker-bifrost` | started with Postgres stores; `pg_tables` count > 0 in the `bifrost` database |
+| OTel | `kubectl -n observability get pods`; a smoke trace in X-Ray | 2 collectors Running |
+| Ascend | `kubectl get deploy | grep ascend` | adjustment worker 1/1 (iris image `onprem-v2026.11.18` or newer) |
+| Verify | `--phase verify-data-layer` | all PASS (Vector `WARN` is expected) |
 
 ## 7. Known gaps and manual steps
 

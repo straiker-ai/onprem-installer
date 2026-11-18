@@ -48,6 +48,7 @@ ENABLE_OTEL=""
 AURORA_LAYOUT=""
 BIFROST_POSTGRES=""
 ASCEND_ADJUSTMENT_WORKER=""
+ENCRYPT_NODE_VOLUMES=""
 PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
 SSO_TYPE=""
@@ -117,6 +118,7 @@ Options:
   --charts-from-ecr          push the charts to the install's ECR (OCI) and deploy every release from there (needs the aws-artifacts phase)
   --otel                     opt-in OpenTelemetry: collector -> X-Ray traces + CloudWatch metrics (run with the observability phase)
   --aurora-layout L          single | split: a second Aurora cluster for iris (Ascend) and bifrost (default: split on a fresh install, single on an existing one; never changes later)
+  --encrypt-node-volumes     encrypt node root volumes (system group and Karpenter nodes) with a customer-managed KMS key; fresh installs only (a running cluster would have every node replaced)
   --ascend-adjustment-worker run Ascend's FP adjustment worker (needs iris image onprem-v2026.11.18 or newer; always one replica)
   --bifrost-postgres         Bifrost keeps its config and request logs in Postgres (shared by its replicas)
   --vpc-flow-logs            opt-in audit: VPC Flow Logs into CloudWatch Logs (--flow-logs-traffic ALL|ACCEPT|REJECT)
@@ -171,6 +173,7 @@ while [[ $# -gt 0 ]]; do
     --aurora-layout) AURORA_LAYOUT="${2:-}"; shift 2 ;;
     --bifrost-postgres) BIFROST_POSTGRES=true; shift ;;
     --ascend-adjustment-worker) ASCEND_ADJUSTMENT_WORKER=true; shift ;;
+    --encrypt-node-volumes) ENCRYPT_NODE_VOLUMES=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
       | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
@@ -526,6 +529,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ -n "${AURORA_LAYOUT}" ]] && run_args+=(--aurora-layout "${AURORA_LAYOUT}")
 [[ "${BIFROST_POSTGRES}" == true ]] && run_args+=(--bifrost-postgres)
 [[ "${ASCEND_ADJUSTMENT_WORKER}" == true ]] && run_args+=(--ascend-adjustment-worker)
+[[ "${ENCRYPT_NODE_VOLUMES}" == true ]] && run_args+=(--encrypt-node-volumes)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ ${#EXTRA_FLAGS[@]} -gt 0 ]] && run_args+=("${EXTRA_FLAGS[@]}")

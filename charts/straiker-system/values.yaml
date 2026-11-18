@@ -163,6 +163,9 @@ sharedNodeSelector: &sharedNodeSelector
 
 # EKS-specific configuration
 eks:
+  # Customer-managed KMS key (ARN) for the Karpenter nodes' root volumes. Empty = the AWS-managed default. Set by the installer with
+  # --encrypt-node-volumes. Changing it on a running cluster replaces every node (the node classes change).
+  ebsKmsKeyId: ""
   nodeRole: ""
 
   gpu:

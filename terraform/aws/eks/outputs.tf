@@ -46,6 +46,6 @@ output "karpenter_queue_name" {
 }
 
 output "ebs_kms_key_arn" {
-  description = "Customer-managed EBS key (kms_layout = split); empty otherwise."
-  value       = var.kms_layout == "split" ? aws_kms_key.ebs[0].arn : ""
+  description = "Customer-managed EBS key (kms_layout = split and/or encrypt_node_volumes); empty otherwise."
+  value       = local.ebs_cmk ? aws_kms_key.ebs[0].arn : ""
 }

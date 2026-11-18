@@ -82,6 +82,20 @@ module "eks" {
       max_size       = local.system_node_sizing.max_size
       desired_size   = local.system_node_sizing.desired_size
 
+      # Customer-managed key on the root volume (encrypt_node_volumes). Without it the module's default volume is used, unchanged.
+      block_device_mappings = var.encrypt_node_volumes ? {
+        root = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = var.system_node_volume_size_gb
+            volume_type           = "gp3"
+            encrypted             = true
+            kms_key_id            = aws_kms_key.ebs[0].arn
+            delete_on_termination = true
+          }
+        }
+      } : {}
+
       labels = {
         "node.kubernetes.io/purpose" = "system"
       }
@@ -138,7 +152,7 @@ module "ebs_csi_irsa" {
 
   role_name             = "${var.cluster_name}-ebs-csi"
   attach_ebs_csi_policy = true
-  ebs_csi_kms_cmk_ids   = var.kms_layout == "split" ? [aws_kms_key.ebs[0].arn] : []
+  ebs_csi_kms_cmk_ids   = local.ebs_cmk ? [aws_kms_key.ebs[0].arn] : []
 
   oidc_providers = {
     main = {
@@ -148,18 +162,73 @@ module "ebs_csi_irsa" {
   }
 }
 
-# Customer-managed key for PersistentVolumes (fresh installs, kms_layout = "split"). The EBS CSI role gets
-# kms:CreateGrant/GenerateDataKey on it above; the default key policy delegates to IAM.
+# Customer-managed EBS key: PersistentVolumes (kms_layout = "split") and/or node root volumes (encrypt_node_volumes). The EBS CSI
+# role gets kms:CreateGrant/GenerateDataKey on it above. IAM delegation (account root) lets IAM policies use it; with encrypted node
+# volumes the Auto Scaling service-linked role also needs the key itself, because the node group's ASG launches the instances.
+data "aws_caller_identity" "current" {}
+
+data "aws_partition" "current" {}
+
+locals {
+  asg_slr_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+}
+
+data "aws_iam_policy_document" "ebs_key" {
+  count = local.ebs_cmk ? 1 : 0
+
+  statement {
+    sid       = "EnableIamPolicies"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.encrypt_node_volumes ? [1] : []
+    content {
+      sid       = "AutoScalingUsesTheKey"
+      actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+      resources = ["*"]
+      principals {
+        type        = "AWS"
+        identifiers = [local.asg_slr_arn]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.encrypt_node_volumes ? [1] : []
+    content {
+      sid       = "AutoScalingAttachesEncryptedVolumes"
+      actions   = ["kms:CreateGrant"]
+      resources = ["*"]
+      principals {
+        type        = "AWS"
+        identifiers = [local.asg_slr_arn]
+      }
+      condition {
+        test     = "Bool"
+        variable = "kms:GrantIsForAWSResource"
+        values   = ["true"]
+      }
+    }
+  }
+}
+
 resource "aws_kms_key" "ebs" {
-  count = var.kms_layout == "split" ? 1 : 0
+  count = local.ebs_cmk ? 1 : 0
 
   description             = "${var.cluster_name} ebs"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.ebs_key[0].json
 }
 
 resource "aws_kms_alias" "ebs" {
-  count = var.kms_layout == "split" ? 1 : 0
+  count = local.ebs_cmk ? 1 : 0
 
   name          = "alias/${var.cluster_name}-ebs"
   target_key_id = aws_kms_key.ebs[0].key_id

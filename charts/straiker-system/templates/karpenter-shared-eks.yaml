@@ -46,7 +46,7 @@ spec:
         {{ $k }}: {{ $v | quote }}
         {{- end }}
   blockDeviceMappings:
-    {{- toYaml $nc.blockDeviceMappings | nindent 4 }}
+    {{- include "infra.blockDeviceMappings" (dict "root" $ "mappings" $nc.blockDeviceMappings) | nindent 4 }}
   metadataOptions:
     httpEndpoint: enabled
     httpProtocolIPv6: disabled
