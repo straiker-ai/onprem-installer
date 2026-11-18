@@ -105,7 +105,7 @@ imageMirror:
       tag: v3-42f20012839da1ebf91d9b9603b3892381029e1c
       destRepository: straiker/argus
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/iris
-      tag: onprem-v2026.11.6.1
+      tag: onprem-v2026.11.18
       destRepository: straiker/iris
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/api-gateway
       tag: v2.3.13-rc2
