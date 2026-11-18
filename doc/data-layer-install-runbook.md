@@ -326,8 +326,11 @@ the endpoint (set by the installer with `--data-layer`) and an `sk_agt_` key of 
 4. On an existing install it rolls the probe and recon workers (one pod at a time) so they read the key; a fresh install starts them with it.
 Any failure is a warning, never an aborted install: Ascend's Argus-based grading stays off (`argus.enabled=false`: those results are unknown and excluded from scoring), and re-running
 `--phase straiker-ascend` retries. The agent is created in the customer's own organization, so `iris-grader` appears in the console's agent list
-(SaaS keeps it in an internal tenant). By hand instead: create the agent in the console, then re-run `--phase straiker-ascend --rerun-phase` with
-`ARGUS_V3_GRADER_KEY=sk_agt_...` set. Check: `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
+(SaaS keeps it in an internal tenant). By hand instead (as in the SaaS regions; also the fallback with `--no-iris-grader-mint` or when the automatic step warns): create the agent in the
+console (Custom agent, name `iris-grader`, threat-model class chat assistant) and copy its key (shown once), then re-run
+`--phase straiker-ascend --rerun-phase` with `ARGUS_V3_GRADER_KEY=sk_agt_...` in the environment (read it with `read -rs`, never paste it into a
+chat or shell history). The installer stores it only after Argus v3 accepts it (same check as the automatic path: `POST /api/v3/detect` through
+the gateway, retried for up to 90 s) and rolls the probe and recon workers; a key that is rejected or is not an `sk_agt_` key is not stored. Check: `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
 Not verified on a running install yet (see the fresh-install checklist).
 
 ## 6i. Argus v1 is removed

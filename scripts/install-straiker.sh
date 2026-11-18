@@ -8554,6 +8554,23 @@ iris_grader_key_accepted() {
   [[ "${code}" == "200" ]]
 }
 
+# A key supplied by hand (ARGUS_V3_GRADER_KEY, e.g. an iris-grader agent created in the console as in the SaaS regions): stored only when
+# Argus v3 accepts it, so a wrong or not-yet-propagated key never switches grading on and gets it rejected. Never aborts the install.
+store_supplied_iris_grader_key() {
+  local key=$1
+  if [[ "${key}" != sk_agt_* ]]; then
+    log "WARNING: ARGUS_V3_GRADER_KEY does not look like an agent key (sk_agt_...): not stored. Ascend's Argus-based grading stays off."
+    return 0
+  fi
+  if ! iris_grader_key_accepted "${key}"; then
+    log "WARNING: Argus v3 did not accept the ARGUS_V3_GRADER_KEY you supplied (check that the agent exists and is active; a new agent can take a minute to reach the engine). Not stored: Ascend's Argus-based grading stays off. Re-run --phase straiker-ascend."
+    return 0
+  fi
+  patch_shared_secret "ARGUS_V3_API_KEY" "${key}"
+  IRIS_GRADER_KEY_CHANGED=true
+  log "Stored the iris-grader key as ARGUS_V3_API_KEY: Ascend will grade through Argus v3."
+}
+
 # Sets ARGUS_V3_API_KEY in straiker-secrets when Argus v3 accepts a freshly created or revealed iris-grader key. Never aborts the install:
 # on any failure it says why and leaves Ascend as it was. IRIS_GRADER_KEY_CHANGED=true tells the caller to roll the workers.
 IRIS_GRADER_KEY_CHANGED=false
@@ -8696,8 +8713,7 @@ phase_straiker_ascend() {
   if [[ "${DATA_LAYER}" == "true" ]]; then
     ascend_v3_args=(--set-string "argus.v3.endpoint=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443/api/v3/detect")
     if [[ -n "${ARGUS_V3_GRADER_KEY:-}" ]]; then
-      patch_shared_secret "ARGUS_V3_API_KEY" "${ARGUS_V3_GRADER_KEY}"
-      log "Stored the iris-grader key as ARGUS_V3_API_KEY: Ascend will grade through Argus v3."
+      store_supplied_iris_grader_key "${ARGUS_V3_GRADER_KEY}"
     else
       # Create the iris-grader agent and key ourselves (idempotent, never aborts the install), then see whether a key is stored.
       ensure_iris_grader_key
