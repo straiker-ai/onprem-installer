@@ -459,7 +459,19 @@ Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-nod
 | Ascend | `kubectl get deploy | grep ascend` | adjustment worker 1/1 (iris image `onprem-v2026.11.18` or newer) |
 | iris-grader | installer log of `straiker-ascend`; `kubectl logs deploy/straiker-ascend-probe-worker` | "Stored the iris-grader key"; `argus_v3` requests, no 401 |
 | No v1 | `kubectl get deploy | grep defend`; the console | no `straiker-defend`; frontend env has no `ARGUS_ENDPOINT`; Saige "taking a break"; no `defend` host routed |
+| No legacy in-cluster stores | `scripts/audit-legacy-incluster.sh --kubeconfig <file> --expect-clean` (read-only) | `PASS`: no Valkey, no Postgres, no bundled OpenSearch (only `straiker-benthos` remains), and Benthos writes to the managed OpenSearch domain |
 | Verify | `--phase verify-data-layer` | all PASS (Vector `WARN` is expected) |
+
+## 6j. Old in-cluster Postgres, Valkey and OpenSearch
+
+The data tier replaces them (Aurora, ElastiCache, the managed OpenSearch domain), and current `straiker-system` does not create Postgres or Valkey for it
+(`postgres=null`, `valkey=null`); the bundled OpenSearch only appears as a fallback when no managed domain was created. Installs made with an older
+revision still have all three. `scripts/audit-legacy-incluster.sh` (read-only) prints, for each, whether it exists and whether anything uses it
+(references from other workloads, keys, rows, application indices) and where Benthos writes its archives. On dl-test (2026-11-18) all three were unused:
+Valkey 0 keys, Postgres 3 empty databases with no write ever, OpenSearch only its own housekeeping indices; Benthos still pointed at the in-cluster
+OpenSearch while the console reads the managed domain, so `--phase straiker-system --rerun-phase` is needed there (it also removes the three).
+The installer and chart code that serves only the old mode (the Postgres storage class and in-cluster defaults, `postgres.yaml`, `valkey.yaml`, the
+repo-root `onprem-architecture.md`) is left in place until a fresh install passes `--expect-clean`; then remove it in one separate change.
 
 ## 7. Known gaps and manual steps
 
