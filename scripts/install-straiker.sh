@@ -7260,7 +7260,16 @@ check_p4d_offered() {
 ha_enabled() { [[ "${PROVISION_STRATEGY:-min}" != "min" ]]; }
 # Production replica counts and HPAs (the screenshot's starting sizes): on for an HA cluster, or on any cluster with
 # --production-sizing (to try the sizing on a min cluster; it does not change zones or GPU placement).
-production_sizing() { ha_enabled || [[ "${PRODUCTION_SIZING:-false}" == true ]]; }
+# --production-sizing is remembered (metadata production_sizing): a later run of one phase without the flag must not drop the replicas and
+# HPAs back to the single-replica defaults.
+production_sizing() {
+  ha_enabled && return 0
+  if [[ "${PRODUCTION_SIZING:-false}" == true ]]; then
+    [[ "$(get_metadata "production_sizing")" == "true" ]] || set_metadata "production_sizing" "true"
+    return 0
+  fi
+  [[ "$(get_metadata "production_sizing")" == "true" ]]
+}
 
 # PodDisruptionBudgets (maxUnavailable 1) for the vendored platform charts, which ship none: without one, a node drain
 # (Karpenter consolidation, upgrades) may evict both replicas at once. Applied with kubectl, not Helm (the charts are synced from
