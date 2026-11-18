@@ -9,11 +9,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 An image's sku is its source repo segment, not a separate field — a source of
 ".../onprem-base/foo" is sku "base", ".../onprem-pro/bar" is sku "pro". Assumes
-the fixed "<host>/onprem-<sku>/<name>" layout (segment index 1).
+the fixed "<host>/onprem-<sku>/<name>" layout (segment index 1). A source outside that layout
+(e.g. a public image such as public.ecr.aws/aws-observability/...) is sku "base": mirrored for everyone.
 Usage: {{ include "artifact-sync.imageSku" $img.source }}
 */}}
 {{- define "artifact-sync.imageSku" -}}
-{{- trimPrefix "onprem-" (index (splitList "/" .) 1) -}}
+{{- $seg := index (splitList "/" .) 1 -}}
+{{- if hasPrefix "onprem-" $seg -}}{{- trimPrefix "onprem-" $seg -}}{{- else -}}base{{- end -}}
 {{- end }}
 
 {{/*
