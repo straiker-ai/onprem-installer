@@ -341,11 +341,11 @@ Then cut a release tag and re-pin `charts/platform-api-gateway` and `charts/stra
   and platform services (foundation, registry, grid, portico, databridge) start at 2 and autoscale; connect/notify 3 per role;
   Bifrost 2; Argus compactor 2; Ascend control plane 2, probe workers 4, recon and report workers 2, each with an HPA.
   Re-run the service phases to apply it to an existing install.
-- **Not done yet (decisions or other repositories):** Ascend adjustment worker (not in the Ascend chart), Argo CD / OTel / Grafana,
-  Helm charts in ECR, a second Aurora cluster for Ascend/Bifrost (the services must be repointed), six KMS keys and the
-  transcripts/exports/logs buckets (moving existing EFS/secrets to new keys replaces or re-encrypts them), CloudTrail and VPC
-  Flow Logs (account-level policy), EKS 1.36, Graviton system nodes (m7g.xlarge x2) and the pool names general/defend/ascend
-  (they are shared/argus/iris here), and the GPU model mix (vision 4 replicas, wanda).
+- **Done since:** Ascend adjustment worker (6g), Helm charts in ECR and OpenTelemetry (6e), the second Aurora cluster for Ascend/Bifrost (6f),
+  the extra KMS keys and the transcripts/exports/logs buckets (6e), CloudTrail and VPC Flow Logs (6d).
+- **Not done yet (decisions or disruptive on a running cluster):** Grafana, EKS 1.36, Graviton system nodes (m7g.xlarge x2), the pool
+  names general/defend/ascend (they are shared/argus/iris here), ClickHouse on r7g.4xlarge, the GPU model mix (vision 4 replicas, wanda),
+  and node root volumes on a customer-managed key. Argo CD is not applicable to customer installs (no Straiker git source of truth).
 
 ## 6d. Audit trail (opt-in): VPC Flow Logs and CloudTrail
 
