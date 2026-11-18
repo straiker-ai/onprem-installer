@@ -334,8 +334,10 @@ reportWorker:
 # ── Component: adjustment-worker ──────────────────────────────────────────
 # Re-counts an assessment's report after a finding is disputed or undisputed (events on the fp_adjustments Redis
 # stream). SINGLE REPLICA ONLY (read-modify-write per assessment): no replicaCount, no HPA; the Deployment is Recreate.
+# OFF by default: the on-prem iris image does not contain run_adjustment_worker.py yet (iris repo onprem/Dockerfile does not COPY
+# it), so the pod would crash and block `helm --wait`. Turn on (--set adjustmentWorker.enabled=true) once the image has it.
 adjustmentWorker:
-  enabled: true
+  enabled: false
   resources:
     requests:
       cpu: 250m
