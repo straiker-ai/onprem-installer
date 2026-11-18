@@ -72,6 +72,10 @@ imageMirror:
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/redpandadata/connect
       tag: "4.101.0"
       destRepository: redpandadata/connect
+    # OpenTelemetry collector (AWS Distro) for --otel (charts/straiker-otel). A public image: crane copies it anonymously.
+    - source: public.ecr.aws/aws-observability/aws-otel-collector
+      tag: v0.51.0
+      destRepository: aws-observability/aws-otel-collector
     # Straiker's own apps — under onprem-base/straiker/* (an extra
     # segment vs the third-party images above) since it's not upstream.
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/vllm

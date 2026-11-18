@@ -137,6 +137,8 @@ KMS_LAYOUT="${KMS_LAYOUT:-}"
 # Deploy the Straiker charts from the customer ECR (OCI) instead of straight from charts/. Remembered once set.
 CHARTS_FROM_ECR="${CHARTS_FROM_ECR:-}"
 CHARTS_ROOT_READY=false
+# Opt-in OpenTelemetry: a collector (traces -> X-Ray, metrics -> CloudWatch) and an otel-secret the services read. Remembered.
+ENABLE_OTEL="${ENABLE_OTEL:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -891,6 +893,9 @@ Options:
                                    deploy every release from there (the reference layout; Argo-compatible). Needs the aws-artifacts phase
                                    (it creates the repos). Remembered; if a chart cannot be packaged or pulled, that chart is
                                    used straight from charts/ with a warning.
+  --otel                           Opt-in OpenTelemetry: installs a collector (chart straiker-otel, namespace observability) that sends traces to AWS
+                                   X-Ray and metrics to CloudWatch (namespace Straiker/<cluster>), plus the otel-secret the services read.
+                                   Run with the observability phase; then re-run platform-services and straiker-argus-v3 so the pods pick it up.
   --kms-layout single|split        Encryption keys. split = own customer-managed keys for EFS (models), Secrets Manager and EBS
                                    volumes, plus the transcripts/logs keys (default on a FRESH install). single = the one shared data
                                    key (what an existing install keeps: changing it would replace the EFS model cache and re-key
@@ -1864,6 +1869,10 @@ parse_args() {
         ;;
       --charts-from-ecr)
         CHARTS_FROM_ECR=true
+        shift
+        ;;
+      --otel)
+        ENABLE_OTEL=true
         shift
         ;;
       --admin-email)
@@ -6373,6 +6382,7 @@ phase_platform_services() {
         fi
         ;;
     esac
+    [[ "$(get_metadata "otel")" == "true" ]] && extra+=(--set "${key}.observability.otel.enabled=true")
     log "Installing platform service '${svc}' (${tag})..."
     # The platform charts carry no config checksum: a config-only change (ConfigMap <svc>-config) does not restart the
     # pods, which keep the old environment. Compare it around the upgrade and restart when it changed.
@@ -8885,6 +8895,44 @@ phase_straiker_edge() {
 # CloudWatch for the cluster (terraform/aws/observability): the CloudWatch Observability add-on, alarms and their SNS
 # topic. Runs last so the edge ALB exists (its alarms need the ALB's ARN). Re-run it after the edge or the data tier
 # changes. EKS only.
+# --otel: the collector (chart straiker-otel in namespace observability; IAM through Pod Identity from the observability Terraform)
+# and the otel-secret in the app namespace (standard OTEL_* variables pointing at the collector). Services read the secret at start,
+# so existing pods pick it up on their next roll (re-run platform-services and straiker-argus-v3).
+install_otel_collector() {
+  local metric_ns="Straiker/${CLUSTER_NAME}" ns="${INFRA_NAMESPACE}" endpoint
+  ensure_k8s_ready_for_charts || return 1
+  local chart="${CHARTS_ROOT}/straiker-otel"
+  [[ -d "${chart}" ]] || { mark_phase_blocked "charts/straiker-otel not found."; return 1; }
+  local registry otel_image otel_tag
+  registry="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
+  otel_image="aws-observability/aws-otel-collector"
+  otel_tag="$(mirrored_image_tag "${otel_image}")"
+  if ! aws ecr describe-images --repository-name "${TF_PREFIX}/${otel_image}" --image-ids "imageTag=${otel_tag}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    mark_phase_blocked "The collector image ${otel_image}:${otel_tag} is not in your ECR yet. Run: --phase aws-artifacts,artifacts-sync --rerun-phase (it creates the repo and mirrors the image), then re-run observability."
+    return 1
+  fi
+  log "Installing the OpenTelemetry collector (traces -> X-Ray, metrics -> CloudWatch ${metric_ns})..."
+  helm upgrade --install straiker-otel "${chart}" --namespace observability --create-namespace \
+    --set-string "image.repository=${registry}/${otel_image}" --set-string "image.tag=${otel_tag}" \
+    --set-string "awsRegion=${AWS_REGION}" --set-string "clusterName=${CLUSTER_NAME}" --set-string "metricNamespace=${metric_ns}" \
+    --wait --timeout "${HELM_TIMEOUT}" >/dev/null || { mark_phase_blocked "The OpenTelemetry collector did not become ready (kubectl -n observability get pods)."; return 1; }
+  endpoint="http://otel-collector.observability.svc.cluster.local:4318"
+  kubectl create namespace "${ns}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create secret generic otel-secret --namespace "${ns}" \
+    --from-literal="OTEL_EXPORTER_OTLP_ENDPOINT=${endpoint}" \
+    --from-literal="OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" \
+    --from-literal="OTEL_TRACES_EXPORTER=otlp" \
+    --from-literal="OTEL_METRICS_EXPORTER=otlp" \
+    --from-literal="OTEL_LOGS_EXPORTER=none" \
+    --from-literal="OTEL_PROPAGATORS=tracecontext,baggage" \
+    --from-literal="OTEL_TRACES_SAMPLER=parentbased_always_on" \
+    --from-literal="OTEL_EXPORTER_OTLP_TIMEOUT=5000" \
+    --from-literal="OTEL_RESOURCE_ATTRIBUTES=deployment.environment=onprem,straiker.cluster=${CLUSTER_NAME}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  set_metadata "otel" "true"
+  log "OpenTelemetry on: collector otel-collector.observability:4318, secret ${ns}/otel-secret. Re-run platform-services and straiker-argus-v3 to start tracing; view traces in the X-Ray console."
+}
+
 phase_observability() {
   if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
     set_phase_status "${CURRENT_PHASE}" "skipped" "CloudWatch is AWS-only."
@@ -8939,7 +8987,8 @@ print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
 ' 2>/dev/null || echo '[]')"
 
   # Opt-in audit trail: a flag turns it on and it is remembered (turning it off means destroying it on purpose).
-  local want_flow want_trail flow_traffic trail_multi vpc_id_for_logs=""
+  local want_flow want_trail flow_traffic trail_multi vpc_id_for_logs="" want_otel
+  want_otel="${ENABLE_OTEL:-$(get_metadata "otel")}"
   want_flow="${ENABLE_VPC_FLOW_LOGS:-$(get_metadata "audit_vpc_flow_logs")}"
   want_trail="${ENABLE_CLOUDTRAIL:-$(get_metadata "audit_cloudtrail")}"
   flow_traffic="${FLOW_LOGS_TRAFFIC:-$(get_metadata "audit_flow_logs_traffic")}"
@@ -8973,6 +9022,7 @@ print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
     -var="flow_log_traffic_type=${flow_traffic}"
     -var="enable_cloudtrail=${want_trail:-false}"
     -var="cloudtrail_multi_region=${trail_multi:-false}"
+    -var="enable_otel=${want_otel:-false}"
   )
 
   # Adopt what already exists outside this state (log groups the agent created, an add-on installed by hand), so the
@@ -9011,6 +9061,7 @@ print(json.dumps(sorted(i for i in ids if i == c or i.startswith(c + "-"))))
     log "Audit: CloudTrail trail $(tofu -chdir="${OBSERVABILITY_DIR}" output -raw cloudtrail_name 2>/dev/null || true) -> S3 bucket $(tofu -chdir="${OBSERVABILITY_DIR}" output -raw cloudtrail_bucket 2>/dev/null || true) (private, encrypted, log-file validation on)."
     log "NOTE: a second CloudTrail trail in an account that already has one (or an organization trail) is billed; check that you need it."
   fi
+  [[ "${want_otel}" == true ]] && { install_otel_collector || return; }
   log "CloudWatch: Container Insights on, container logs in /aws/containerinsights/${CLUSTER_NAME}/application, alarms -> ${topic}."
   if [[ -n "${emails}" ]]; then
     log "MANUAL STEP: each alarm address (${emails}) gets an 'AWS Notification - Subscription Confirmation' mail; alarms reach it only after the link in it is clicked."

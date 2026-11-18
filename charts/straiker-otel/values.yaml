@@ -1,0 +1,24 @@
+# AWS Distro for OpenTelemetry collector. Pulled from public.ecr.aws (Karpenter already needs that host); override
+# image.repository to use a mirror.
+image:
+  repository: public.ecr.aws/aws-observability/aws-otel-collector
+  tag: v0.51.0
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+serviceAccount:
+  # Bound to the IAM role by EKS Pod Identity (terraform/aws/observability, enable_otel).
+  name: otel-collector
+
+# CloudWatch / X-Ray region and the CloudWatch metric namespace.
+awsRegion: "us-east-1"
+clusterName: "straiker"
+metricNamespace: "Straiker"
+
+# Fraction of traces kept by the collector (1.0 = all). Cost lever: X-Ray bills per trace.
+traceSamplePercent: 100
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { memory: 512Mi }

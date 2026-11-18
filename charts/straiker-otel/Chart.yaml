@@ -1,0 +1,12 @@
+apiVersion: v2
+name: straiker-otel
+description: >
+  OpenTelemetry Collector (AWS Distro) for on-prem installs. Services send OTLP (4317 gRPC, 4318 HTTP) to this Service;
+  traces go to AWS X-Ray and metrics to CloudWatch (EMF), authenticated through Pod Identity (role created by
+  terraform/aws/observability when --otel is set). Opt-in.
+type: application
+version: 0.1.0
+appVersion: "v0.51.0"
+maintainers:
+  - name: Straiker Team
+    email: platform@straiker.ai

@@ -118,3 +118,21 @@ variable "cloudtrail_force_destroy" {
   type        = bool
   default     = false
 }
+
+variable "enable_otel" {
+  description = "Create the IAM role (EKS Pod Identity) the OpenTelemetry collector uses to write traces to X-Ray and metrics to CloudWatch (the collector itself is the straiker-otel chart, installed by the installer)."
+  type        = bool
+  default     = false
+}
+
+variable "otel_namespace" {
+  description = "Namespace of the OpenTelemetry collector (Pod Identity association)."
+  type        = string
+  default     = "observability"
+}
+
+variable "otel_service_account" {
+  description = "ServiceAccount of the OpenTelemetry collector."
+  type        = string
+  default     = "otel-collector"
+}

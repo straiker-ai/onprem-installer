@@ -27,3 +27,8 @@ output "cloudtrail_name" {
   description = "Name of the CloudTrail trail (empty when not enabled)."
   value       = var.enable_cloudtrail ? aws_cloudtrail.this[0].name : ""
 }
+
+output "otel_role_arn" {
+  description = "IAM role of the OpenTelemetry collector (empty when enable_otel is false)."
+  value       = var.enable_otel ? aws_iam_role.otel[0].arn : ""
+}

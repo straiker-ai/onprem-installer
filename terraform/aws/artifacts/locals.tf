@@ -25,6 +25,7 @@ locals {
     "dexidp/dex",
     "library/caddy",
     "redpandadata/connect",
+    "aws-observability/aws-otel-collector",
     "aws-cli/aws-cli",
     "liquibase/liquibase",
     "clickhouse/clickhouse-server",

@@ -58,6 +58,6 @@ variable "chart_names" {
     "platform-api-gateway", "platform-connect", "platform-databridge", "platform-foundation", "platform-grid",
     "platform-portico", "platform-registry", "straiker-argus-v3", "straiker-artifact", "straiker-ascend", "straiker-ch-sync",
     "straiker-clickhouse", "straiker-core", "straiker-data", "straiker-defend", "straiker-edge", "straiker-inference",
-    "straiker-ingest", "straiker-system",
+    "straiker-ingest", "straiker-otel", "straiker-system",
   ]
 }
