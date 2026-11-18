@@ -6592,9 +6592,15 @@ phase_straiker_core() {
       cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
       # Controls reads its catalog from Argus v3 (registry -> gateway -> /internal/argus/v3): only with the v3 engine.
       cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=$([[ "${DEFEND_ENGINE}" == "v3" ]] && echo true || echo false)")
+      # Controls "Who": naming users (employee-user-controls) and picking groups from connected directories (connectors).
+      # Without them the editor shows a disabled "Add group / Add exception" stub.
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.employee-user-controls=true")
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.connectors=true")
     else
       cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=false")
       cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=false")
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.employee-user-controls=false")
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.connectors=false")
     fi
     # ascend-only hides Defend: on only when Ascend is the sole product.
     if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
