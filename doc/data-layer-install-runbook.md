@@ -353,6 +353,19 @@ Both are off unless asked for; they are applied by phase `observability` and rem
 
 Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase observability --rerun-phase --yes`.
 
+## 6e. Encryption keys, buckets, charts in ECR, OpenTelemetry
+
+**KMS layout (`--kms-layout single|split`).** Decided once per install and remembered (`kms_layout` in the state file); a later flag is ignored with a warning.
+- `split` (default on a **fresh** install): EFS (model cache) uses the `models` key, Secrets Manager the `secrets` key, new EBS volumes (the `gp3` StorageClass) the `ebs` key; Aurora, ElastiCache, MSK, DynamoDB and OpenSearch keep the `data` key. The `transcripts` and `logs` keys exist too.
+- `single` (an install that already has a cluster or a `data` key): nothing is re-keyed. Changing it would replace the EFS file system (the ~65 GB model cache is re-downloaded) and re-key every secret, so it is never done automatically. Node root volumes use the default EBS key in both layouts.
+- Existing installs get only the additive part on the next `aws-data` run: the `transcripts` and `logs` keys, the three buckets below, and a wider `kms:Decrypt` grant on the pod roles. No existing resource changes.
+
+**Buckets.** `<cluster>-<account>-transcripts` (key `transcripts`, versioned), `-exports` (data key), `-logs` (key `logs`) next to `-grid-artifacts`. Private, TLS-only. No service writes to them yet: they exist for the reference layout and for the services that adopt them.
+
+**Charts in ECR (`--charts-from-ecr`, opt-in, remembered).** The `aws-artifacts` phase creates one ECR repo per chart (`<prefix>/charts/<name>`). With the flag, every run packages `charts/*`, pushes them (OCI, mutable tag = the chart version), pulls them back and deploys from the pulled copy, so what runs is what ECR holds. A chart that cannot be pushed or pulled is used from `charts/` with a warning. Existing installs: run `--phase aws-artifacts --rerun-phase` once first (creates the repos).
+
+**OpenTelemetry (`--otel`, opt-in, remembered).** The `observability` phase creates the collector's IAM role (Pod Identity), mirrors nothing itself, and installs the `straiker-otel` chart (AWS Distro collector, 2 replicas, namespace `observability`): traces go to X-Ray, metrics to CloudWatch (namespace `Straiker/<cluster>`). It also writes `otel-secret` (standard `OTEL_*` variables pointing at `otel-collector.observability:4318`) in the app namespace. Order for a first enable: `--phase aws-artifacts,artifacts-sync --rerun-phase` (mirrors the collector image), then `--phase observability --otel`, then `--phase platform-services,straiker-argus-v3 --rerun-phase` so the pods read the secret. Not verified: that every service's SDK honours these standard variables (the secret's original contract is not in this repo).
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).

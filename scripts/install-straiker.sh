@@ -6290,7 +6290,7 @@ for j in items:
 # The tag the artifact chart mirrors for <repo> (from charts/straiker-artifact/values.yaml): one source of truth, so a chart can never
 # ask for a tag the mirror does not carry.
 mirrored_image_tag() {
-  awk -v repo="onprem-base/$1" '$0 ~ "source:.*" repo "$" { found = 1; next } found && $1 == "tag:" { gsub(/"/, "", $2); print $2; exit }' \
+  awk -v repo="$1" '$0 ~ "source:.*(onprem-base|public[.]ecr[.]aws)/" repo "$" { found = 1; next } found && $1 == "tag:" { gsub(/"/, "", $2); print $2; exit }' \
     "${CHARTS_ROOT}/straiker-artifact/values.yaml"
 }
 
