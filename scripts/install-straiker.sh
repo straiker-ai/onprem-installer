@@ -6017,6 +6017,51 @@ phase_verify_data_layer() {
     fail_count=$((fail_count + 1))
   fi
 
+  # 1c. Mirrored third-party images must run on every architecture of the cluster's nodes (Graviton and x86 side by side): a tag that is a
+  # single-arch image, or an index without a node's architecture, starts on one node and dies with "exec format error" on another.
+  local node_archs mi_repo mi_tag mi_manifest mi_info mi_missing mi_digest mi_url mi_arch mi_bad=0
+  node_archs="$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}' 2>/dev/null | tr ' ' '\n' | sort -u | paste -sd, - || true)"
+  if [[ -n "${node_archs}" ]]; then
+    while read -r mi_repo mi_tag; do
+      [[ -z "${mi_repo}" || "${mi_repo}" == straiker/* ]] && continue
+      mi_manifest="$(aws ecr batch-get-image --region "${AWS_REGION}" --repository-name "${TF_PREFIX}/${mi_repo}" \
+        --image-ids "imageTag=${mi_tag}" --query 'images[0].imageManifest' --output text 2>/dev/null || true)"
+      # "index:<archs the nodes need but the index lacks>" or "single:<config digest>"
+      mi_info="$(printf '%s' "${mi_manifest}" | NODE_ARCHS="${node_archs}" python3 -c '
+import json, os, sys
+try:
+    m = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+if "manifests" in m:
+    have = {x["platform"]["architecture"] for x in m["manifests"] if x.get("platform")}
+    print("index:" + ",".join(sorted(set(os.environ["NODE_ARCHS"].split(",")) - have)))
+elif "config" in m:
+    print("single:" + m["config"]["digest"])
+' 2>/dev/null || true)"
+      mi_missing=""
+      case "${mi_info}" in
+        index:*) mi_missing="${mi_info#index:}" ;;
+        single:*)
+          # A single image says its architecture in its config blob.
+          mi_digest="${mi_info#single:}"
+          mi_url="$(aws ecr get-download-url-for-layer --region "${AWS_REGION}" --repository-name "${TF_PREFIX}/${mi_repo}" \
+            --layer-digest "${mi_digest}" --query downloadUrl --output text 2>/dev/null || true)"
+          mi_arch=""
+          [[ -n "${mi_url}" && "${mi_url}" != "None" ]] && mi_arch="$(curl -fsS "${mi_url}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("architecture",""))' 2>/dev/null || true)"
+          # every node architecture except the one this image is built for
+          [[ -n "${mi_arch}" ]] && mi_missing="$(printf '%s' "${node_archs}" | tr ',' '\n' | grep -vx "${mi_arch}" | paste -sd, - || true)"
+          ;;
+      esac
+      if [[ -n "${mi_missing}" ]]; then
+        log "FAIL  Image ${mi_repo}:${mi_tag} has no ${mi_missing} build but the cluster has ${mi_missing} nodes: its pods crash there with 'exec format error'. Re-copy it as a multi-arch index (crane copy <upstream> <mirror source>), then re-run phase artifacts-sync."
+        fail_count=$((fail_count + 1))
+        mi_bad=$((mi_bad + 1))
+      fi
+    done < <(awk '/^[[:space:]]*tag:/ { t = $2; gsub(/"/, "", t) } /^[[:space:]]*destRepository:/ { print $2, t }' "${CHARTS_ROOT}/straiker-artifact/values.yaml" 2>/dev/null)
+    [[ "${mi_bad}" -eq 0 ]] && log "PASS  Mirrored third-party images run on every node architecture (${node_archs})."
+  fi
+
   # 2. ElastiCache accepts TLS (rediss://). Serverless caches are TLS-only.
   kubectl delete pod verify-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   result="$(kubectl run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
