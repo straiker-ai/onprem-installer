@@ -40,6 +40,32 @@ data:
           "concurrency_and_buffer_size": { "concurrency": 10, "buffer_size": 100 }
         }
       },
+      {{- if .Values.db.enabled }}
+      "config_store": {
+        "enabled": true,
+        "type": "postgres",
+        "config": {
+          "host": {{ required "db.host is required when db.enabled" .Values.db.host | quote }},
+          "port": {{ .Values.db.port | quote }},
+          "user": {{ .Values.db.user | quote }},
+          "password": "env.BIFROST_DB_PASSWORD",
+          "db_name": {{ .Values.db.name | quote }},
+          "ssl_mode": {{ .Values.db.sslMode | quote }}
+        }
+      },
+      "logs_store": {
+        "enabled": true,
+        "type": "postgres",
+        "config": {
+          "host": {{ .Values.db.host | quote }},
+          "port": {{ .Values.db.port | quote }},
+          "user": {{ .Values.db.user | quote }},
+          "password": "env.BIFROST_DB_PASSWORD",
+          "db_name": {{ .Values.db.name | quote }},
+          "ssl_mode": {{ .Values.db.sslMode | quote }}
+        }
+      },
+      {{- end }}
       "plugins": [
         {
           "name": "telemetry",

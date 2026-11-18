@@ -42,6 +42,13 @@ spec:
               value: {{ .Values.service.port | quote }}
             - name: APP_HOST
               value: "0.0.0.0"
+            {{- if .Values.db.enabled }}
+            - name: BIFROST_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.passwordSecret.name }}
+                  key: {{ .Values.db.passwordSecret.key }}
+            {{- end }}
             # API keys — mapped from secretRef.name to the names bifrost reads via env.*
             - name: OPENAI_API_KEY
               valueFrom:

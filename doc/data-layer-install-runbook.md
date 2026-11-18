@@ -366,6 +366,15 @@ Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase obs
 
 **OpenTelemetry (`--otel`, opt-in, remembered).** The `observability` phase creates the collector's IAM role (Pod Identity), mirrors nothing itself, and installs the `straiker-otel` chart (AWS Distro collector, 2 replicas, namespace `observability`): traces go to X-Ray, metrics to CloudWatch (namespace `Straiker/<cluster>`). It also writes `otel-secret` (standard `OTEL_*` variables pointing at `otel-collector.observability:4318`) in the app namespace. Order for a first enable: `--phase aws-artifacts,artifacts-sync --rerun-phase` (mirrors the collector image), then `--phase observability --otel`, then `--phase platform-services,straiker-argus-v3 --rerun-phase` so the pods read the secret. Not verified: that every service's SDK honours these standard variables (the secret's original contract is not in this repo).
 
+## 6f. Second Aurora cluster (Ascend, Bifrost)
+
+**Layout (`--aurora-layout single|split`).** Decided once per install and remembered (`aurora_layout`); a later flag is ignored with a warning.
+- `split` (default on a **fresh** install): a second Serverless v2 cluster `<cluster>-aurora-ascend` (1-8 ACU) holds the `iris` (Ascend) and `bifrost` databases; `<cluster>-aurora` keeps the platform services and the frontend. Ascend's host comes from the `ascend` endpoint recorded by `aws-data`; the per-cluster bootstrap Job, admin Secret and DSNs already existed in `straiker-data`.
+- `single` (an install that already has `<cluster>-aurora`): nothing moves. An existing `-ascend` cluster is always treated as `split` (leaving it out would make Terraform destroy it).
+- Forcing `split` on an existing install creates an **empty** `iris` database on the new cluster. Ascend's data stays on the old cluster and Ascend starts blank. To keep it: dump the old `iris` database (`pg_dump` from a pod, Aurora master secret in Secrets Manager), run `aws-data` and `data-bootstrap` with the flag, restore into the new one, then re-run `straiker-ascend`.
+
+**Bifrost (`--bifrost-postgres`, opt-in, remembered).** Until now Bifrost kept its configuration and request logs in a per-pod SQLite file, so its 2 replicas did not share state. With the flag the `straiker-bifrost` chart writes `config_store` and `logs_store` (Postgres) into `config.json`, host from Aurora (the `ascend` cluster in `split`), password from `straiker-db-dsn` (`PASSWORD_bifrost`). Not verified: the exact `config_store` schema of the pinned Bifrost image (v1.6.7); check the pods start and `/health` answers after enabling.
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).

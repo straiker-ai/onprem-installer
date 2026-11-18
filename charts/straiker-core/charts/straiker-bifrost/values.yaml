@@ -65,3 +65,17 @@ bedrock:
   # when AI_PROVIDER_MODE=bedrock. When false, static AWS_ACCESS_KEY_ID/
   # AWS_SECRET_ACCESS_KEY env vars are injected from secretRef instead.
   podIdentity: false
+
+# Postgres for Bifrost's config store and request logs (off by default: Bifrost then keeps them in a local SQLite file, which is
+# per-pod). On, every replica shares one store. The installer enables it with --bifrost-postgres: host/port from Aurora, the
+# password from straiker-data's DSN Secret (PASSWORD_bifrost). Needs the straiker-data bifrost database to exist.
+db:
+  enabled: false
+  host: ""
+  port: 5432
+  name: bifrost
+  user: bifrost
+  sslMode: require
+  passwordSecret:
+    name: straiker-db-dsn
+    key: PASSWORD_bifrost

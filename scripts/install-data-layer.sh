@@ -44,6 +44,8 @@ CLOUDTRAIL_MULTI_REGION=""
 KMS_LAYOUT=""
 CHARTS_FROM_ECR=""
 ENABLE_OTEL=""
+AURORA_LAYOUT=""
+BIFROST_POSTGRES=""
 PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
 SSO_TYPE=""
@@ -109,6 +111,8 @@ Options:
   --kms-layout L             single | split: own KMS keys for EFS, secrets and EBS (default: split on a fresh install, single on an existing one; never changes later)
   --charts-from-ecr          push the charts to the install's ECR (OCI) and deploy every release from there (needs the aws-artifacts phase)
   --otel                     opt-in OpenTelemetry: collector -> X-Ray traces + CloudWatch metrics (run with the observability phase)
+  --aurora-layout L          single | split: a second Aurora cluster for iris (Ascend) and bifrost (default: split on a fresh install, single on an existing one; never changes later)
+  --bifrost-postgres         Bifrost keeps its config and request logs in Postgres (shared by its replicas)
   --vpc-flow-logs            opt-in audit: VPC Flow Logs into CloudWatch Logs (--flow-logs-traffic ALL|ACCEPT|REJECT)
   --cloudtrail               opt-in audit: a CloudTrail trail into a private S3 bucket (--cloudtrail-multi-region for all regions)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
@@ -157,6 +161,8 @@ while [[ $# -gt 0 ]]; do
     --kms-layout) KMS_LAYOUT="${2:-}"; shift 2 ;;
     --charts-from-ecr) CHARTS_FROM_ECR=true; shift ;;
     --otel) ENABLE_OTEL=true; shift ;;
+    --aurora-layout) AURORA_LAYOUT="${2:-}"; shift 2 ;;
+    --bifrost-postgres) BIFROST_POSTGRES=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
       | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
@@ -379,6 +385,8 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ -n "${KMS_LAYOUT}" ]] && run_args+=(--kms-layout "${KMS_LAYOUT}")
 [[ "${CHARTS_FROM_ECR}" == true ]] && run_args+=(--charts-from-ecr)
 [[ "${ENABLE_OTEL}" == true ]] && run_args+=(--otel)
+[[ -n "${AURORA_LAYOUT}" ]] && run_args+=(--aurora-layout "${AURORA_LAYOUT}")
+[[ "${BIFROST_POSTGRES}" == true ]] && run_args+=(--bifrost-postgres)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ ${#EXTRA_FLAGS[@]} -gt 0 ]] && run_args+=("${EXTRA_FLAGS[@]}")

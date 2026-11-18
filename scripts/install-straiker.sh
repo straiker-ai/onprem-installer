@@ -139,6 +139,10 @@ CHARTS_FROM_ECR="${CHARTS_FROM_ECR:-}"
 CHARTS_ROOT_READY=false
 # Opt-in OpenTelemetry: a collector (traces -> X-Ray, metrics -> CloudWatch) and an otel-secret the services read. Remembered.
 ENABLE_OTEL="${ENABLE_OTEL:-}"
+# Aurora layout: "single" (one shared cluster, every existing install) or "split" (a second cluster, "<cluster>-aurora-ascend", for the
+# iris and bifrost databases). Decided once and remembered. --bifrost-postgres: Bifrost keeps its config and logs in Postgres.
+AURORA_LAYOUT="${AURORA_LAYOUT:-}"
+BIFROST_POSTGRES="${BIFROST_POSTGRES:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -896,6 +900,13 @@ Options:
   --otel                           Opt-in OpenTelemetry: installs a collector (chart straiker-otel, namespace observability) that sends traces to AWS
                                    X-Ray and metrics to CloudWatch (namespace Straiker/<cluster>), plus the otel-secret the services read.
                                    Run with the observability phase; then re-run platform-services and straiker-argus-v3 so the pods pick it up.
+  --aurora-layout single|split     Aurora clusters. split = a second Serverless v2 cluster (<cluster>-aurora-ascend) holding the iris
+                                   (Ascend) and bifrost databases, as in the reference (default on a FRESH install). single = one shared
+                                   cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
+                                   install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
+                                   (dump/restore it first: runbook 6f).
+  --bifrost-postgres               Bifrost keeps its configuration and request logs in its Postgres database (needed to share state
+                                   between its replicas). Off by default; remembered.
   --kms-layout single|split        Encryption keys. split = own customer-managed keys for EFS (models), Secrets Manager and EBS
                                    volumes, plus the transcripts/logs keys (default on a FRESH install). single = the one shared data
                                    key (what an existing install keeps: changing it would replace the EFS model cache and re-key
@@ -1875,6 +1886,14 @@ parse_args() {
         ENABLE_OTEL=true
         shift
         ;;
+      --aurora-layout)
+        AURORA_LAYOUT=${2:-}
+        shift 2
+        ;;
+      --bifrost-postgres)
+        BIFROST_POSTGRES=true
+        shift
+        ;;
       --admin-email)
         ADMIN_EMAIL=${2:-}
         shift 2
@@ -2387,6 +2406,41 @@ resolve_kms_layout() {
   esac
   set_metadata "kms_layout" "${KMS_LAYOUT}"
   log "KMS layout for this install: ${KMS_LAYOUT}."
+}
+
+# Aurora layout, decided ONCE per install and remembered. An install that already has the shared cluster (or an "ascend" one) is never
+# changed by default: moving the iris database would start Ascend with an empty one.
+resolve_aurora_layout() {
+  local stored
+  stored="$(get_metadata "aurora_layout")"
+  if [[ -n "${stored}" ]]; then
+    if [[ -n "${AURORA_LAYOUT}" && "${AURORA_LAYOUT}" != "${stored}" ]]; then
+      log "WARNING: --aurora-layout ${AURORA_LAYOUT} ignored: this install was created with aurora_layout=${stored}."
+    fi
+    AURORA_LAYOUT="${stored}"
+    return
+  fi
+  local existing_platform=false existing_ascend=false
+  aws rds describe-db-clusters --db-cluster-identifier "${CLUSTER_NAME}-aurora" --region "${AWS_REGION}" >/dev/null 2>&1 && existing_platform=true
+  aws rds describe-db-clusters --db-cluster-identifier "${CLUSTER_NAME}-aurora-ascend" --region "${AWS_REGION}" >/dev/null 2>&1 && existing_ascend=true
+  case "${AURORA_LAYOUT}" in
+    single | split) ;;
+    "")
+      # An existing ascend cluster means split (omitting it would make Terraform destroy it); an existing shared cluster only, single.
+      if [[ "${existing_ascend}" == true ]]; then AURORA_LAYOUT=split
+      elif [[ "${existing_platform}" == true ]]; then AURORA_LAYOUT=single
+      else AURORA_LAYOUT=split; fi
+      ;;
+    *)
+      echo "--aurora-layout must be single or split." >&2
+      exit 2
+      ;;
+  esac
+  if [[ "${AURORA_LAYOUT}" == split && "${existing_platform}" == true && "${existing_ascend}" != true ]]; then
+    log "WARNING: forcing aurora_layout=split on an install that already has '${CLUSTER_NAME}-aurora': the iris (Ascend) database on the new cluster starts EMPTY and Ascend's existing data stays on the old one. Dump/restore it (runbook 6f) or accept the loss."
+  fi
+  set_metadata "aurora_layout" "${AURORA_LAYOUT}"
+  log "Aurora layout for this install: ${AURORA_LAYOUT}."
 }
 
 emit_eks_endpoint_tfvars() {
@@ -3363,6 +3417,10 @@ phase_aws_data() {
 
   write_data_backend_config "${bucket_name}"
   resolve_kms_layout
+  resolve_aurora_layout
+  # split: the second Aurora cluster. Passed only then: an existing single install must keep the module's default (platform only).
+  local aurora_clusters_var='{platform={min_capacity=2,max_capacity=16}}'
+  [[ "${AURORA_LAYOUT}" == split ]] && aurora_clusters_var='{platform={min_capacity=2,max_capacity=16},ascend={min_capacity=1,max_capacity=8}}'
 
   # platform-sa grants follow the services being installed: databridge delivers into customer
   # accounts (sts:AssumeRole), connect sends email (SES).
@@ -3530,6 +3588,7 @@ EOF
       -var="create_opensearch_service_linked_role=${os_slr}" \
       -var="create_cognito_email_service_linked_role=${cog_slr}" \
       -var="kms_layout=${KMS_LAYOUT}" \
+      -var="aurora_clusters=${aurora_clusters_var}" \
       -var="cognito_use_ses=$1" \
       -var="cognito_callback_urls=[\"$(app_origin)/login/oidc/callback\"]" \
       -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"
@@ -4533,6 +4592,10 @@ phase_data_bootstrap() {
     --set-string "msk.bootstrapBrokers=${brokers//,/\\,}"
   )
   data_sets+=(${aurora_sets[@]+"${aurora_sets[@]}"})
+  # split layout: the iris (Ascend) and bifrost databases live on the "ascend" cluster. Only then: with one cluster they stay on "platform".
+  if [[ "$(get_metadata "aurora_layout")" == "split" && -n "$(get_metadata "aurora_ascend_endpoint")" ]]; then
+    data_sets+=(--set "databases.iris.cluster=ascend" --set "databases.bifrost.cluster=ascend")
+  fi
 
   # straiker-db-dsn and platform-secret are ExternalSecrets reading Secrets Manager (like SaaS). ClickHouse
   # host/port are not secret: passed as values from the live clickhouse-credentials Secret.
@@ -6680,6 +6743,15 @@ phase_straiker_core() {
   # create an unused top-level key instead.
   # Always: a mirrored image that is replaced under the same tag (the multi-arch fix) must be re-pulled, not served from a node's cache.
   cmd+=(--set "straiker-bifrost.image.pullPolicy=Always")
+  # --bifrost-postgres: Bifrost's config store and request logs in its Postgres database (Aurora; the "ascend" cluster in the split layout).
+  [[ "${BIFROST_POSTGRES}" == true ]] && set_metadata "bifrost_postgres" "true"
+  if [[ "$(get_metadata "bifrost_postgres")" == "true" && "${DATA_LAYER}" == "true" ]]; then
+    local bifrost_db_host
+    bifrost_db_host="$(get_metadata "aurora_endpoint")"
+    [[ "$(get_metadata "aurora_layout")" == "split" && -n "$(get_metadata "aurora_ascend_endpoint")" ]] && bifrost_db_host="$(get_metadata "aurora_ascend_endpoint")"
+    cmd+=(--set "straiker-bifrost.db.enabled=true" --set-string "straiker-bifrost.db.host=${bifrost_db_host}"
+      --set "straiker-bifrost.db.port=$(get_metadata "aurora_port")")
+  fi
   # HA: the console autoscales from 2 (needs the metrics API), the LLM gateway runs 2.
   if production_sizing; then
     cmd+=(--set "straiker-frontend.frontend.hpa.enabled=true" --set "straiker-frontend.frontend.hpa.minReplicas=2"
