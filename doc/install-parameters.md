@@ -34,7 +34,7 @@ Environment variables: `STRAIKER_STATE_FILE` (state file per install), `AWS_PROF
 | `--namespace NS` | Kubernetes namespace | `straiker` |
 | `--domain D` | Base domain: `straiker.D`, `straiker-defend.D`, `straiker-ascend.D`, `api.D` | none |
 | `--route53` | The public Route 53 zone for `--domain` is in this account: certificates and DNS records are automatic | off |
-| `--create-zone` | With `--route53`: create the public Route 53 zone for `--domain` in this account if it does not exist, print its four name servers, then wait before building anything until you confirm the NS record was added in the parent zone and `dig +short NS <domain>` returns them. Re-runs skip the wait once it resolves. The zone is never deleted by teardown | off |
+| `--create-zone` | With `--route53`: **Terraform** (`terraform/aws/dns`, installer phase `dns-zone`) creates the public Route 53 zone for `--domain` and the API gateway's ACM certificate with its validation record. It prints the four name servers and the NS record to add in the parent zone, then waits (before anything costly is built) until `dig +short NS <domain>` returns them. Remembered. The zone is never deleted by teardown. `--check` only reports whether the zone exists and is delegated | off |
 | `--certificate-arn ARN` | Without `--route53`: your ACM certificate (same region) covering the console hosts; the `api.D` certificate is still requested (DNS records are printed) | none |
 | `--edge-type T` | `xalb` (internet-facing ALB + ACM + WAF), `alb` (internal), `internal` (Caddy, offline tests), `none`, `tailscale` | `xalb` |
 | `--products LIST` | Products to install: `ascend`, `defend` | `ascend,defend` |

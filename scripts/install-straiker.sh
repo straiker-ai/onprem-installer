@@ -38,6 +38,7 @@ DATA_SRC="${REPO_ROOT}/terraform/aws/data"
 # charts/straiker-edge Helm-chart identifiers (EDGE_RELEASE/EDGE_TYPE/
 # EDGE_CHART_NAME) already used throughout this script.
 EDGE_INFRA_SRC="${REPO_ROOT}/terraform/aws/edge"
+DNS_INFRA_SRC="${REPO_ROOT}/terraform/aws/dns"
 OBSERVABILITY_SRC="${REPO_ROOT}/terraform/aws/observability"
 
 # GCP equivalents — only used when CLOUD_PROVIDER=gke.
@@ -55,6 +56,7 @@ EKS_DIR="${TF_WORK_ROOT}/aws/eks"
 ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
 DATA_DIR="${TF_WORK_ROOT}/aws/data"
 EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
+DNS_INFRA_DIR="${TF_WORK_ROOT}/aws/dns"
 OBSERVABILITY_DIR="${TF_WORK_ROOT}/aws/observability"
 GCP_TFBE_DIR="${TF_WORK_ROOT}/gcp/tfbe"
 GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
@@ -565,6 +567,10 @@ ALB_ROUTE53_AUTOMATION="${ALB_ROUTE53_AUTOMATION:-}"
 # the default (disabled) is the one that works regardless of DNS/account
 # topology, since it just requires an ARN you already have.
 XALB_ROUTE53_AUTOMATION="${XALB_ROUTE53_AUTOMATION:-}"
+# Opt-in via --create-zone (needs --custom-domain and the --xalb-route53/--alb-route53 flag): Terraform (terraform/aws/dns, phase
+# dns-zone) creates the public Route53 zone of --custom-domain and the API gateway's ACM certificate with its validation record. The NS
+# record in the parent zone stays manual: the phase prints it and waits until DNS shows it. Remembered; never destroyed by teardown.
+CREATE_ZONE="${CREATE_ZONE:-}"
 # Optional, only used when EDGE_TYPE=alb — charts/straiker-edge's
 # alb.subnets. Comma-separated subnet IDs; blank means rely on the AWS Load
 # Balancer Controller's subnet auto-discovery
@@ -632,7 +638,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge" "observability")
+declare -a ALL_PHASES=("eks-tfbe" "dns-zone" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge" "observability")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -983,6 +989,11 @@ Options:
                                    printed at the end of the install). Leave unset if the zone
                                    lives elsewhere — bring your own --alb-certificate-arn
                                    instead.
+  --create-zone                   With --custom-domain and --xalb-route53/--alb-route53: create the domain's public Route53
+                                   zone (and the API gateway's ACM certificate) with Terraform, phase dns-zone. Prints the four
+                                   name servers and the NS record to add in the parent zone (a manual step: another account,
+                                   Cloudflare or a registrar), then waits before any cost until `dig +short NS <domain>` returns
+                                   them. Remembered. The zone is never deleted by the teardown.
   --xalb-route53                  Only used with --edge-type xalb. Opt-in convenience for the
                                    common case where the domain's Route53 zone is in this same
                                    AWS account: auto-issues+DNS-validates a real ACM
@@ -1356,6 +1367,10 @@ show_plan() {
   cat <<'EOF'
 Installer phases:
   1) eks-tfbe             - create the S3 Terraform state bucket. Always runs.
+  1b) dns-zone            - (optional, --create-zone) Terraform (terraform/aws/dns) creates the public Route53 zone of
+                             --custom-domain and the API gateway's ACM certificate with its DNS validation record. Prints the
+                             four name servers and the NS record to add in the PARENT zone (manual), then waits, before any
+                             cost, until `dig +short NS <domain>` returns them. Never destroyed by the teardown.
   2) eks-cluster          - (optional, requires --install-eks) provision the EKS cluster + Karpenter IAM via Terraform.
   3) karpenter            - (optional, requires --install-eks) install the Karpenter controller itself
                              (its OCI chart) using the IAM/SQS/pod-identity Terraform already set up.
@@ -2110,6 +2125,10 @@ parse_args() {
       --custom-domain)
         CUSTOM_ORIGIN_DOMAIN=${2:-}
         shift 2
+        ;;
+      --create-zone)
+        CREATE_ZONE=true
+        shift
         ;;
       --alb-certificate-arn)
         ALB_CERTIFICATE_ARN=${2:-}
@@ -4959,6 +4978,168 @@ install_api_gateway() {
   gateway_via_alb && return 0
   verify_gateway_exposure || return 1
   gateway_dns_ensure
+}
+
+# ---- dns-zone: the base domain's public Route53 zone and the gateway's ACM certificate, in Terraform (terraform/aws/dns) ----
+write_dns_backend_config() {
+  local bucket_name=$1
+  cat > "${DNS_INFRA_DIR}/backend.tf" <<EOF
+# Generated by scripts/install-straiker.sh — safe to delete between runs.
+terraform {
+  backend "s3" {
+    bucket       = "${bucket_name}"
+    key          = "s6r-onprem/dns.tfstate"
+    region       = "${AWS_REGION}"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+EOF
+}
+
+# dns_live_name_servers <domain> [resolver]: what DNS currently says the NS of <domain> are (sorted, lower case, no trailing dot).
+dns_live_name_servers() {
+  local at=()
+  [[ -n "${2:-}" ]] && at=("@$2")
+  if command -v dig >/dev/null 2>&1; then
+    dig +short +time=5 +tries=1 NS "$1" ${at[@]+"${at[@]}"} 2>/dev/null
+  elif command -v nslookup >/dev/null 2>&1; then
+    nslookup -type=NS "$1" ${2:-} 2>/dev/null | sed -n 's/.*nameserver = //p'
+  fi | sed 's/\.$//' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort
+}
+
+# dns_zone_delegated <domain> <expected NS, newline separated>: true when the system resolver, 8.8.8.8 or 1.1.1.1 returns exactly those.
+dns_zone_delegated() {
+  local r got
+  for r in "" 8.8.8.8 1.1.1.1; do
+    got="$(dns_live_name_servers "$1" "${r}")"
+    [[ -n "${got}" && "${got}" == "$2" ]] && return 0
+  done
+  return 1
+}
+
+phase_dns_zone() {
+  local create="${CREATE_ZONE:-$(get_metadata "create_zone")}"
+  if [[ "${create}" != "true" ]]; then
+    log "--create-zone not set: the base domain's DNS zone is not managed by this installer."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--create-zone not set."
+    return
+  fi
+  require_command aws
+  require_command tofu
+
+  local domain="${CUSTOM_ORIGIN_DOMAIN:-$(get_metadata "custom_domain")}"
+  if [[ -z "${domain}" ]]; then
+    mark_phase_blocked "--create-zone needs --custom-domain (the base domain, e.g. onprem.example.com)."
+    return
+  fi
+  if [[ "${EDGE_TYPE}" != "xalb" && "${EDGE_TYPE}" != "alb" ]]; then
+    mark_phase_blocked "--create-zone only applies to --edge-type xalb or alb (got '${EDGE_TYPE:-none}')."
+    return
+  fi
+  if [[ "${XALB_ROUTE53_AUTOMATION:-$(get_metadata "xalb_route53_automation")}" != "true" && "${ALB_ROUTE53_AUTOMATION:-$(get_metadata "alb_route53_automation")}" != "true" ]]; then
+    mark_phase_blocked "--create-zone needs --xalb-route53 (xalb) or --alb-route53 (alb): the zone is created in this account and used for the certificates."
+    return
+  fi
+  set_metadata "create_zone" "true"
+
+  require_terraform_dir "${DNS_INFRA_SRC}" || return
+  sync_terraform_workdir "${DNS_INFRA_SRC}" "${DNS_INFRA_DIR}"
+  local bucket_name
+  bucket_name="$(get_metadata "bootstrap_bucket")"
+  [[ -n "${bucket_name}" ]] || bucket_name="$(resolve_bucket_name)"
+  if ! aws s3api head-bucket --bucket "${bucket_name}" >/dev/null 2>&1; then
+    mark_phase_blocked "Bootstrap bucket '${bucket_name}' not found. Run phase 'eks-tfbe' first."
+    return
+  fi
+  write_dns_backend_config "${bucket_name}"
+
+  # The gateway certificate: only for an internet-facing gateway with a name under the base domain and no certificate of the
+  # customer's own. Anything else is left to the gateway-cert phase, exactly as before.
+  local exposure gw
+  exposure="${GATEWAY_EXPOSURE:-$(get_metadata "gateway_exposure")}"
+  exposure="${exposure:-public}"
+  gw="${GATEWAY_DOMAIN:-$(get_metadata "gateway_domain")}"
+  if [[ -z "${gw}" && "${EDGE_TYPE}" == "xalb" ]]; then gw="api.${domain}"; fi
+  if [[ "${exposure}" != "public" || -n "${GATEWAY_CERT_ARN:-}" || "$(get_metadata "gateway_cert_source")" == "own" ]]; then
+    gw=""
+  elif [[ -n "${gw}" && "${gw}" != "${domain}" && "${gw}" != *".${domain}" ]]; then
+    log "Gateway host ${gw} is not under ${domain}: its certificate is left to the gateway-cert phase."
+    gw=""
+  fi
+
+  tofu_init "${DNS_INFRA_DIR}" -upgrade -input=false -migrate-state -force-copy
+  tofu -chdir="${DNS_INFRA_DIR}" apply -auto-approve -input=false \
+    -var="region=${AWS_REGION}" \
+    -var="cluster_name=${CLUSTER_NAME}" \
+    -var="domain=${domain}" \
+    -var="create_zone=true" \
+    -var="gateway_domain=${gw}" \
+    || { mark_phase_blocked "tofu apply of terraform/aws/dns failed (see above)."; return; }
+
+  local want zone_id
+  want="$(tofu -chdir="${DNS_INFRA_DIR}" output -json name_servers | python3 -c 'import json,sys; print("\n".join(sorted(n.rstrip(".").lower() for n in json.load(sys.stdin))))')"
+  zone_id="$(tofu -chdir="${DNS_INFRA_DIR}" output -raw zone_id)"
+  if [[ -z "${want}" || -z "${zone_id}" ]]; then
+    mark_phase_blocked "terraform/aws/dns returned no name servers for ${domain}."
+    return
+  fi
+  set_metadata "dns_zone_id" "${zone_id}"
+  set_metadata "dns_name_servers" "$(printf '%s' "${want}" | tr '\n' ',')"
+
+  if dns_zone_delegated "${domain}" "${want}"; then
+    log "Zone ${domain} (${zone_id}) is delegated: DNS returns its name servers."
+    return
+  fi
+
+  local parent="${domain#*.}" ns answer
+  echo
+  echo "  Zone ${domain} (${zone_id}) was created in this AWS account. Its name servers:"
+  while read -r ns; do echo "      ${ns}."; done <<<"${want}"
+  cat <<EOF
+
+  NEXT (manual, outside this account): in the DNS of the PARENT zone (${parent}) add ONE record:
+      name   ${domain}
+      type   NS
+      TTL    300
+      values the four name servers above (one value each; DNS only if the parent is Cloudflare)
+  Whoever manages ${parent} does this: Route53 in another account, Cloudflare, or a registrar.
+
+  VERIFY (any machine, a few minutes after adding the record):
+      dig +short NS ${domain}
+  EXPECTED answer: exactly the four name servers above, in any order, each ending with a dot:
+EOF
+  while read -r ns; do echo "      ${ns}."; done <<<"${want}"
+  echo
+
+  if ! { : </dev/tty; } 2>/dev/null; then
+    mark_phase_blocked "Add the NS record for ${domain} in the parent zone, check it with 'dig +short NS ${domain}' (it must return the four name servers printed above), then re-run the same command."
+    return
+  fi
+  while true; do
+    printf 'Type "yes" once the NS record is added and dig shows the name servers above ("no" to stop here): '
+    read -r answer < /dev/tty || answer="no"
+    case "${answer}" in
+      [Yy][Ee][Ss]|[Yy])
+        if dns_zone_delegated "${domain}" "${want}"; then
+          log "Delegation verified: ${domain} resolves to this zone's name servers."
+          return
+        fi
+        echo "  Not verified. dig +short NS ${domain} currently returns:"
+        if [[ -n "$(dns_live_name_servers "${domain}")" ]]; then
+          dns_live_name_servers "${domain}" | sed 's/$/./; s/^/      /'
+        else
+          echo "      (nothing: the record is missing or has not propagated yet)"
+        fi
+        echo "  It must return the four name servers listed above. Fix the record or wait a few minutes, then answer again."
+        ;;
+      [Nn]*|"")
+        mark_phase_blocked "Stopped before building anything. The zone ${domain} (${zone_id}) is kept: add the NS record in the parent zone, then re-run the same command."
+        return
+        ;;
+      *) echo '  Please answer "yes" or "no".' ;;
+    esac
+  done
 }
 
 # ---- Gateway TLS certificate: issued by the installer when --gateway-domain is given -----------------------------------------------
@@ -10336,6 +10517,7 @@ run_phase() {
 
   case "${phase}" in
     eks-tfbe) phase_eks_tfbe ;;
+    dns-zone) phase_dns_zone ;;
     eks-cluster) phase_eks_cluster ;;
     karpenter) phase_karpenter ;;
     k8s-preflight) phase_k8s_preflight ;;

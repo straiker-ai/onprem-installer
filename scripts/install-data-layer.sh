@@ -88,9 +88,10 @@ Options:
   --domain D                 base domain for xalb/alb: straiker.D, straiker-defend.D, straiker-ascend.D and api.D
   --route53                  the public Route53 zone for --domain is in this account: certificates and DNS records are
                              created automatically
-  --create-zone              with --route53: create the public Route53 zone for --domain in this account when it does not
-                             exist yet, print its name servers, and wait (before anything is built) until you confirm the
-                             NS record was added in the parent zone and `dig` shows it. Never deleted by teardown.
+  --create-zone              with --route53: Terraform creates the public Route53 zone for --domain (and the API gateway's
+                             certificate) in this account (installer phase dns-zone), prints its name servers and the NS record
+                             to add in the parent zone, and waits before anything costly is built until `dig` shows it.
+                             Never deleted by teardown. --check only reports whether the zone exists and is delegated.
   --certificate-arn ARN      without --route53: your ACM certificate (this region) covering the console hosts; the
                              api.D certificate is still requested by the installer (it prints the DNS records to add)
   --products LIST            default: ascend,defend
@@ -326,7 +327,7 @@ report_plan() {
   packed_summary="$(gpu_plan_packed_summary "${packed_itype}")"
   local zone_line=""
   if [[ "${CREATE_ZONE}" == true ]]; then
-    zone_line="  DNS zone ....... ${DOMAIN}: created here if missing; you then add one NS record in the parent zone and confirm (asked right after this)
+    zone_line="  DNS zone ....... ${DOMAIN}: created by Terraform (phase dns-zone, state in the install bucket), then you add one NS record in the parent zone and confirm
 "
   fi
   case "${packed_itype}" in
@@ -357,10 +358,9 @@ EOF
 
 
 # ------------------------------------------------------------------ DNS zone for --domain (--create-zone)
-# The installer only LOOKS UP the public Route53 zone for --domain (it never creates it). With --create-zone this
-# wrapper creates it, shows the name servers, and waits until the parent zone delegates to it (otherwise ACM
-# validation would sit in PENDING_VALIDATION). The NS record in the parent zone itself cannot be written from here
-# (another account, Cloudflare, a registrar), so it stays a human step: the zone is never deleted on teardown.
+# --create-zone is passed to the installer: its dns-zone phase (terraform/aws/dns) creates the public zone and the API gateway's
+# certificate, prints the NS record to add in the parent zone and waits, before any cost, until DNS shows the delegation. This wrapper
+# only reports the current state in --check (read-only: nothing is created here).
 zone_ids_for_domain() {
   aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN}." \
     --query "HostedZones[?Name=='${DOMAIN}.' && Config.PrivateZone==\`false\`].Id" --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d' || true
@@ -391,85 +391,22 @@ zone_delegated() { # <expected NS list, newline separated>: true when a resolver
   return 1
 }
 
-show_zone_delegation_help() { # <zone id> <expected NS list>
-  local zone="$1" want="$2" parent="${DOMAIN#*.}" ns
-  echo
-  echo "  Zone ${DOMAIN} (${zone}) is in AWS account ${ACCOUNT_ID}. Its name servers:"
-  while read -r ns; do echo "      ${ns}."; done <<<"${want}"
-  cat <<EOF
-
-  NEXT (manual, outside this account): in the DNS of the PARENT zone (${parent}) add ONE record:
-      name   ${DOMAIN}
-      type   NS
-      TTL    300
-      values the four name servers above (one value each; DNS only if the parent is Cloudflare)
-  Whoever manages ${parent} does this: Route53 in another account, Cloudflare, or a registrar.
-
-  VERIFY (run on any machine, wait a few minutes after adding the record):
-      dig +short NS ${DOMAIN}
-  EXPECTED answer: exactly the four name servers above, in any order, each ending with a dot, for example:
-EOF
-  while read -r ns; do echo "      ${ns}."; done <<<"${want}"
-  echo
-}
-
-ensure_domain_zone() { # [check]: with "check" nothing is created, the state is only reported
-  local mode="${1:-run}" ids zone want answer
+report_domain_zone() {
+  local ids zone want
   ids="$(zone_ids_for_domain)"
   case "$(printf '%s' "${ids}" | grep -c .)" in
-    0)
-      if [[ "${mode}" == check ]]; then
-        log "zone ${DOMAIN}: not found in account ${ACCOUNT_ID} (--create-zone will create it on the real run)"
-        return 0
-      fi
-      log "creating the public Route53 zone ${DOMAIN} in account ${ACCOUNT_ID}"
-      zone="$(aws route53 create-hosted-zone --name "${DOMAIN}" --caller-reference "${CLUSTER_NAME}-$(date +%s)" \
-        --hosted-zone-config "Comment=Straiker on-prem install ${CLUSTER_NAME}" --query 'HostedZone.Id' --output text)" \
-        || die "could not create the zone (needs route53:CreateHostedZone)"
-      zone="${zone##*/}"
-      ;;
+    0) log "zone ${DOMAIN}: not found in account ${ACCOUNT_ID}; the install's dns-zone phase will create it with Terraform" ;;
     1)
       zone="${ids##*/}"
-      log "zone ${DOMAIN} already exists in account ${ACCOUNT_ID} (${zone}); reusing it"
+      want="$(zone_name_servers "${zone}")"
+      if zone_delegated "${want}"; then
+        log "zone ${DOMAIN} (${zone}): exists and is delegated"
+      else
+        log "zone ${DOMAIN} (${zone}): exists but is NOT delegated yet (the install waits for it; dig +short NS ${DOMAIN})"
+      fi
       ;;
-    *) die "more than one public Route53 zone named ${DOMAIN} in account ${ACCOUNT_ID}; delete the extra one (the installer looks the zone up by name and cannot choose)." ;;
+    *) log "WARNING: more than one public Route53 zone named ${DOMAIN} in account ${ACCOUNT_ID}; delete the extra one" ;;
   esac
-
-  want="$(zone_name_servers "${zone}")"
-  [[ -n "${want}" ]] || die "zone ${zone} has no NS record for ${DOMAIN} yet; re-run in a minute."
-
-  if zone_delegated "${want}"; then
-    log "delegation verified: ${DOMAIN} resolves to this zone's name servers"
-    return 0
-  fi
-  show_zone_delegation_help "${zone}" "${want}"
-  if [[ "${mode}" == check ]]; then
-    log "zone ${DOMAIN}: NOT delegated yet (the real run waits for it)"
-    return 0
-  fi
-  if ! { : </dev/tty; } 2>/dev/null; then
-    die "${DOMAIN} is not delegated to this zone yet and there is no terminal to wait on. Add the NS record, check it with: dig +short NS ${DOMAIN}, then re-run this same command."
-  fi
-  while true; do
-    printf 'Type "yes" once the NS record is added and dig shows the name servers above ("no" to stop here): '
-    read -r answer < /dev/tty || answer="no"
-    case "${answer}" in
-      [Yy][Ee][Ss]|[Yy])
-        if zone_delegated "${want}"; then
-          log "delegation verified: ${DOMAIN} resolves to this zone's name servers"
-          return 0
-        fi
-        echo "  Not verified. dig +short NS ${DOMAIN} currently returns:"
-        live_name_servers | sed 's/$/./; s/^/      /'
-        [[ -n "$(live_name_servers)" ]] || echo "      (nothing: the record is missing or not propagated yet)"
-        echo "  It must return the four name servers listed above. Fix the record or wait a few minutes, then answer again."
-        ;;
-      [Nn]*|"")
-        die "stopped before building anything. The zone ${DOMAIN} (${zone}) is kept; add the NS record, then re-run this same command."
-        ;;
-      *) echo '  Please answer "yes" or "no".' ;;
-    esac
-  done
 }
 
 # ------------------------------------------------------------------ main
@@ -490,7 +427,7 @@ case "${SSO_TYPE}" in
 esac
 
 if [[ "${CHECK_ONLY}" == true ]]; then
-  [[ "${CREATE_ZONE}" == true ]] && ensure_domain_zone check
+  [[ "${CREATE_ZONE}" == true ]] && report_domain_zone
   log "pre-flight OK"
   exit 0
 fi
@@ -506,9 +443,6 @@ if [[ "${ASSUME_YES}" != true ]]; then
   read -r answer < /dev/tty || answer=""
   [[ "${answer}" =~ ^[Yy]$ ]] || die "aborted"
 fi
-
-# Zone first: nothing is built until the domain is delegated, so no cost accrues while a person adds the NS record.
-[[ "${CREATE_ZONE}" == true ]] && ensure_domain_zone
 
 base_args=()
 while IFS= read -r l; do base_args+=("$l"); done < <(installer_base_args)
@@ -540,6 +474,7 @@ if [[ -n "${DOMAIN}" ]]; then
   run_args+=(--custom-domain "${DOMAIN}")
   [[ "${EDGE_TYPE}" == "xalb" ]] && run_args+=(--gateway-domain "api.${DOMAIN}")
 fi
+[[ "${CREATE_ZONE}" == true ]] && run_args+=(--create-zone)
 if [[ "${ROUTE53}" == true ]]; then
   [[ "${EDGE_TYPE}" == "xalb" ]] && run_args+=(--xalb-route53)
   [[ "${EDGE_TYPE}" == "alb" ]] && run_args+=(--alb-route53)

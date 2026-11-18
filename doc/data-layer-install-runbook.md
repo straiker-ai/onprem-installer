@@ -100,11 +100,14 @@ the shell already has, so the customer must give the AWS CLI working credentials
   pass `--certificate-arn` (an ISSUED ACM certificate in the cluster's region covering the three console hosts) and add the DNS records
   yourself (the console names as CNAMEs to the ALB). The api-gateway shares the ALB with the console; its certificate is issued by the
   installer from the domain:
-  - **`--create-zone` (with `--route53`)**: the wrapper creates the public zone for `--domain` if it is missing, prints its four name servers, and stops
-    (before any cost) until the delegation is in place. **Manual step, by whoever manages the parent zone** (Route53 in another account, Cloudflare, a registrar):
-    add one `NS` record named `<domain>` (TTL 300, DNS only on Cloudflare) with the four name servers. Verify with `dig +short NS <domain>`: it must return exactly
-    those four names (any order, trailing dots). Then type `yes` at the prompt; the wrapper re-checks against your resolver, 8.8.8.8 and 1.1.1.1 before it continues.
-    With no terminal it stops with the same instructions; re-run the same command after delegating. Teardown keeps the zone.
+  - **`--create-zone` (with `--route53`)**: phase `dns-zone` (Terraform, `terraform/aws/dns`, state `s6r-onprem/dns.tfstate` in the install bucket) creates the
+    public zone for `--domain` and the API gateway's ACM certificate (tagged `straiker:cluster`, so `gateway-cert` reuses it) with its DNS validation record.
+    It then prints the four name servers and stops, before any cost, until the delegation is in place. **Manual step, by whoever manages the parent zone**
+    (Route53 in another account, Cloudflare, a registrar): add one `NS` record named `<domain>` (TTL 300, DNS only on Cloudflare) with the four name servers.
+    Verify with `dig +short NS <domain>`: it must return exactly those four names (any order, trailing dots). Type `yes` at the prompt; the installer re-checks your
+    resolver, 8.8.8.8 and 1.1.1.1. With no terminal it stops with the same instructions; re-run the same command after delegating. The zone has
+    `prevent_destroy` and the stack is not part of `--destroy-eks`, so teardown keeps it (delete it by hand with `tofu destroy` after removing the lifecycle guard).
+    The certificate stays PENDING_VALIDATION until the zone is delegated; the gateway step waits for ISSUED.
   - the domain (or its parent) is a public **Route53 zone in the same account**: nothing else to do, the installer adds the DNS
     validation record, waits for the certificate, and points the name at the gateway. One command.
   - the domain's DNS is **elsewhere** (Cloudflare, an on-prem DNS server, a Route53 zone in a *different* AWS account): **MANUAL STEP**, two
