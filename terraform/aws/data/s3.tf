@@ -1,5 +1,5 @@
 # Application buckets (the data tier's object storage), e.g. grid's transcript artifacts.
-# Names are "<cluster>-<account>-<key>" (bucket names are global); SSE-KMS with the data key.
+# Names are "<cluster>-<account>-<key>" (bucket names are global); SSE-KMS with the bucket's kms_key (default: the data key).
 
 resource "aws_s3_bucket" "this" {
   for_each = var.s3_buckets
@@ -29,7 +29,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
     bucket_key_enabled = true
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
-      kms_master_key_id = local.kms_key_arn
+      kms_master_key_id = aws_kms_key.this[coalesce(each.value.kms_key, var.data_kms_key)].arn
     }
   }
 }

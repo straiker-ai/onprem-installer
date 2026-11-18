@@ -186,7 +186,7 @@ data "aws_iam_policy_document" "pod" {
     content {
       sid       = "DataKeyUse"
       actions   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-      resources = [local.kms_key_arn]
+      resources = [for k in aws_kms_key.this : k.arn]
     }
   }
 }

@@ -138,6 +138,7 @@ module "ebs_csi_irsa" {
 
   role_name             = "${var.cluster_name}-ebs-csi"
   attach_ebs_csi_policy = true
+  ebs_csi_kms_cmk_ids   = var.kms_layout == "split" ? [aws_kms_key.ebs[0].arn] : []
 
   oidc_providers = {
     main = {
@@ -145,4 +146,21 @@ module "ebs_csi_irsa" {
       namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
     }
   }
+}
+
+# Customer-managed key for PersistentVolumes (fresh installs, kms_layout = "split"). The EBS CSI role gets
+# kms:CreateGrant/GenerateDataKey on it above; the default key policy delegates to IAM.
+resource "aws_kms_key" "ebs" {
+  count = var.kms_layout == "split" ? 1 : 0
+
+  description             = "${var.cluster_name} ebs"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "ebs" {
+  count = var.kms_layout == "split" ? 1 : 0
+
+  name          = "alias/${var.cluster_name}-ebs"
+  target_key_id = aws_kms_key.ebs[0].key_id
 }

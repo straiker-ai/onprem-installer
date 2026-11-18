@@ -1,5 +1,5 @@
 resource "aws_kms_key" "this" {
-  for_each = var.kms_keys
+  for_each = local.kms_keys
 
   description             = coalesce(each.value.description, "${local.name} ${each.key}")
   deletion_window_in_days = each.value.deletion_window_in_days
@@ -9,7 +9,7 @@ resource "aws_kms_key" "this" {
 }
 
 resource "aws_kms_alias" "this" {
-  for_each = var.kms_keys
+  for_each = local.kms_keys
 
   name          = "alias/${local.name}-${each.key}"
   target_key_id = aws_kms_key.this[each.key].key_id

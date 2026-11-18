@@ -130,6 +130,8 @@ ENABLE_VPC_FLOW_LOGS="${ENABLE_VPC_FLOW_LOGS:-}"
 FLOW_LOGS_TRAFFIC="${FLOW_LOGS_TRAFFIC:-}"
 ENABLE_CLOUDTRAIL="${ENABLE_CLOUDTRAIL:-}"
 CLOUDTRAIL_MULTI_REGION="${CLOUDTRAIL_MULTI_REGION:-}"
+# Encryption-key layout: "single" (one data key, every existing install) or "split" (own keys for EFS/secrets/EBS, fresh installs).
+KMS_LAYOUT="${KMS_LAYOUT:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -880,6 +882,10 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
+  --kms-layout single|split        Encryption keys. split = own customer-managed keys for EFS (models), Secrets Manager and EBS
+                                   volumes, plus the transcripts/logs keys (default on a FRESH install). single = the one shared data
+                                   key (what an existing install keeps: changing it would replace the EFS model cache and re-key
+                                   every secret). Decided once and remembered; a later flag is ignored.
   --vpc-flow-logs                  Opt-in audit: record the cluster VPC's accepted/rejected connections in CloudWatch Logs
                                    (/aws/vpc/<cluster>/flow-logs, 90-day retention; billed per GB). Applied by phase observability.
                                    Remembered. --flow-logs-traffic ALL|ACCEPT|REJECT (default ALL; REJECT is far cheaper).
@@ -1843,6 +1849,10 @@ parse_args() {
         CLOUDTRAIL_MULTI_REGION=true
         shift
         ;;
+      --kms-layout)
+        KMS_LAYOUT=${2:-}
+        shift 2
+        ;;
       --admin-email)
         ADMIN_EMAIL=${2:-}
         shift 2
@@ -2325,7 +2335,41 @@ csv_to_tf_list() {
 # (bring-your-own-VPC and create-VPC). Each line is omitted rather than
 # written empty when the operator said nothing, so terraform's own defaults
 # stay authoritative and this installer doesn't silently re-assert them.
+# KMS layout, decided ONCE per install and remembered: "split" gives EFS, Secrets Manager and EBS volumes their own customer-managed
+# keys (the reference layout); "single" keeps the one shared data key. Changing it later would replace the EFS model cache and
+# re-key every secret, so an install that already has a cluster or a data key is always "single"; only a fresh one gets "split".
+resolve_kms_layout() {
+  local stored
+  stored="$(get_metadata "kms_layout")"
+  if [[ -n "${stored}" ]]; then
+    if [[ -n "${KMS_LAYOUT}" && "${KMS_LAYOUT}" != "${stored}" ]]; then
+      log "WARNING: --kms-layout ${KMS_LAYOUT} ignored: this install was created with kms_layout=${stored} and cannot change it (it would replace EFS and re-key secrets)."
+    fi
+    KMS_LAYOUT="${stored}"
+    return
+  fi
+  case "${KMS_LAYOUT}" in
+    single | split) ;;
+    "")
+      if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1 \
+        || aws kms describe-key --key-id "alias/${CLUSTER_NAME}-data" --region "${AWS_REGION}" >/dev/null 2>&1; then
+        KMS_LAYOUT=single
+      else
+        KMS_LAYOUT=split
+      fi
+      ;;
+    *)
+      echo "--kms-layout must be single or split." >&2
+      exit 2
+      ;;
+  esac
+  set_metadata "kms_layout" "${KMS_LAYOUT}"
+  log "KMS layout for this install: ${KMS_LAYOUT}."
+}
+
 emit_eks_endpoint_tfvars() {
+  resolve_kms_layout
+  echo "kms_layout = \"${KMS_LAYOUT}\""
   echo "cluster_endpoint_public_access = ${CLUSTER_PUBLIC_ACCESS}"
 
   local public_cidrs allowed_cidrs
@@ -2809,8 +2853,14 @@ then re-run this phase."
   # provisioned ourselves. Only done here, not for bring-your-own clusters —
   # k8s-preflight checks for one there instead, rather than us unilaterally
   # creating/marking-default a StorageClass on infrastructure we don't own.
-  log "Creating default StorageClass 'gp3' (ebs.csi.aws.com) for this cluster."
-  kubectl apply -f - >/dev/null <<'YAML'
+  # kms_layout=split (fresh installs): volumes are encrypted with the customer-managed ebs key. A StorageClass's parameters are
+  # immutable, so an existing cluster (single) keeps its class as it is.
+  local ebs_kms_arn sc_kms_params=""
+  ebs_kms_arn="$(tofu -chdir="${EKS_DIR}" output -raw ebs_kms_key_arn 2>/dev/null || true)"
+  [[ -n "${ebs_kms_arn}" ]] && sc_kms_params="  encrypted: \"true\"
+  kmsKeyId: ${ebs_kms_arn}"
+  log "Creating default StorageClass 'gp3' (ebs.csi.aws.com) for this cluster${ebs_kms_arn:+ (encrypted with ${ebs_kms_arn})}."
+  kubectl apply -f - >/dev/null <<YAML
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -2821,6 +2871,7 @@ provisioner: ebs.csi.aws.com
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   type: gp3
+${sc_kms_params}
 YAML
 
   set_metadata "cluster_name" "${cluster_name}"
@@ -3289,6 +3340,7 @@ phase_aws_data() {
   fi
 
   write_data_backend_config "${bucket_name}"
+  resolve_kms_layout
 
   # platform-sa grants follow the services being installed: databridge delivers into customer
   # accounts (sts:AssumeRole), connect sends email (SES).
@@ -3455,6 +3507,7 @@ EOF
       -var="provision_strategy=${PROVISION_STRATEGY}" \
       -var="create_opensearch_service_linked_role=${os_slr}" \
       -var="create_cognito_email_service_linked_role=${cog_slr}" \
+      -var="kms_layout=${KMS_LAYOUT}" \
       -var="cognito_use_ses=$1" \
       -var="cognito_callback_urls=[\"$(app_origin)/login/oidc/callback\"]" \
       -var="aurora={engine_version=\"${aurora_ver}\",parameter_group_family=\"aurora-postgresql${aurora_ver%%.*}\"}"

@@ -51,7 +51,7 @@ resource "aws_efs_file_system" "this" {
 
   creation_token   = "${local.name}-${each.key}"
   encrypted        = true
-  kms_key_id       = local.kms_key_arn
+  kms_key_id       = local.efs_kms_key_arn
   performance_mode = each.value.performance_mode
   throughput_mode  = each.value.throughput_mode
 

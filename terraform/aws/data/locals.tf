@@ -30,7 +30,21 @@ locals {
   client_cidrs = local.subnet_cidrs
   client_sgs   = toset(var.client_security_group_ids)
 
-  kms_key_arn = aws_kms_key.this[var.data_kms_key].arn
+  # Keys: the caller's kms_keys plus the layout keys. transcripts/logs always exist (the new buckets use them); models/secrets
+  # only in the "split" layout (fresh installs).
+  kms_keys = merge(
+    { for k in concat(["transcripts", "logs"], var.kms_layout == "split" ? ["models", "secrets"] : []) : k => {
+      description             = null
+      deletion_window_in_days = 30
+      enable_key_rotation     = true
+      tags                    = {}
+    } },
+    var.kms_keys,
+  )
+
+  kms_key_arn         = aws_kms_key.this[var.data_kms_key].arn
+  efs_kms_key_arn     = aws_kms_key.this[var.kms_layout == "split" ? "models" : var.data_kms_key].arn
+  secrets_kms_key_arn = aws_kms_key.this[var.kms_layout == "split" ? "secrets" : var.data_kms_key].arn
 
   ha = var.provision_strategy != "min"
 }

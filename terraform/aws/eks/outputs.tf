@@ -44,3 +44,8 @@ output "karpenter_node_role_arn" {
 output "karpenter_queue_name" {
   value = module.karpenter.queue_name
 }
+
+output "ebs_kms_key_arn" {
+  description = "Customer-managed EBS key (kms_layout = split); empty otherwise."
+  value       = var.kms_layout == "split" ? aws_kms_key.ebs[0].arn : ""
+}

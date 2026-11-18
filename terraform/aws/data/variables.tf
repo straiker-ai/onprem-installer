@@ -56,6 +56,22 @@ variable "kms_keys" {
   default = { data = {} }
 }
 
+variable "kms_layout" {
+  description = <<-EOT
+    How encryption keys are split. "single" (default; what every existing install has): Aurora, ElastiCache, MSK, EFS and
+    Secrets Manager share the data key. "split": EFS (model cache) uses its own "models" key and Secrets Manager its own
+    "secrets" key. Switching an existing install from single to split REPLACES the EFS file system (the model cache is
+    re-downloaded) and re-keys every secret, so the installer sets "split" only on a fresh install and remembers it.
+    The "transcripts" and "logs" keys (used by the transcripts/exports/logs buckets) are created in both layouts.
+  EOT
+  type        = string
+  default     = "single"
+  validation {
+    condition     = contains(["single", "split"], var.kms_layout)
+    error_message = "kms_layout must be \"single\" or \"split\"."
+  }
+}
+
 variable "data_kms_key" {
   description = "Key in kms_keys used to encrypt the data services."
   type        = string
@@ -452,15 +468,23 @@ variable "secrets" {
 variable "s3_buckets" {
   description = <<-EOT
     Application buckets, keyed by stable name (bucket "<cluster>-<account>-<key>"), SSE-KMS with the
-    data key, TLS-only, no public access. Default: grid's transcript artifacts bucket (read by grid;
-    written by the Defend compactor, which on-prem has no equivalent of yet - empty = skeleton-only transcripts).
+    kms_key (default: the data key), TLS-only, no public access. Default: grid's transcript artifacts bucket (read by
+    grid; written by the Defend compactor, which on-prem has no equivalent of yet - empty = skeleton-only transcripts)
+    plus the reference architecture's transcripts, exports and logs buckets (the transcripts and logs buckets use their
+    own keys). kms_key must be a key in kms_keys or one of the layout keys (transcripts, logs, models, secrets).
   EOT
   type = map(object({
+    kms_key       = optional(string)
     versioning    = optional(bool, false)
     force_destroy = optional(bool, false)
     tags          = optional(map(string), {})
   }))
-  default = { "grid-artifacts" = {} }
+  default = {
+    "grid-artifacts" = {}
+    transcripts      = { kms_key = "transcripts", versioning = true }
+    exports          = {}
+    logs             = { kms_key = "logs" }
+  }
 }
 
 # ---------------------------------------------------------------- DynamoDB
@@ -500,7 +524,7 @@ variable "pod_identities" {
     service account with EKS Pod Identity.
       msk_clusters    keys of msk_clusters this role may use (connect, read/write topics + groups)
       secret_keys     keys of secrets readable (plus the Aurora master secret when aurora_master_secret = true)
-      kms_use         allow use of the data KMS key (decrypt secrets, EFS, MSK)
+      kms_use         allow use of the KMS keys (decrypt secrets, EFS, MSK, buckets)
       s3_read/s3_write       keys of s3_buckets readable (Get/List) / writable (Put/Delete/multipart)
       secret_prefixes_rw     Secrets Manager name prefixes this role may fully manage (get/put/create/delete),
                              e.g. "<cluster>/platform/" (databridge sinks, connect and integration credentials)

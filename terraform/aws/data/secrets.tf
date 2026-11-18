@@ -16,7 +16,7 @@ resource "aws_secretsmanager_secret" "this" {
 
   name                    = "${local.name}/${each.key}"
   description             = coalesce(each.value.description, "${local.name} ${each.key}")
-  kms_key_id              = local.kms_key_arn
+  kms_key_id              = local.secrets_kms_key_arn
   recovery_window_in_days = each.value.recovery_window_in_days
 
   tags = merge(local.common_tags, each.value.tags, { Name = "${local.name}/${each.key}" })

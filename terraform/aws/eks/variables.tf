@@ -191,3 +191,18 @@ variable "cluster_endpoint_private_access_cidrs" {
   type        = list(string)
   default     = []
 }
+
+variable "kms_layout" {
+  description = <<-EOT
+    "single" (default; every existing install): PersistentVolumes use the AWS-managed EBS key. "split": a customer-managed
+    "ebs" KMS key (alias/<cluster>-ebs) is created, granted to the EBS CSI driver, and the installer's gp3 StorageClass
+    encrypts new volumes with it. Existing volumes keep their key (EBS cannot re-key in place), so the installer sets "split"
+    only on a fresh install. Node root volumes keep the default key in both layouts.
+  EOT
+  type        = string
+  default     = "single"
+  validation {
+    condition     = contains(["single", "split"], var.kms_layout)
+    error_message = "kms_layout must be \"single\" or \"split\"."
+  }
+}
