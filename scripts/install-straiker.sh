@@ -5848,7 +5848,8 @@ setup_charts_root() {
   local registry
   registry="$(get_metadata "ecr_registry")"
   if [[ -z "${registry}" ]]; then
-    log "--charts-from-ecr: the ECR registry is not known yet (run phase aws-artifacts first): using charts/ for now."
+    # Fresh install: the registry exists only after aws-artifacts. Stay "not ready" so every later phase tries again.
+    CHARTS_ROOT_READY=false
     return 0
   fi
   require_command helm
