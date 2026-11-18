@@ -6071,7 +6071,7 @@ elif "config" in m:
   # 2. ElastiCache accepts TLS (rediss://). Serverless caches are TLS-only.
   kubectl delete pod verify-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   result="$(kubectl run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
-    --restart=Never --rm -i --quiet -- valkey-cli --tls -h "${redis_endpoint}" -p 6379 PING </dev/null 2>&1 || true)"
+    --restart=Never --rm -i --quiet --pod-running-timeout=5m -- valkey-cli --tls -h "${redis_endpoint}" -p 6379 PING </dev/null 2>&1 || true)"
   if printf '%s\n' "${result}" | grep -qx 'PONG'; then
     log "PASS  ElastiCache (${redis_endpoint}) answers PING over TLS."
   else
@@ -6291,7 +6291,7 @@ elif "config" in m:
     pg_overrides='{"spec":{"containers":[{"name":"verify-psql","image":"'"${registry_prefixed}"'/library/postgres:16-alpine","stdin":true,"command":["psql","host='"${pg_host}"' port='"${pg_port:-5432}"' dbname='"${pg_role}"' user='"${pg_role}"' sslmode=require","-tAc","select ssl from pg_stat_ssl where pid = pg_backend_pid();"],"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"straiker-db-dsn","key":"PASSWORD_'"${pg_role}"'"}}}]}]}}'
     kubectl delete pod verify-psql -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
     result="$(kubectl run verify-psql -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
-      --restart=Never --rm -i --quiet --overrides="${pg_overrides}" </dev/null 2>&1 || true)"
+      --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${pg_overrides}" </dev/null 2>&1 || true)"
     if printf '%s\n' "${result}" | grep -qx 't'; then
       log "PASS  Aurora '${pg_label}' accepts sslmode=require (${pg_role} role, pg_stat_ssl.ssl = t)."
     else
