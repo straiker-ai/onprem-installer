@@ -204,6 +204,8 @@ frontend:
   cognito:
     userPoolId: ""
     clientId: ""
+    # Hosted-UI domain (https://<prefix>.auth.<region>.amazoncognito.com): the console shows the SAML ACS URL from it.
+    domain: ""
   oidc:
     enabled: true
     issuer: ""

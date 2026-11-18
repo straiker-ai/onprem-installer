@@ -81,6 +81,10 @@ spec:
               value: {{ .Values.frontend.cognito.clientId | quote }}
             - name: COGNITO_EXTERNAL_PROVIDERS_CLIENT_ID
               value: {{ .Values.frontend.cognito.clientId | quote }}
+            {{- if .Values.frontend.cognito.domain }}
+            - name: COGNITO_DOMAIN
+              value: {{ .Values.frontend.cognito.domain | quote }}
+            {{- end }}
             {{- end }}
             # On-prem mode is baked into the image (see docker-compose's
             # PUBLIC_ENV: onprem) — not a runtime toggle.
