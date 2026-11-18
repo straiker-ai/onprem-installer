@@ -6049,8 +6049,14 @@ elif "config" in m:
             --layer-digest "${mi_digest}" --query downloadUrl --output text 2>/dev/null || true)"
           mi_arch=""
           [[ -n "${mi_url}" && "${mi_url}" != "None" ]] && mi_arch="$(curl -fsS "${mi_url}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("architecture",""))' 2>/dev/null || true)"
-          # every node architecture except the one this image is built for
-          [[ -n "${mi_arch}" ]] && mi_missing="$(printf '%s' "${node_archs}" | tr ',' '\n' | grep -vx "${mi_arch}" | paste -sd, - || true)"
+          if [[ "${mi_arch}" == "unknown" ]]; then
+            # An attestation/artifact manifest rather than a runnable image: say so, but do not fail verification over an image that may
+            # not be deployed.
+            log "WARN  Image ${mi_repo}:${mi_tag} in your ECR is not a runnable image (its config says architecture 'unknown'). Fine while no chart runs it; re-copy it from a multi-arch upstream if one does."
+          elif [[ -n "${mi_arch}" ]]; then
+            # every node architecture except the one this image is built for
+            mi_missing="$(printf '%s' "${node_archs}" | tr ',' '\n' | grep -vx "${mi_arch}" | paste -sd, - || true)"
+          fi
           ;;
       esac
       if [[ -n "${mi_missing}" ]]; then
