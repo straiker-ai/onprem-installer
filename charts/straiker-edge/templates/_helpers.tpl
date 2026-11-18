@@ -36,3 +36,18 @@ alb.ingress.kubernetes.io/load-balancer-attributes: {{ printf "idle_timeout.time
 alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.waf.webAclArn | quote }}
 {{- end }}
 {{- end }}
+
+{{/*
+The routes this install exposes: .Values.routes without the ones named in .Values.disabledRoutes. The installer lists defend-api there
+with --without-defend-v1 (Helm replaces a whole list when one index is set, so a per-route switch cannot be driven with --set).
+Usage: range (include "edge.routes" . | fromJsonArray)
+*/}}
+{{- define "edge.routes" -}}
+{{- $out := list -}}
+{{- range .Values.routes -}}
+{{- if not (has .name ($.Values.disabledRoutes | default list)) -}}
+{{- $out = append $out . -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}

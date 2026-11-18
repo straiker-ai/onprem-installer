@@ -37,7 +37,7 @@ spec:
     name: straiker-edge-letsencrypt
     kind: ClusterIssuer
   dnsNames:
-    {{- range .Values.routes }}
+    {{- range (include "edge.routes" . | fromJsonArray) }}
     - {{ printf "%s.%s" .albSubdomain $.Values.tailscale.domain | quote }}
     {{- end }}
 {{- end }}

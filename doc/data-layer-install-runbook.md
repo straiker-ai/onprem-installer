@@ -283,9 +283,11 @@ in it, anything not created by this install. It is irreversible; delete `~/.stra
 
 ## 6. Defend v3 (Argus v3): what it can detect, and Ascend on v3
 
-Install with `--defend-engine v3`. The gateway sends `/api/v1/detect`, `/api/v3/detect` and the integration detect paths to
-`argus-service` (Argus v3). `straiker-defend` (v1) still runs next to it: the console's `argusEndpoint` and, until the key
-below exists, Ascend use it.
+Install with `--defend-engine v3`. The gateway sends `/api/v3/detect` and the integration detect paths to
+`argus-service` (Argus v3). **Argus v3 serves only `/api/v3/*`** (detect, the Copilot webhooks, `/api/v3/health`) and the internal controls
+routes: it has no `/api/v1/detect`, `/api/v1/private/ping` or `/api/v1/attachments/...` (checked on dl-test: `argus-service` answers 404 to the
+first two, `straiker-defend` answers them). `straiker-defend` (v1) still runs next to it unless you install with `--without-defend-v1`
+(section 6i); until then the console's `argusEndpoint` uses it, and so does Ascend until the `iris-grader` key exists.
 
 **What Defend v3 can and cannot detect** (the model fleet is vision, wanda, kev-agentic, kev-non-agentic, thanos; 2 replicas each):
 
@@ -310,13 +312,38 @@ counts (from Redpanda Connect's metrics). It fails with the likely cause: nothin
 written = the ClickHouse insert fails. `audit_event` fills only from console activity (create or edit something, then
 `--expect-audit`). Without the key it only observes.
 
-**Ascend on Argus v3 (optional).** Iris's graders switch from v1 to `/api/v3/detect` only when two things exist: the endpoint
-(set by the installer with `--defend-engine v3`) and an `sk_agt_` key of an agent named `iris-grader`, stored as
-`ARGUS_V3_API_KEY` in `straiker-secrets`. Steps (manual: agent creation is a console step):
-1. In the console create an agent named `iris-grader` (chat assistant) and mint an API key for it (shown once).
-2. Re-run `--phase straiker-ascend --rerun-phase --defend-engine v3` with `ARGUS_V3_GRADER_KEY=sk_agt_...` in the environment.
-3. Check `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
-Until then Ascend keeps grading through v1, which is safe.
+**Ascend on Argus v3 (automatic).** Iris's graders switch from v1 to `/api/v3/detect` only when two things exist (`iris/detector/argus_v3.py`):
+the endpoint (set by the installer with `--defend-engine v3`) and an `sk_agt_` key of an agent named `iris-grader`, stored as `ARGUS_V3_API_KEY` in
+`straiker-secrets`. SaaS mints that key by hand per region; here phase `straiker-ascend` does it (skip with `--no-iris-grader-mint`):
+1. It reads the console's organization id (`customers`, `platform_tenant_id` in the state file) and calls the registry's onboarding API from a
+   short-lived pod: `POST /api/v3/onboard/custom-agent` with `{"label":"iris-grader","mode":"api","fields":{"archetype":"chat_assistant"}}` and
+   `Idempotency-Key: iris-grader-<cluster>`. The registry only decodes the `X-Straiker-Auth-Context` header (tenant and scopes) and is reachable
+   only inside the cluster, the same call the platform repo's smoke test makes.
+2. The key comes back once; if the agent already exists the registry converges on it, and the installer reads the active key back through
+   `GET /api/v3/integrations/{id}/keys/{keyId}/reveal`. A lost Secret therefore never needs a second agent.
+3. It checks Argus v3 accepts the key (`POST /api/v3/detect` through the in-cluster gateway, retried up to 90 s while the new agent reaches the
+   engine through MSK). **Only then** it stores the key: a rejected key is never stored, which is the failure Mumbai had until 2026-11-04.
+4. On an existing install it rolls the probe and recon workers (one pod at a time) so they read the key; a fresh install starts them with it.
+Any failure is a warning, never an aborted install: Ascend keeps grading as before (v1, or off under `--without-defend-v1`), and re-running
+`--phase straiker-ascend` retries. The agent is created in the customer's own organization, so `iris-grader` appears in the console's agent list
+(SaaS keeps it in an internal tenant). By hand instead: create the agent in the console, then re-run `--phase straiker-ascend --rerun-phase` with
+`ARGUS_V3_GRADER_KEY=sk_agt_...` set. Check: `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
+Not verified on a running install yet (see the fresh-install checklist).
+
+## 6i. Removing Argus v1 (`--without-defend-v1`, opt-in, remembered)
+
+Argus v3 is the engine that stays. With the flag (needs `--defend-engine v3`):
+- phase `straiker-defend` installs nothing and uninstalls an existing `straiker-defend` release (v1 and its settings-sync) and its PDB;
+- the console's `ARGUS_ENDPOINT` stays unset (the chart then leaves the variable out), exactly as in Frankfurt and Mumbai, whose infra notes say an unset
+  endpoint "turns one feature off, nothing else": **Saige** (the detect playground, which calls `/api/v1/detect` and only works on sample
+  applications) shows "taking a break", and the Argus entry of `/health/detailed` reports unhealthy. The pod probes use `/api/health`, nothing in this
+  repo calls `/health/detailed`, and Turns attachments (`/api/v1/attachments`) are not deployed on-prem;
+- the `defend-api` edge route (`straiker-defend.<domain>`, which pointed at v1) is dropped (`disabledRoutes` in `charts/straiker-edge`);
+- Ascend's `argus.enabled` is set to false if no `iris-grader` key exists yet (nothing to fall back to), true otherwise.
+Order for an existing install: (1) re-run `--phase straiker-ascend` and confirm the key was stored and the workers log `argus_v3` with no 401s;
+(2) re-run `--phase straiker-defend,straiker-core,straiker-edge,straiker-ascend --without-defend-v1`. The frontend rolls (2 replicas, one at a time) and
+the edge route disappears; the ACM certificate keeps its `straiker-defend.<domain>` name and the v1 image stays in the mirror list (harmless).
+API or SDK callers still using `/api/v1/detect` must move to `/api/v3/detect` (they get 404 from `argus-service` today).
 
 ## 6b. Console: new Defend overview and Controls (platform API)
 
@@ -403,7 +430,7 @@ It is **always one replica** (the iris code does a read-modify-write per assessm
 ## 6h. Fresh-install checklist (what only a new cluster can prove)
 
 Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-node-volumes --bifrost-postgres --charts-from-ecr --otel --ascend-adjustment-worker
---production-sizing` (the layout flags are decided once; the others are remembered). Then check:
+--production-sizing` (add `--without-defend-v1` to prove the v3-only install; the layout flags are decided once; the others are remembered). Then check:
 
 | Area | Check | Expect |
 |---|---|---|
@@ -417,6 +444,8 @@ Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-nod
 | Bifrost | `kubectl logs deploy/straiker-bifrost` | started with Postgres stores; `pg_tables` count > 0 in the `bifrost` database |
 | OTel | `kubectl -n observability get pods`; a smoke trace in X-Ray | 2 collectors Running |
 | Ascend | `kubectl get deploy | grep ascend` | adjustment worker 1/1 (iris image `onprem-v2026.11.18` or newer) |
+| iris-grader | installer log of `straiker-ascend`; `kubectl logs deploy/straiker-ascend-probe-worker` | "Stored the iris-grader key"; `argus_v3` requests, no 401 |
+| No v1 (with `--without-defend-v1`) | `kubectl get deploy | grep defend`; the console | no `straiker-defend`; frontend env has no `ARGUS_ENDPOINT`; Saige "taking a break"; `defend` host not routed |
 | Verify | `--phase verify-data-layer` | all PASS (Vector `WARN` is expected) |
 
 ## 7. Known gaps and manual steps

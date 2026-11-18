@@ -151,6 +151,11 @@ ASCEND_ADJUSTMENT_WORKER="${ASCEND_ADJUSTMENT_WORKER:-}"
 # Node root volumes (system node group and every Karpenter node) on the customer-managed EBS key. Decided once, FRESH installs only:
 # changing it on a running cluster replaces every node. ENCRYPT_NODE_VOLUMES_FORCE=true overrides that guard.
 ENCRYPT_NODE_VOLUMES="${ENCRYPT_NODE_VOLUMES:-}"
+# Argus v3 only: do not install the v1 engine (charts/straiker-defend), leave the console's ARGUS_ENDPOINT unset (as the SaaS regions without
+# v1 do: Saige and the detailed health line's Argus entry go off, nothing else) and drop the defend-api edge route. Remembered.
+WITHOUT_DEFEND_V1="${WITHOUT_DEFEND_V1:-}"
+# Skip the automatic iris-grader agent/key (Ascend's graders then keep using v1, or nothing under --without-defend-v1).
+NO_IRIS_GRADER_MINT="${NO_IRIS_GRADER_MINT:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -917,6 +922,14 @@ Options:
                                    cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
                                    install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
                                    (dump/restore it first: runbook 6f).
+  --without-defend-v1              Argus v3 only. Does not install the v1 engine (phase straiker-defend is skipped and an existing
+                                   release is uninstalled), leaves the console's ARGUS_ENDPOINT unset (Saige and the Argus line of
+                                   /health/detailed go off, as in the SaaS regions without v1) and drops the defend-api edge route.
+                                   Needs --defend-engine v3. Remembered. Run it once the iris-grader key exists (below), or Ascend's
+                                   graders have nothing to grade with and are switched off.
+  --no-iris-grader-mint            Do not create the iris-grader agent and key. By default phase straiker-ascend (engine v3) creates them
+                                   through the registry's onboarding API from inside the cluster, checks Argus v3 accepts the key, and
+                                   stores it as ARGUS_V3_API_KEY, so Ascend's workers grade through v3. Idempotent: a re-run reuses the agent.
   --encrypt-node-volumes           Encrypt the node root volumes (system node group and every Karpenter node) with a customer-managed KMS key
                                    (alias <cluster>-ebs) instead of the AWS-managed default. FRESH installs only: on a running cluster it would
                                    replace every node, so the flag is then ignored (ENCRYPT_NODE_VOLUMES_FORCE=true overrides). Creates the Auto
@@ -1176,6 +1189,17 @@ resolve_defend_engine() {
   if [[ "${v}" == "v3" && "${DATA_LAYER}" != "true" ]]; then
     echo "ERROR: --defend-engine v3 needs --data-layer (Argus v3 uses MSK, ElastiCache and Secrets Manager from the data tier)." >&2
     exit 1
+  fi
+  local without_v1="${WITHOUT_DEFEND_V1}"
+  [[ "$(get_metadata "without_defend_v1")" == "true" ]] && without_v1=true
+  if [[ "${without_v1}" == true && "${v}" != "v3" ]]; then
+    echo "ERROR: --without-defend-v1 needs --defend-engine v3 (Argus v1 is the engine being removed; v3 must be the one that stays)." >&2
+    exit 1
+  fi
+  # Remember it only once it is known to be valid.
+  if [[ "${without_v1}" == true ]]; then
+    WITHOUT_DEFEND_V1=true
+    set_metadata "without_defend_v1" "true"
   fi
   DEFEND_ENGINE="${v}"
   set_metadata "defend_engine" "${v}"
@@ -1927,6 +1951,14 @@ parse_args() {
         ;;
       --encrypt-node-volumes)
         ENCRYPT_NODE_VOLUMES=true
+        shift
+        ;;
+      --without-defend-v1)
+        WITHOUT_DEFEND_V1=true
+        shift
+        ;;
+      --no-iris-grader-mint)
+        NO_IRIS_GRADER_MINT=true
         shift
         ;;
       --admin-email)
@@ -7066,7 +7098,9 @@ phase_straiker_core() {
 
   # Unconditional — straiker-defend is always installed now (see
   # phase_straiker_defend), regardless of product selection.
-  cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
+  # Without v1 the console's ARGUS_ENDPOINT stays unset (the chart then omits the variable), as in the SaaS regions that have no v1.
+  [[ "${WITHOUT_DEFEND_V1}" == true ]] \
+    || cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
   # The platform API gateway (phase platform-services) and the flags that switch the console to it. Frontends older than
   # the FEATURE_FLAG_OVERRIDES change ignore the flags; PUBLIC_API_GATEWAY is read by every build.
   if [[ " ${PLATFORM_SERVICES} " == *" api-gateway "* ]]; then
@@ -8443,6 +8477,17 @@ phase_straiker_defend() {
   require_command helm
   require_command kubectl
 
+  if [[ "${WITHOUT_DEFEND_V1}" == true ]]; then
+    log "--without-defend-v1: Argus v1 (${DEFEND_RELEASE}) is not installed."
+    if helm status "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
+      log "Uninstalling the existing '${DEFEND_RELEASE}' release (Argus v1 and its settings-sync); Argus v3 (argus-v3) keeps serving."
+      helm uninstall "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null || return
+      kubectl delete pdb "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+    fi
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--without-defend-v1."
+    return
+  fi
+
   local infra_status
   infra_status="$(helm status "${INFRA_RELEASE}" -n "${INFRA_NAMESPACE}" -o json 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("info",{}).get("status",""))' 2>/dev/null || true)"
@@ -8529,6 +8574,169 @@ helm_ssa_conflict_flags() {
   local help
   help="$(helm upgrade --help 2>/dev/null || true)"
   [[ "${help}" == *"--force-conflicts"* && "${help}" == *"--server-side"* ]]
+}
+
+# ── iris-grader: Ascend's graders call Argus v3 as an agent named "iris-grader" (iris/detector/argus_v3.py: used only when the endpoint AND an
+# sk_agt_ key are set). The SaaS regions mint that agent by hand; here the installer does it, from inside the cluster, through the registry's
+# onboarding API. The registry only DECODES the X-Straiker-Auth-Context header (base64 JSON: tenant, scopes) and is reachable only in-cluster,
+# which is how the platform repo's own smoke test calls it. Idempotent: the Idempotency-Key makes a repeated onboarding converge on the existing
+# agent, whose key is then read back through the registry's audited reveal endpoint, so a lost Secret never needs a second agent.
+
+# Builds the `kubectl run --overrides` JSON for the three short-lived pods below (POD_MODE=tenant|registry|check). Kept in one program, read
+# into a variable here (not inline in bash quotes), so the shell scripts it carries can use quotes freely.
+read -r -d '' K8S_POD_PY <<'PYEOF' || true
+import json, os
+
+mode = os.environ["POD_MODE"]
+image = os.environ["REG"] + "/library/postgres:16-alpine"
+
+if mode == "tenant":
+    name = "console-tenant"
+    env = [
+        {"name": "PGHOST", "value": os.environ["HOST"]},
+        {"name": "PGPORT", "value": os.environ.get("PORT") or "5432"},
+        {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "straiker-db-dsn", "key": "PASSWORD_frontend"}}},
+    ]
+    script = r'''psql "host=$PGHOST port=$PGPORT dbname=frontend user=frontend sslmode=require" -tAc "select min(id) from customers" | sed "s/^/TENANT /"'''
+elif mode == "registry":
+    name = "registry-call"
+    env = [{"name": k, "value": os.environ.get(k, "")} for k in ("TENANT", "METHOD", "RPATH", "BODY", "IDEM", "NS")]
+    script = r'''
+H=$(printf '{"authenticated":true,"straikerId":"%s","principal":"installer","scopes":["integration:write"]}' "$TENANT" | base64 | tr -d '\n')
+URL="http://registry.$NS.svc.cluster.local:80$RPATH"
+if [ "$METHOD" = POST ]; then
+  if [ -n "$IDEM" ]; then
+    out=$(wget -qO- --header "X-Straiker-Auth-Context: $H" --header 'Content-Type: application/json' --header "Idempotency-Key: $IDEM" --post-data "$BODY" "$URL" 2>/tmp/err)
+  else
+    out=$(wget -qO- --header "X-Straiker-Auth-Context: $H" --header 'Content-Type: application/json' --post-data "$BODY" "$URL" 2>/tmp/err)
+  fi
+else
+  out=$(wget -qO- --header "X-Straiker-Auth-Context: $H" "$URL" 2>/tmp/err)
+fi
+rc=$?
+if [ $rc -eq 0 ]; then echo "BODY:$out"; else echo "FAIL:$(tail -1 /tmp/err)"; fi
+'''
+elif mode == "check":
+    name = "grader-check"
+    env = [
+        {"name": "NS", "value": os.environ["NS"]},
+        {"name": "KEY", "valueFrom": {"secretKeyRef": {"name": "iris-grader-check", "key": "KEY"}}},
+    ]
+    script = r'''
+for i in $(seq 1 18); do
+  code=$(wget -S -qO /dev/null --header "Authorization: Bearer $KEY" --header 'Content-Type: application/json' --post-data '{"user_name":"installer","prompt":"hello"}' "http://api-gateway.$NS.svc.cluster.local:443/api/v3/detect" 2>&1 | awk '/^ *HTTP\//{print $2; exit}')
+  [ "$code" = 200 ] && break
+  sleep 5
+done
+echo "CODE:${code:-none}"
+'''
+else:
+    raise SystemExit("unknown POD_MODE " + mode)
+
+print(json.dumps({"spec": {"containers": [{"name": name, "image": image, "stdin": True, "command": ["/bin/sh", "-c", script], "env": env}]}}))
+PYEOF
+
+# The console's organization id (the first row of the frontend's customers table): the tenant that owns the iris-grader agent.
+console_tenant_id() {
+  local cached overrides result registry_prefixed
+  cached="$(get_metadata "platform_tenant_id")"
+  if [[ -n "${cached}" ]]; then printf '%s' "${cached}"; return 0; fi
+  registry_prefixed="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
+  overrides="$(POD_MODE=tenant REG="${registry_prefixed}" HOST="$(get_metadata "aurora_endpoint")" PORT="$(get_metadata "aurora_port")" python3 -c "${K8S_POD_PY}")"
+  kubectl delete pod console-tenant -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  result="$(kubectl run console-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+    --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
+  result="$(printf '%s\n' "${result}" | sed -n 's/^TENANT \([0-9][0-9]*\)$/\1/p' | head -1)"
+  [[ -n "${result}" ]] || return 1
+  set_metadata "platform_tenant_id" "${result}"
+  printf '%s' "${result}"
+}
+
+# registry_call <tenant> <GET|POST> <path> [json body] [idempotency key]: one request to the registry Service from a short-lived pod; prints the
+# response body, or nothing (and returns 1) when the call failed; the reason goes to the installer log.
+registry_call() {
+  local tenant=$1 method=$2 path=$3 body=${4:-} idem=${5:-}
+  local registry_prefixed overrides out
+  registry_prefixed="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
+  overrides="$(POD_MODE=registry REG="${registry_prefixed}" TENANT="${tenant}" METHOD="${method}" RPATH="${path}" BODY="${body}" IDEM="${idem}" NS="${INFRA_NAMESPACE}" python3 -c "${K8S_POD_PY}")"
+  kubectl delete pod registry-call -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  out="$(kubectl run registry-call -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+    --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
+  if printf '%s\n' "${out}" | grep -q '^BODY:'; then
+    printf '%s\n' "${out}" | sed -n 's/^BODY://p' | head -1
+  else
+    log "registry ${method} ${path}: $(printf '%s\n' "${out}" | grep -E '^FAIL:|rror' | head -1 | cut -c1-200)"
+    return 1
+  fi
+}
+
+# Does Argus v3 accept this key? POST /api/v3/detect through the in-cluster gateway, retried while the new agent's configuration reaches the
+# engine (registry -> MSK -> Argus). The key is read from a throwaway Secret, never put in the pod spec or the log.
+iris_grader_key_accepted() {
+  local key=$1 registry_prefixed overrides out code
+  registry_prefixed="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
+  kubectl create secret generic iris-grader-check -n "${INFRA_NAMESPACE}" --from-literal="KEY=${key}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  overrides="$(POD_MODE=check REG="${registry_prefixed}" NS="${INFRA_NAMESPACE}" python3 -c "${K8S_POD_PY}")"
+  kubectl delete pod grader-check -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  out="$(kubectl run grader-check -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+    --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
+  kubectl delete secret iris-grader-check -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  code="$(printf '%s\n' "${out}" | sed -n 's/^CODE://p' | head -1)"
+  log "Argus v3 answered the iris-grader key with HTTP ${code:-none}."
+  [[ "${code}" == "200" ]]
+}
+
+# Sets ARGUS_V3_API_KEY in straiker-secrets when Argus v3 accepts a freshly created or revealed iris-grader key. Never aborts the install:
+# on any failure it says why and leaves Ascend as it was. IRIS_GRADER_KEY_CHANGED=true tells the caller to roll the workers.
+IRIS_GRADER_KEY_CHANGED=false
+ensure_iris_grader_key() {
+  IRIS_GRADER_KEY_CHANGED=false
+  [[ "${DEFEND_ENGINE}" == "v3" && "${DATA_LAYER}" == "true" ]] || return 0
+  [[ "${NO_IRIS_GRADER_MINT}" == true ]] && return 0
+  [[ -z "${ARGUS_V3_GRADER_KEY:-}" ]] || return 0
+  if kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  local d
+  for d in registry-deployment argus-v3-app; do
+    if ! kubectl get deploy "${d}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '[1-9]'; then
+      log "WARNING: ${d} is not ready, so the iris-grader key was not created. Re-run --phase straiker-ascend once it is."
+      return 0
+    fi
+  done
+  local tenant onboard key iid kid keys
+  if ! tenant="$(console_tenant_id)" || [[ -z "${tenant}" ]]; then
+    log "WARNING: the console has no organization yet (customers table empty), so the iris-grader agent cannot be created. Re-run --phase straiker-ascend after the console's first sign-in."
+    return 0
+  fi
+  log "Creating the iris-grader agent and key for Ascend's Argus v3 grading (tenant ${tenant})..."
+  onboard="$(registry_call "${tenant}" POST /api/v3/onboard/custom-agent \
+    '{"label":"iris-grader","mode":"api","fields":{"archetype":"chat_assistant"}}' "iris-grader-${CLUSTER_NAME}")" || { log "WARNING: could not create the iris-grader agent: Ascend's graders are unchanged."; return 0; }
+  key="$(printf '%s' "${onboard}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("api_key",""))' 2>/dev/null || true)"
+  if [[ -z "${key}" ]]; then
+    # The agent already existed (the key is returned only once): read its active key back.
+    iid="$(printf '%s' "${onboard}" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("integration") or {}).get("id",""))' 2>/dev/null || true)"
+    [[ -n "${iid}" ]] || { log "WARNING: the registry's onboarding answer had no integration id: Ascend's graders are unchanged."; return 0; }
+    keys="$(registry_call "${tenant}" GET "/api/v3/integrations/${iid}/keys")" || { log "WARNING: could not list the iris-grader keys."; return 0; }
+    kid="$(printf '%s' "${keys}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = d.get("data", d) if isinstance(d, dict) else d
+print(next((k["id"] for k in rows if k.get("status") == "active"), ""))' 2>/dev/null || true)"
+    [[ -n "${kid}" ]] || { log "WARNING: the iris-grader agent has no active key: revoke or rotate it in the console, then re-run."; return 0; }
+    key="$(registry_call "${tenant}" GET "/api/v3/integrations/${iid}/keys/${kid}/reveal" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("api_key",""))' 2>/dev/null || true)"
+  fi
+  if [[ "${key}" != sk_agt_* ]]; then
+    log "WARNING: no usable iris-grader key came back: Ascend's graders are unchanged."
+    return 0
+  fi
+  if ! iris_grader_key_accepted "${key}"; then
+    log "WARNING: Argus v3 has not accepted the iris-grader key yet (its configuration may still be propagating). Not stored: Ascend's graders are unchanged. Re-run --phase straiker-ascend in a few minutes."
+    return 0
+  fi
+  patch_shared_secret "ARGUS_V3_API_KEY" "${key}"
+  IRIS_GRADER_KEY_CHANGED=true
+  log "Stored the iris-grader key as ARGUS_V3_API_KEY: Ascend will grade through Argus v3."
 }
 
 # Iris automated red-teaming engine (Straiker's "Ascend" product) — only
@@ -8621,10 +8829,23 @@ phase_straiker_ascend() {
     if [[ -n "${ARGUS_V3_GRADER_KEY:-}" ]]; then
       patch_shared_secret "ARGUS_V3_API_KEY" "${ARGUS_V3_GRADER_KEY}"
       log "Stored the iris-grader key as ARGUS_V3_API_KEY: Ascend will grade through Argus v3."
-    elif ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
-      log "NOTE: no iris-grader key yet (ARGUS_V3_API_KEY): Ascend keeps grading through Argus v1. Mint one (runbook 'Ascend on Argus v3') and re-run this phase with ARGUS_V3_GRADER_KEY set."
+    else
+      # Create the iris-grader agent and key ourselves (idempotent, never aborts the install), then see whether a key is stored.
+      ensure_iris_grader_key
+      if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
+        if [[ "${WITHOUT_DEFEND_V1}" == true ]]; then
+          # No v1 to fall back to: an enabled grader would retry a service that is not there on every turn. Off until the key exists.
+          ascend_v3_args+=(--set "argus.enabled=false")
+          log "NOTE: no iris-grader key and no Argus v1 (--without-defend-v1): Ascend's Argus-based grading is switched off until the key exists (re-run this phase)."
+        else
+          log "NOTE: no iris-grader key yet (ARGUS_V3_API_KEY): Ascend keeps grading through Argus v1. Re-run this phase (the key is created automatically), or mint it by hand (runbook 'Ascend on Argus v3') and set ARGUS_V3_GRADER_KEY."
+        fi
+      fi
     fi
   fi
+  # Workers that were already running read the key at start: roll them when this run stored a new one (a fresh install starts them with it).
+  local ascend_existed=false
+  kubectl get deploy straiker-ascend-probe-worker -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 && ascend_existed=true
 
   local cmd=(
     helm upgrade --install "${ASCEND_RELEASE}" "$(chart_ref "${ASCEND_CHART_NAME}")"
@@ -8708,6 +8929,10 @@ phase_straiker_ascend() {
   fi
 
   "${cmd[@]}" || return
+  if [[ "${IRIS_GRADER_KEY_CHANGED}" == true && "${ascend_existed}" == true ]]; then
+    log "Rolling Ascend's probe and recon workers so they pick up the iris-grader key (one pod at a time)."
+    kubectl -n "${INFRA_NAMESPACE}" rollout restart deploy/straiker-ascend-probe-worker deploy/straiker-ascend-recon-worker >/dev/null || true
+  fi
   apply_ha_pdbs "${INFRA_NAMESPACE}" straiker-edge
 }
 
@@ -9191,6 +9416,7 @@ phase_straiker_edge() {
     --set "edgeType=${EDGE_TYPE}"
   )
   ha_enabled && cmd+=(--set "replicas=2")
+  [[ "${WITHOUT_DEFEND_V1}" == true ]] && cmd+=(--set "disabledRoutes={defend-api}")
   if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
     cmd+=(--set "tailscale.domain=$(get_metadata "custom_domain")")
     cmd+=(--set "tailscale.clusterIssuerEmail=${TAILSCALE_CLUSTER_ISSUER_EMAIL:-$(get_metadata "tailscale_cluster_issuer_email")}")

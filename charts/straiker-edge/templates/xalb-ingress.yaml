@@ -1,7 +1,7 @@
 {{- if eq .Values.edgeType "xalb" }}
 {{- /* One Ingress per route, all in the same IngressGroup (one ALB): the ALB health check is per Ingress, and each
        service has its own health path (routes[].albHealthcheckPath). */}}
-{{- range $i, $r := .Values.routes }}
+{{- range $i, $r := (include "edge.routes" . | fromJsonArray) }}
 {{- if $i }}
 ---
 {{- end }}

@@ -21,7 +21,7 @@ metadata:
 spec:
   ingressClassName: {{ .Values.alb.ingressClassName }}
   rules:
-    {{- range .Values.routes }}
+    {{- range (include "edge.routes" . | fromJsonArray) }}
     - host: {{ printf "%s.%s" .albSubdomain $.Values.alb.domain | quote }}
       http:
         paths:

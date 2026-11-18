@@ -188,6 +188,8 @@ service:
 # a customer-supplied domain — kept independent of subdomain above so
 # renaming one doesn't silently rename the other (internal/tailscale keep
 # their own conventions unchanged).
+# Names of routes below to leave out (e.g. [defend-api]). Set by the installer with --without-defend-v1.
+disabledRoutes: []
 routes:
   - name: frontend
     # ALB health check (xalb): a path the service answers 200 without a session.
