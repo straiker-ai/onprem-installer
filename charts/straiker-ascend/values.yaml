@@ -136,7 +136,7 @@ availableModels: []
 bedrockInferenceProfile: ""
 
 # ── Archive pipeline: iris posts events over HTTP to the shared
-# straiker-system Redpanda Connect (Benthos), same as charts/straiker-defend.
+# straiker-system Redpanda Connect (Benthos).
 archive:
   enabled: true
   # The shared benthos pipeline (charts/straiker-system's benthos.yaml)
@@ -155,29 +155,15 @@ archive:
 # same namespace.
 foundationEndpoint: ""
 
-# ── Argus detection endpoint — straiker-defend's Service, in this same
-# namespace. install-straiker.sh now installs straiker-defend unconditionally
-# (regardless of product selection), since iris depends on Argus's own
-# /api/v1/detect directly for several detection categories -- so this should
-# be reachable in every real install. apiKey is the service-to-service key
-# argus's own /api/v1/detect route accepts with no real per-app tenant record
-# (settings.argus_service_api_key on argus's side) -- both charts must
-# reference the same "ARGUS_SERVICE_API_KEY" key in straiker-secrets, see
-# templates/secrets.yaml.
+# ── Argus (v3) grading. Argus v1 was removed from on-prem: iris grades through Argus v3 (/api/v3/detect via the api-gateway), as the
+# SaaS regions without v1 do. iris uses it only when the endpoint AND the key are both set (iris/detector/argus_v3.py: enabled()). The key
+# is an sk_agt_ API key of an agent named "iris-grader", created by install-straiker.sh (phase straiker-ascend, with --data-layer) and stored
+# as ARGUS_V3_API_KEY in straiker-secrets.
 #
-# enabled: manual safety valve, not the expected normal state -- flip false
-# only if straiker-defend is deliberately not deployed in this cluster (e.g.
-# a manually-assembled install that skips install-straiker.sh) or is down for
-# an extended maintenance window. When false, iris's own ArgusDetection.run()
-# skips the network call entirely instead of retrying a connection that can't
-# succeed (~12s/turn x up to 8 turns wasted per amt_attack_* probe otherwise).
+# enabled: the installer sets it false when no key exists yet (or there is no Argus v3, i.e. no --data-layer): iris then skips the Argus call and
+# marks those results unknown, excluded from scoring, instead of retrying an engine that is not there.
 argus:
   enabled: true
-  endpoint: ""
-  # Argus v3 (/api/v3/detect through the api-gateway), used by probe-worker and recon-worker INSTEAD of the v1 endpoint above, but
-  # only when this endpoint AND the key are both set (iris/detector/argus_v3.py: enabled()). The key is an sk_agt_ API key of an
-  # "iris-grader" agent minted in the platform (registry), stored as ARGUS_V3_API_KEY in straiker-secrets. Empty = v1.
-  # install-straiker.sh sets the endpoint with --defend-engine v3; with no key stored, iris keeps using v1.
   v3:
     endpoint: ""
 

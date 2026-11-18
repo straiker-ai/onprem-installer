@@ -50,7 +50,7 @@ dex:
 # TLS termination + routing to this Service (which proxies /dex/* to dex —
 # see dex-proxy.ts) now lives in the standalone charts/straiker-edge chart
 # (formerly a nested "internalEdge" component here, extracted once a second
-# real consumer — charts/straiker-defend's API — needed the same edge).
+# real consumer — charts/straiker-ascend's API — needed the same edge).
 # This value must still match that chart's own httpsPort: frontend.origin
 # below computes the externally-reachable https://app.<appDomain>:<port> URL
 # for OIDC redirects, and these are independent top-level charts with no way

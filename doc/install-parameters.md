@@ -32,13 +32,13 @@ Environment variables: `STRAIKER_STATE_FILE` (state file per install), `AWS_PROF
 | `--customer-key-file FILE` | File holding the Straiker customer key (first run only); otherwise a hidden prompt asks once | prompt |
 | `--tf-prefix P` | Prefix of the state bucket and of account-wide IAM role names. A second install in the same account needs its own | `s6r-onprem` |
 | `--namespace NS` | Kubernetes namespace | `straiker` |
-| `--domain D` | Base domain: `straiker.D`, `straiker-defend.D`, `straiker-ascend.D`, `api.D` | none |
+| `--domain D` | Base domain: `straiker.D`, `straiker-ascend.D`, `api.D` | none |
 | `--route53` | The public Route 53 zone for `--domain` is in this account: certificates and DNS records are automatic | off |
 | `--create-zone` | With `--route53`: **Terraform** (`terraform/aws/dns`, installer phase `dns-zone`) creates the public Route 53 zone for `--domain` and the API gateway's ACM certificate with its validation record. It prints the four name servers and the NS record to add in the parent zone, then waits (before anything costly is built) until `dig +short NS <domain>` returns them. Remembered. The zone is never deleted by teardown. `--check` only reports whether the zone exists and is delegated | off |
 | `--certificate-arn ARN` | Without `--route53`: your ACM certificate (same region) covering the console hosts; the `api.D` certificate is still requested (DNS records are printed) | none |
 | `--edge-type T` | `xalb` (internet-facing ALB + ACM + WAF), `alb` (internal), `internal` (Caddy, offline tests), `none`, `tailscale` | `xalb` |
 | `--products LIST` | Products to install: `ascend`, `defend` | `ascend,defend` |
-| `--defend-engine E` | `v3` (Argus v3: needed by the console Controls page and the Detect API) or `v1` | `v3` |
+| `--defend-engine v3` | Accepted and ignored: Argus v1 was removed, Argus v3 is the only detection engine (needs `--data-layer`); `v1` is refused | `v3` |
 | `--ai-provider-mode M` | `bedrock`, `own-keys`, `trial-key` | `bedrock` |
 | `--provision-strategy S` | `min` (one zone, PoC), `ha` (two zones), `max` (three zones, more headroom). First run only | `min` |
 | `--availability-zones A,B[,C]` | Zones the cluster uses, in order (first = primary, the only node zone under `min`). Fixed once the cluster exists | region's first 2 |
@@ -128,7 +128,7 @@ Environment variables: `STRAIKER_STATE_FILE` (state file per install), `AWS_PROF
 |---|---|
 | `--straiker-customer-name NAME` / `--straiker-customer-key KEY` | Your Straiker customer name and API key (prompted if missing; prefer `--customer-key-file` on the wrapper) |
 | `--products LIST` | `ascend`, `defend` |
-| `--defend-engine v1\|v3` | Detection engine (`v3` default with `--data-layer`) |
+| `--defend-engine v3` | Accepted and ignored (Argus v3 is the only engine; `v1` is refused) |
 | `--ai-provider-mode M` | `own-keys`, `bedrock`, `trial-key` (only when Ascend is selected; safe to change later) |
 | `--repo-name N` / `--repo-url U` / `--chart-version V` / `--values FILE` | Helm repository, chart version and extra values for `straiker-system` (`--values` repeatable) |
 | `--saas-frontend` | Also create the SaaS-style frontend backends (DynamoDB tables, Kinesis audit stream) |

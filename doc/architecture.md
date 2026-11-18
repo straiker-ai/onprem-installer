@@ -21,7 +21,6 @@ flowchart TB
   user([Users and SDK/agents]) -->|HTTPS 443| waf[AWS WAF Web ACL]
   waf --> alb[Application Load Balancer<br/>ACM certificates, TLS 1.2+]
   alb -->|straiker.domain| fe[straiker-frontend + dex]
-  alb -->|straiker-defend.domain| defend[straiker-defend v1]
   alb -->|straiker-ascend.domain| ascend[Ascend control plane]
   alb -->|api.domain| gw[api-gateway]
 
@@ -111,7 +110,6 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 | straiker-frontend (console) | `straiker/frontend:onprem-v2026.11.8-rc6` | 1 | 8080 | 250m, 256Mi / 1 CPU, 1Gi | general |
 | dex (OIDC) | `dexidp/dex:v2.45.1` | 1 | 5556 | 100m / 500m | general |
 | straiker-bifrost (LLM gateway) | `maximhq/bifrost:v1.6.7` | 1 | 8090 | 250m / 1 CPU | general |
-| straiker-defend (Defend v1) | `straiker/argus:onprem-v2026.8.24` | 1 (+ settings-sync) | 8080 | 300m, 3Gi / 6Gi | general; PDB min 1 |
 | argus-v3 (Defend v3): app, agent-config, compactor | `straiker/argus:v3-42f2001...` | app 2 (HPA 2-6), 1, 1 | 8080 (9090 metrics) | app 1 CPU, 4Gi | general |
 | Ascend: control-plane, probe-worker, report-worker, recon-worker, adjustment-worker (always 1 replica), cleanup CronJob (02:00), db-migrate | `straiker/iris:onprem-v2026.11.18` | 1 each | 8081 (MCP 8181) | 250m-500m, 256Mi-2Gi | iris |
 | Jobs: frontend migrate and bootstrap | `frontend-migrate`, `postgres:16-alpine` | one-off | | | general |
@@ -156,8 +154,8 @@ Five GPU model servers, **2 replicas each, one GPU per replica = 10 GPUs**. Each
 | Model | Used for | Image | Served name | Settings | Called by |
 |---|---|---|---|---|---|
 | **thanos** | Ascend attack and grading LLM | `straiker/vllm:v0.27.0-5` | `thanos` | bf16, context 32768, GPU memory 0.90-0.95 (p4d 0.95), 24.5 GB weights | Ascend (`/v1/chat/completions`) |
-| **vision** | image content (multimodal) | `straiker/vllm:v0.22.1` | `vision` | bf16, context 4096, GPU memory 0.75, fp8 KV cache, 1 image per prompt | argus-v3, Defend v1 |
-| **wanda** | image text and detection (multimodal) | `straiker/vllm:v0.22.1` | `wanda` | bf16, context 4096, GPU memory 0.90, fp8 KV cache | argus-v3, Defend v1 |
+| **vision** | image content (multimodal) | `straiker/vllm:v0.22.1` | `vision` | bf16, context 4096, GPU memory 0.75, fp8 KV cache, 1 image per prompt | argus-v3 |
+| **wanda** | image text and detection (multimodal) | `straiker/vllm:v0.22.1` | `wanda` | bf16, context 4096, GPU memory 0.90, fp8 KV cache | argus-v3 |
 | **kev-agentic** | agentic-behaviour classifier | `straiker/kev-lw-server:v0.2.2` (vLLM plus kev-server) | `kev-lw-4b-agentic` | context 9216, GPU memory 0.90, threshold 0.5, in-flight 32, queue 256, cache 20000 | argus-v3 (`/v1/detect`) |
 | **kev-non-agentic** | 19-category content classifier | `straiker/vllm:v0.30.0` | `kev-4b-19cat` | bf16, context 32768, pooling/classify runner, eager mode | no caller wired in the charts yet |
 
@@ -165,7 +163,7 @@ Common vLLM settings: `--trust-remote-code`, `HF_HUB_OFFLINE=1`, probes on `/hea
 GPU mapping: customers run all five on `p4d.24xlarge` (A100 40 GB, nothing quantized, thanos at 32k context); Straiker test installs use `--gpu-fleet per-model` (thanos on g6e L40S, vision/wanda/kev-non-agentic on g5 A10G, kev-agentic on g6 L4); VB test installs pin `g6e.4xlarge` (one L40S per node).
 Planner estimates (`scripts/gpu-models.json`): thanos 24.5 GB weights, vision 4.5, wanda 9, kev-agentic 8.5, kev-non-agentic 8.5.
 
-Defined in the charts but **not deployed**: antman, hulk, quicksilver, thor. Defend v1 still has endpoints for them, so the content-classifier detectors report "unavailable"; this is expected. A Bedrock LLM (`context-review`) covers the rest of Defend v3.
+Defined in the charts but **not deployed**: antman, hulk, quicksilver, thor. the content-classifier detectors that would use them report "unavailable" in Argus v3; this is expected. A Bedrock LLM (`context-review`) covers the rest of Defend v3.
 
 Model weights are copied once from Straiker's S3 (`onprem-artifact-models`) into the customer's bucket (`models/<model>/`), together with the images, by the `artifacts-sync` Jobs.
 
@@ -200,8 +198,7 @@ flowchart LR
   pg --> chs
   fe --> pg
   fe -->|admin API| asc[Ascend control plane]
-  asc -->|grading v1| d1[straiker-defend]
-  asc -->|grading v3| gw
+  asc -->|grading| gw
   asc -->|attack LLM| th[thanos]
   asc --> bf[bifrost] -->|HTTPS| br
   asc --> pg
@@ -212,21 +209,20 @@ flowchart LR
 
 | From | To | Protocol and what |
 |---|---|---|
-| Users | ALB, then WAF-filtered by host | HTTPS 443: `straiker.` frontend, `straiker-defend.` Defend, `straiker-ascend.` Ascend, `api.` api-gateway |
-| api-gateway | argus-v3 | `/api/v1/detect`, `/api/v3/detect/**`, copilot webhooks |
+| Users | ALB, then WAF-filtered by host | HTTPS 443: `straiker.` frontend, `straiker-ascend.` Ascend, `api.` api-gateway |
+| api-gateway | argus-v3 | `/api/v3/detect/**`, copilot webhooks (Argus v3 serves only `/api/v3/*`) |
 | api-gateway | foundation, registry, grid, databridge, portico, connect | HTTP 80, by path (`/api/v3/...`) |
 | argus-v3 | vision, wanda, kev-agentic | OpenAI-style `/v1/chat/completions`, kev `/v1/detect` |
 | argus-v3 | MSK | produces `s6r.events`, `s6r.findings`, `argus.transcript_events`; consumes `platform.agent_config`, `platform.tenant_config`; compactor writes `s6r.defend_turns` and S3 |
-| argus-v3, Defend v1 | ElastiCache Serverless | TLS 6379 |
+| argus-v3 | ElastiCache Serverless | TLS 6379 |
 | Ascend | ElastiCache replication group `<cluster>-iris-redis` | TLS 6379 |
 | straiker-ingest | MSK to ClickHouse | `s6r.events` to `grid.raw_event`, `s6r.findings` to `grid.raw_finding`, `platform.audit` to `grid.audit_event` |
 | foundation, registry, databridge, connect, frontend, Ascend | Aurora | PostgreSQL over TLS, one database each |
 | foundation, registry, databridge, connect | MSK | SASL/IAM, port 9098 |
 | ch-sync | Aurora `registry` to ClickHouse `grid` | every minute |
 | frontend | Dex 5556, Ascend control plane, OpenSearch, Aurora | login, admin API, search |
-| Ascend | thanos, bifrost, Defend v1 or api-gateway `/api/v3/detect` (v3 graders), Aurora, ElastiCache, benthos | attack generation and grading |
+| Ascend | thanos, bifrost, api-gateway `/api/v3/detect` (Argus v3 graders), Aurora, ElastiCache, benthos | attack generation and grading |
 | bifrost | Bedrock (and OpenAI, xAI, Anthropic if keys are given) | HTTPS |
-| Defend v1 | vision, wanda, benthos `/archive`, the frontend | detection, archive, foundation endpoint |
 | straiker-benthos | in-cluster OpenSearch (not the managed domain) | archive writes, index per stream |
 | Model pods | S3 models bucket / EFS | weights at start |
 
@@ -239,7 +235,7 @@ Secrets: all from Secrets Manager `<cluster>/...` through External Secrets into 
 
 `eks-tfbe` (state bucket), `eks-cluster`, `karpenter`, `k8s-preflight`, `aws-artifacts`, `gateway-cert`, `aws-data`, `external-secrets`, `artifacts-sync`
 (mirror images and model weights), `straiker-system`, `shared-secrets`, `clickhouse`, `data-bootstrap`, `ch-sync`, `platform-services`, `ingest`, `verify-data-layer`,
-`ai-provider-secrets`, `straiker-core`, `straiker-inference`, `straiker-defend`, `straiker-argus-v3`, `straiker-ascend`, then the edge (`edge-infra`, `alb-controller`, `external-dns`, `straiker-edge`) and `observability`.
+`ai-provider-secrets`, `straiker-core`, `straiker-inference`, `straiker-argus-v3`, `straiker-ascend`, then the edge (`edge-infra`, `alb-controller`, `external-dns`, `straiker-edge`) and `observability`.
 Re-running the same command resumes at the first unfinished phase.
 
 ---
@@ -272,7 +268,7 @@ The dl-test values above come from the recorded install state file, cross-checke
 
 ## 10. Live check of dl-test (read-only, 2026-11-16)
 
-Compared this document with the running dl-test cluster (`kubectl get`, `helm get values`, environment variables without secrets). Nothing was changed.
+Compared this document with the running dl-test cluster, before Argus v1 was removed (`kubectl get`, `helm get values`, environment variables without secrets). Nothing was changed.
 
 - **Matches:** every Deployment, StatefulSet, CronJob and image tag in section 4, replica counts (all as listed, `argus-v3-app` 2 with HPA 2-6, ClickHouse 2, Keeper 3, each model 2), the five NodePools, four ALB Ingresses (`straiker.`, `straiker-defend.`, `straiker-ascend.`, `api.dltest.straiker.ai`, one shared ALB), Kubernetes v1.35.
 - **GPU nodes (10, all us-east-2a):** vision 2 x g5.4xlarge, wanda 2 x g5.2xlarge, kev-non-agentic 2 x g5.2xlarge, kev-agentic 2 x g6.4xlarge, thanos 2 x g6e.4xlarge. System nodes also include one unmanaged-pool `m5.large` (the system node group).

@@ -15,11 +15,11 @@ description: >
   charts/straiker-core/charts/straiker-frontend's formerly-nested
   "internal-edge" component (frontend-only, one hardcoded route) into its
   own top-level chart once a second real consumer showed up
-  (charts/straiker-defend's API), matching this repo's "small, independent
+  (charts/straiker-ascend's API), matching this repo's "small, independent
   charts" pattern (straiker-inference, straiker-artifact) over nesting a new
   subchart under straiker-core.
 type: application
-version: 0.7.3
+version: 0.8.0
 appVersion: "2-alpine"
 home: https://github.com/straiker-ai/onprem
 sources:

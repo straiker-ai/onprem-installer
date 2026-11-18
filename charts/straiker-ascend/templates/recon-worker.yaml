@@ -53,19 +53,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "ascend.secretName" . }}
                   key: SYS__INFERENCE_API_KEY
-            # Service-to-service key argus's own /api/v1/detect accepts with
-            # no real per-app tenant record -- see templates/secrets.yaml and
-            # probe-worker.yaml's identical wiring for the full explanation.
-            - name: SYS__ARGUS_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "ascend.secretName" . }}
-                  key: ARGUS_SERVICE_API_KEY
-                  optional: true
             - name: SYS__IRIS_URL
               value: {{ include "ascend.controlPlaneUrl" . | quote }}
-            - name: SYS__ARGUS_ENDPOINT
-              value: {{ include "ascend.argusEndpoint" . | quote }}
             - name: SYS__ARGUS_ENABLED
               value: {{ .Values.argus.enabled | quote }}
 {{- if .Values.argus.v3.endpoint }}

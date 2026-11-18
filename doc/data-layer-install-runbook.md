@@ -18,7 +18,7 @@ Everything is created in **one AWS account and one region**.
 | Platform services | foundation, registry, databridge, portico, grid, api-gateway, ingest | grid's ClickHouse migrations run as Replicated tables |
 | Products | frontend + dex + bifrost, 5 GPU inference models (x2 replicas), Defend, Ascend | AI provider: Bedrock by default |
 | GPU nodes | customers: **2 x p4d.24xlarge** (pool grows to 4, never expired by age); test installs: one g5/g6e-class node per model server (`--gpu-fleet per-model`) | see "GPU fleet" in section 2 |
-| Edge | **One internet-facing Application Load Balancer** (`--edge-type xalb`, the default): ACM certificates, TLS 1.2+, **AWS WAF**. Hosts `straiker.<domain>`, `straiker-defend.<domain>`, `straiker-ascend.<domain>` and the api-gateway `api.<domain>` | `terraform/aws/edge` (WAF, IAM, certificate) + AWS Load Balancer Controller; Caddy (`--edge-type internal`) is for offline tests only |
+| Edge | **One internet-facing Application Load Balancer** (`--edge-type xalb`, the default): ACM certificates, TLS 1.2+, **AWS WAF**. Hosts `straiker.<domain>`, `straiker-ascend.<domain>` and the api-gateway `api.<domain>` | `terraform/aws/edge` (WAF, IAM, certificate) + AWS Load Balancer Controller; Caddy (`--edge-type internal`) is for offline tests only |
 
 **AWS WAF** (`terraform/aws/edge/waf.tf`, Web ACL `<cluster>-edge`): AWS managed rule groups (IP reputation, Common, Known bad inputs), a
 per-IP rate limit (`--waf-rate-limit`, default 10000 requests / 5 minutes, `0` = off), and per-host source allowlists:
@@ -94,7 +94,7 @@ the shell already has, so the customer must give the AWS CLI working credentials
   offers it (`min` strategy uses one AZ: pick `ha`, or subnets in an AZ that has it). p4d On-Demand capacity is often
   short: reserve it (EC2 Capacity Reservation or Capacity Block) and pass `--gpu-capacity-reservation cr-...` so Karpenter
   launches into it first. An install that already runs its models keeps `per-model` until `--gpu-fleet p4d` is passed.
-- **A domain** (`--domain customer.com`). The console hosts are `straiker.`, `straiker-defend.` and `straiker-ascend.<domain>`; the
+- **A domain** (`--domain customer.com`). The console hosts are `straiker.` and `straiker-ascend.<domain>`; the
   api-gateway is `api.<domain>` (change it with `--installer-arg --gateway-domain --installer-arg <name>`). With `--route53` (the domain's
   public zone is in this account) both certificates and every DNS record are automatic; `--domain` must then be the zone's own name. Otherwise
   pass `--certificate-arn` (an ISSUED ACM certificate in the cluster's region covering the three console hosts) and add the DNS records
@@ -283,11 +283,11 @@ in it, anything not created by this install. It is irreversible; delete `~/.stra
 
 ## 6. Defend v3 (Argus v3): what it can detect, and Ascend on v3
 
-Install with `--defend-engine v3`. The gateway sends `/api/v3/detect` and the integration detect paths to
-`argus-service` (Argus v3). **Argus v3 serves only `/api/v3/*`** (detect, the Copilot webhooks, `/api/v3/health`) and the internal controls
-routes: it has no `/api/v1/detect`, `/api/v1/private/ping` or `/api/v1/attachments/...` (checked on dl-test: `argus-service` answers 404 to the
-first two, `straiker-defend` answers them). `straiker-defend` (v1) still runs next to it unless you install with `--without-defend-v1`
-(section 6i); until then the console's `argusEndpoint` uses it, and so does Ascend until the `iris-grader` key exists.
+**Argus v3 is the only Argus engine on-prem; Argus v1 (`straiker-defend`) was removed** (section 6i). It needs `--data-layer` (MSK, ElastiCache,
+Secrets Manager); without the data layer an install has no Defend detection engine. Argus v3 serves only `/api/v3/*` (detect, the Copilot
+webhooks, `/api/v3/health`) and the internal controls routes. The gateway sends `/api/v3/detect` and the integration detect paths to
+`argus-service` (Argus v3). `/api/v1/detect` is unavailable (the gateway chart still carries that route, as in the SaaS regions that run v3
+only; clients must use `/api/v3/detect`).
 
 **What Defend v3 can and cannot detect** (the model fleet is vision, wanda, kev-agentic, kev-non-agentic, thanos; 2 replicas each):
 
@@ -313,7 +313,7 @@ written = the ClickHouse insert fails. `audit_event` fills only from console act
 `--expect-audit`). Without the key it only observes.
 
 **Ascend on Argus v3 (automatic).** Iris's graders switch from v1 to `/api/v3/detect` only when two things exist (`iris/detector/argus_v3.py`):
-the endpoint (set by the installer with `--defend-engine v3`) and an `sk_agt_` key of an agent named `iris-grader`, stored as `ARGUS_V3_API_KEY` in
+the endpoint (set by the installer with `--data-layer`) and an `sk_agt_` key of an agent named `iris-grader`, stored as `ARGUS_V3_API_KEY` in
 `straiker-secrets`. SaaS mints that key by hand per region; here phase `straiker-ascend` does it (skip with `--no-iris-grader-mint`):
 1. It reads the console's organization id (`customers`, `platform_tenant_id` in the state file) and calls the registry's onboarding API from a
    short-lived pod: `POST /api/v3/onboard/custom-agent` with `{"label":"iris-grader","mode":"api","fields":{"archetype":"chat_assistant"}}` and
@@ -324,26 +324,34 @@ the endpoint (set by the installer with `--defend-engine v3`) and an `sk_agt_` k
 3. It checks Argus v3 accepts the key (`POST /api/v3/detect` through the in-cluster gateway, retried up to 90 s while the new agent reaches the
    engine through MSK). **Only then** it stores the key: a rejected key is never stored, which is the failure Mumbai had until 2026-11-04.
 4. On an existing install it rolls the probe and recon workers (one pod at a time) so they read the key; a fresh install starts them with it.
-Any failure is a warning, never an aborted install: Ascend keeps grading as before (v1, or off under `--without-defend-v1`), and re-running
+Any failure is a warning, never an aborted install: Ascend's Argus-based grading stays off (`argus.enabled=false`: those results are unknown and excluded from scoring), and re-running
 `--phase straiker-ascend` retries. The agent is created in the customer's own organization, so `iris-grader` appears in the console's agent list
 (SaaS keeps it in an internal tenant). By hand instead: create the agent in the console, then re-run `--phase straiker-ascend --rerun-phase` with
 `ARGUS_V3_GRADER_KEY=sk_agt_...` set. Check: `kubectl logs deploy/straiker-ascend-probe-worker` shows `argus_v3` requests and no 401s.
 Not verified on a running install yet (see the fresh-install checklist).
 
-## 6i. Removing Argus v1 (`--without-defend-v1`, opt-in, remembered)
+## 6i. Argus v1 is removed
 
-Argus v3 is the engine that stays. With the flag (needs `--defend-engine v3`):
-- phase `straiker-defend` installs nothing and uninstalls an existing `straiker-defend` release (v1 and its settings-sync) and its PDB;
-- the console's `ARGUS_ENDPOINT` stays unset (the chart then leaves the variable out), exactly as in Frankfurt and Mumbai, whose infra notes say an unset
-  endpoint "turns one feature off, nothing else": **Saige** (the detect playground, which calls `/api/v1/detect` and only works on sample
-  applications) shows "taking a break", and the Argus entry of `/health/detailed` reports unhealthy. The pod probes use `/api/health`, nothing in this
-  repo calls `/health/detailed`, and Turns attachments (`/api/v1/attachments`) are not deployed on-prem;
-- the `defend-api` edge route (`straiker-defend.<domain>`, which pointed at v1) is dropped (`disabledRoutes` in `charts/straiker-edge`);
-- Ascend's `argus.enabled` is set to false if no `iris-grader` key exists yet (nothing to fall back to), true otherwise.
-Order for an existing install: (1) re-run `--phase straiker-ascend` and confirm the key was stored and the workers log `argus_v3` with no 401s;
-(2) re-run `--phase straiker-defend,straiker-core,straiker-edge,straiker-ascend --without-defend-v1`. The frontend rolls (2 replicas, one at a time) and
-the edge route disappears; the ACM certificate keeps its `straiker-defend.<domain>` name and the v1 image stays in the mirror list (harmless).
-API or SDK callers still using `/api/v1/detect` must move to `/api/v3/detect` (they get 404 from `argus-service` today).
+Argus v3 is the only Argus engine on-prem. What changed (SaaS regions without v1, Frankfurt and Mumbai, are set up the same way):
+- no `straiker-defend` release (v1 engine and settings-sync), no `straiker-defend` chart or phase, and no `--defend-engine v1` (the flag is
+  accepted as `v3` and ignored; `v1` is refused). The v1 image is no longer mirrored;
+- the console's `ARGUS_ENDPOINT` stays unset (the chart then leaves the variable out), as in Frankfurt and Mumbai, whose infra notes say an unset
+  endpoint "turns one feature off, nothing else". Off: **Saige** (the detect playground, which called `/api/v1/detect` and only works on sample
+  applications) shows "taking a break"; the Argus entry of `/health/detailed` reports unhealthy (the pod probes use `/api/health` and nothing in
+  this repo calls `/health/detailed`); attachment downloads in turn views (`/api/v1/attachments`) fail. Accepted: they were v1 features;
+- the `defend.<domain>` edge route and its hostname are gone, and `/api/v1/detect` and `/api/v1/integrations/*/detect` are unavailable: callers
+  use `/api/v3/detect`. The unused `argus/session` secret (the old v1 session key) is no longer created;
+- Ascend's graders use Argus v3 only, with the automatically created `iris-grader` key (section 6). Without a key (or without `--data-layer`)
+  its Argus-based grading is off.
+
+**Installs that still have v1** (made before this change): phase `straiker-ascend` removes the old release and what only it used (PDB,
+session-key ExternalSecret and Secret) after it has moved the graders to v3; without Ascend, phase `straiker-argus-v3` does it. Re-run
+`--phase straiker-argus-v3,straiker-core,straiker-edge,straiker-ascend`: the frontend rolls (2 replicas, one at a time), the edge route disappears,
+and Ascend's workers roll onto v3. Kept on purpose: the empty ECR chart repository `<prefix>/charts/straiker-defend` (Terraform cannot delete a
+non-empty repository on an existing install), the `defend` name in older ACM certificates, and the `straiker-defend` entries of the uninstaller (so
+an old install can still be removed). A later `aws-data` run on an old install deletes the unused `argus/session` secret (7-day recovery window).
+The non-AWS (GKE) path has no Argus v3, so it no longer has a Defend engine.
+
 
 ## 6b. Console: new Defend overview and Controls (platform API)
 
@@ -430,7 +438,7 @@ It is **always one replica** (the iris code does a read-modify-write per assessm
 ## 6h. Fresh-install checklist (what only a new cluster can prove)
 
 Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-node-volumes --bifrost-postgres --charts-from-ecr --otel --ascend-adjustment-worker
---production-sizing` (add `--without-defend-v1` to prove the v3-only install; the layout flags are decided once; the others are remembered). Then check:
+--production-sizing` (the layout flags are decided once; the others are remembered). Then check:
 
 | Area | Check | Expect |
 |---|---|---|
@@ -445,7 +453,7 @@ Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-nod
 | OTel | `kubectl -n observability get pods`; a smoke trace in X-Ray | 2 collectors Running |
 | Ascend | `kubectl get deploy | grep ascend` | adjustment worker 1/1 (iris image `onprem-v2026.11.18` or newer) |
 | iris-grader | installer log of `straiker-ascend`; `kubectl logs deploy/straiker-ascend-probe-worker` | "Stored the iris-grader key"; `argus_v3` requests, no 401 |
-| No v1 (with `--without-defend-v1`) | `kubectl get deploy | grep defend`; the console | no `straiker-defend`; frontend env has no `ARGUS_ENDPOINT`; Saige "taking a break"; `defend` host not routed |
+| No v1 | `kubectl get deploy | grep defend`; the console | no `straiker-defend`; frontend env has no `ARGUS_ENDPOINT`; Saige "taking a break"; no `defend` host routed |
 | Verify | `--phase verify-data-layer` | all PASS (Vector `WARN` is expected) |
 
 ## 7. Known gaps and manual steps

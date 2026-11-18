@@ -49,7 +49,6 @@ AURORA_LAYOUT=""
 BIFROST_POSTGRES=""
 ASCEND_ADJUSTMENT_WORKER=""
 ENCRYPT_NODE_VOLUMES=""
-WITHOUT_DEFEND_V1=""
 NO_IRIS_GRADER_MINT=""
 PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
@@ -87,7 +86,7 @@ Options:
   --provision-strategy S     min | ha | max (default: min)
   --edge-type T              xalb | alb | internal | none | tailscale (default: xalb = internet-facing ALB with an ACM
                              certificate and AWS WAF; the console and the api-gateway share it)
-  --domain D                 base domain for xalb/alb: straiker.D, straiker-defend.D, straiker-ascend.D and api.D
+  --domain D                 base domain for xalb/alb: straiker.D, straiker-ascend.D and api.D
   --route53                  the public Route53 zone for --domain is in this account: certificates and DNS records are
                              created automatically
   --create-zone              with --route53: Terraform creates the public Route53 zone for --domain (and the API gateway's
@@ -121,8 +120,7 @@ Options:
   --charts-from-ecr          push the charts to the install's ECR (OCI) and deploy every release from there (needs the aws-artifacts phase)
   --otel                     opt-in OpenTelemetry: collector -> X-Ray traces + CloudWatch metrics (run with the observability phase)
   --aurora-layout L          single | split: a second Aurora cluster for iris (Ascend) and bifrost (default: split on a fresh install, single on an existing one; never changes later)
-  --without-defend-v1        Argus v3 only: no v1 engine, console ARGUS_ENDPOINT unset (as the SaaS regions without v1), no defend-api edge route
-  --no-iris-grader-mint      do not create the iris-grader agent/key automatically (Ascend graders keep v1, or off under --without-defend-v1)
+  --no-iris-grader-mint      do not create the iris-grader agent/key automatically (Ascend's Argus-based grading then stays off until you supply a key)
   --encrypt-node-volumes     encrypt node root volumes (system group and Karpenter nodes) with a customer-managed KMS key; fresh installs only (a running cluster would have every node replaced)
   --ascend-adjustment-worker run Ascend's FP adjustment worker (needs iris image onprem-v2026.11.18 or newer; always one replica)
   --bifrost-postgres         Bifrost keeps its config and request logs in Postgres (shared by its replicas)
@@ -130,7 +128,7 @@ Options:
   --cloudtrail               opt-in audit: a CloudTrail trail into a private S3 bucket (--cloudtrail-multi-region for all regions)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
   --gpu-capacity-reservation IDS  EC2 Capacity Reservation / Capacity Block id(s) (cr-...) the GPU nodes launch into first
-  --defend-engine E          v3 (default here: Argus v3, needed by the console's Controls page and the Detect API) | v1
+  --defend-engine v3         accepted and ignored: Argus v1 was removed, Argus v3 is the only detection engine (v1 is refused)
   --tf-prefix P              prefix of the Terraform state bucket and of the account-wide IAM role names (default s6r-onprem).
                              A second install in the same AWS account needs its own, e.g. --tf-prefix vb
   --alarm-email ADDR         subscribe ADDR to the CloudWatch alarm topic (repeatable; each confirms AWS's mail)
@@ -179,7 +177,6 @@ while [[ $# -gt 0 ]]; do
     --bifrost-postgres) BIFROST_POSTGRES=true; shift ;;
     --ascend-adjustment-worker) ASCEND_ADJUSTMENT_WORKER=true; shift ;;
     --encrypt-node-volumes) ENCRYPT_NODE_VOLUMES=true; shift ;;
-    --without-defend-v1) WITHOUT_DEFEND_V1=true; shift ;;
     --no-iris-grader-mint) NO_IRIS_GRADER_MINT=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
@@ -470,7 +467,6 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ "${BIFROST_POSTGRES}" == true ]] && run_args+=(--bifrost-postgres)
 [[ "${ASCEND_ADJUSTMENT_WORKER}" == true ]] && run_args+=(--ascend-adjustment-worker)
 [[ "${ENCRYPT_NODE_VOLUMES}" == true ]] && run_args+=(--encrypt-node-volumes)
-[[ "${WITHOUT_DEFEND_V1}" == true ]] && run_args+=(--without-defend-v1)
 [[ "${NO_IRIS_GRADER_MINT}" == true ]] && run_args+=(--no-iris-grader-mint)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
@@ -553,7 +549,7 @@ fi
 cat <<EOF
 
 Done. To reach the product from this machine:
-  echo '127.0.0.1  app.straiker.internal defend.straiker.internal ascend.straiker.internal' | sudo tee -a /etc/hosts
+  echo '127.0.0.1  app.straiker.internal ascend.straiker.internal' | sudo tee -a /etc/hosts
   kubectl -n ${NAMESPACE} port-forward svc/straiker-edge 8443:8443
   open https://app.straiker.internal:8443/        (self-signed certificate)
 Bootstrap admin: admin@straiker.internal. Password:

@@ -15,7 +15,7 @@ variable "cluster_name" {
 }
 
 variable "san_hostnames" {
-  description = "Hostnames the DNS-validated certificate should cover (e.g. straiker.<domain>, straiker-defend.<domain>, straiker-ascend.<domain>). Computed in bash (install-straiker.sh's custom_domain_hostname()) rather than rebuilt here, so hostname logic lives in exactly one place. Only used when enable_route53_automation=true (see route53.tf) — alb and xalb-without-route53-automation both require an explicit --alb-certificate-arn instead."
+  description = "Hostnames the DNS-validated certificate should cover (e.g. straiker.<domain>, straiker-ascend.<domain>). Computed in bash (install-straiker.sh's custom_domain_hostname()) rather than rebuilt here, so hostname logic lives in exactly one place. Only used when enable_route53_automation=true (see route53.tf) — alb and xalb-without-route53-automation both require an explicit --alb-certificate-arn instead."
   type        = list(string)
   default     = []
 }

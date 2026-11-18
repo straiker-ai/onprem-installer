@@ -457,7 +457,7 @@ valkey:
 
 # Benthos (Redpanda Connect) — single shared HTTP-in / OpenSearch-out archive
 # pipeline for every product that archives detection turns (currently just
-# charts/straiker-defend). Infra-owned rather than per-product: one instance,
+# charts/straiker-ascend). Infra-owned rather than per-product: one instance,
 # alongside opensearch/redis/postgres, instead of every product chart
 # deploying its own copy. Mirrored via charts/straiker-artifact's
 # imageMirror.images (destRepository redpandadata/connect), so repository

@@ -97,10 +97,7 @@ imageMirror:
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend-migrate
       tag: onprem-v2026.11.8-rc6
       destRepository: straiker/frontend-migrate
-    - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
-      tag: onprem-v2026.8.24
-      destRepository: straiker/argus
-    # Argus v3 engine (feature/argus-v3 head), same repository as v1 under a v3-<sha> tag; replaces the v1 engine.
+    # Argus v3 engine (feature/argus-v3 head), the only Argus engine on-prem (v1 was removed).
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus
       tag: v3-42f20012839da1ebf91d9b9603b3892381029e1c
       destRepository: straiker/argus

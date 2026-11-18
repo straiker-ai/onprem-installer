@@ -12,7 +12,7 @@ data:
   # separate naming convention -- tailscale's hostnames follow the exact
   # same <route.albSubdomain>.<domain> shape as alb/xalb's.
   Caddyfile: |
-    {{- range (include "edge.routes" . | fromJsonArray) }}
+    {{- range .Values.routes }}
     {{ .albSubdomain }}.{{ $.Values.tailscale.domain }}:{{ $.Values.httpsPort }} {
       tls /etc/caddy-tls/tls.crt /etc/caddy-tls/tls.key
       reverse_proxy {{ .targetService }}:{{ .targetPort }}
@@ -20,7 +20,7 @@ data:
     {{- end }}
   {{- else }}
   Caddyfile: |
-    {{- range (include "edge.routes" . | fromJsonArray) }}
+    {{- range .Values.routes }}
     {{ .subdomain }}.{{ $.Values.global.appDomain }}:{{ $.Values.httpsPort }} {
       tls internal
       reverse_proxy {{ .targetService }}:{{ .targetPort }}

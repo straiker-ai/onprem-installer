@@ -152,7 +152,7 @@ SYS__REDIS_URL env entry: from an existing Secret when redis.existingSecret.name
 
 {{/*
 Foundation (tenant/app/settings control plane) — straiker-frontend serves
-this. Matches charts/straiker-defend's own foundationEndpoint helper.
+this.
 */}}
 {{- define "ascend.foundationEndpoint" -}}
 {{- if .Values.foundationEndpoint -}}
@@ -187,21 +187,8 @@ read that chart's values directly -- independent top-level charts).
 {{- end }}
 
 {{/*
-Argus detection endpoint — charts/straiker-defend's Service, in this same
-namespace. install-straiker.sh installs straiker-defend unconditionally now
-(regardless of product selection), since iris depends on it directly.
-*/}}
-{{- define "ascend.argusEndpoint" -}}
-{{- if .Values.argus.endpoint -}}
-{{- .Values.argus.endpoint -}}
-{{- else -}}
-{{- printf "http://straiker-defend.%s.svc.cluster.local/api/v1/detect" (include "ascend.namespace" .) -}}
-{{- end -}}
-{{- end }}
-
-{{/*
 Archive gateway — the shared straiker-system Redpanda Connect (Benthos),
-same as charts/straiker-defend's own archiveEndpoint helper.
+as the other Straiker charts use it.
 */}}
 {{- define "ascend.archiveEndpoint" -}}
 {{- if .Values.archive.endpoint -}}
@@ -215,8 +202,7 @@ same as charts/straiker-defend's own archiveEndpoint helper.
 Unaligned LLM endpoint — always straiker-inference's thanos release
 (modelProfile=thanos, Mistral Nemo 12B). "inference-thanos", not the old
 chart's bare "thanos" guess -- matches charts/straiker-inference's actual
-per-model release/Service naming exactly (see charts/straiker-defend's own
-llmEndpoints wiring for the same convention).
+per-model release/Service naming exactly.
 */}}
 {{- define "ascend.unalignedLLMEndpoint" -}}
 {{- printf "http://inference-thanos.%s.svc.cluster.local:8000/v1/chat/completions" (include "ascend.namespace" .) -}}
@@ -237,8 +223,7 @@ matching its "iris" database entry) unless overridden.
 
 {{/*
 Dedicated NodePool (charts/straiker-system's karpenter.iris — arm64-only,
-tainted purpose=straiker-iris), unlike charts/straiker-defend which uses the
-shared general-purpose pool. Merges any user-supplied nodeSelector on top.
+tainted purpose=straiker-iris). Merges any user-supplied nodeSelector on top.
 */}}
 {{- define "ascend.nodeSelector" -}}
 {{- $ns := deepCopy .Values.nodeSelector }}

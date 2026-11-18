@@ -20,8 +20,6 @@ images:
     tag: onprem-v2026.11.8-rc6
   straiker/frontend-migrate:
     tag: onprem-v2026.11.8-rc6
-  straiker/argus:
-    tag: onprem-v2026.8.24
   straiker/iris:
     tag: onprem-v2026.11.18
   straiker/vllm:

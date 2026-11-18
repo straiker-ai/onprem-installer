@@ -59,7 +59,6 @@ ARTIFACT_VALUES="charts/straiker-artifact/values.yaml"
 TARGETS=(
   "straiker/frontend|charts/straiker-core/charts/straiker-frontend/values.yaml|.frontend.image.tag|charts/straiker-core/charts/straiker-frontend|charts/straiker-core"
   "straiker/frontend-migrate|charts/straiker-core/charts/straiker-frontend/values.yaml|.frontend.dbMigrate.image.tag|charts/straiker-core/charts/straiker-frontend|charts/straiker-core"
-  "straiker/argus|charts/straiker-defend/values.yaml|.image.tag|charts/straiker-defend|"
   "straiker/iris|charts/straiker-ascend/values.yaml|.image.tag|charts/straiker-ascend|"
   "straiker/vllm|charts/straiker-inference/values.yaml|.image.tag|charts/straiker-inference|"
 )
@@ -67,7 +66,7 @@ TARGETS=(
 manifest_repos() { yq -r '.images | keys | .[]' "$MANIFEST"; }
 manifest_tag() { yq -r ".images[\"$1\"].tag" "$MANIFEST"; }
 artifact_tag() { yq -r "(.imageMirror.images[] | select(.destRepository == \"$1\")).tag" "$ARTIFACT_VALUES"; }
-# A repo can be mirrored under several tags (e.g. vllm: one per model's server version; argus: v1 and v3 engines). The
+# A repo can be mirrored under several tags (e.g. vllm: one per model's server version). The
 # manifest's tag is the primary one the charts declare: it must be among the mirrored tags; extra tags are allowed.
 tag_in_list() { grep -Fxq -- "$1" <<<"$2"; }                                              # $1 = tag, $2 = newline-separated tags
 chart_version() { yq -r '.version' "$1"; }                                              # $1 = Chart.yaml path

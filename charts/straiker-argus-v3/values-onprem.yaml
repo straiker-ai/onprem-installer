@@ -1,5 +1,5 @@
 # On-prem overlay for the vendored Argus v3 chart (scripts/sync-argus-v3-chart.sh). Ours: never overwritten by the sync.
-# The installer (phase straiker-defend) sets everything that depends on the install with --set-string:
+# The installer (phase straiker-argus-v3) sets everything that depends on the install with --set-string:
 #   image.repository / image.tag                       the mirrored engine image (v3-<sha>)
 #   argus.secretManager.region / secretName            the <cluster>/argus/v3 bundle (SYS__ARGUS_INTERNAL_S2S_KEY, ...)
 #   argus.redis.url                                    ElastiCache (rediss://)

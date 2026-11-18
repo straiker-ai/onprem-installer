@@ -255,7 +255,7 @@ All of these should be answered "yes" before pressing Enter:
 | 1.5 Base domain | `--domain <customer.com>`, plus `--route53` when its public zone is in this account, **or** `--certificate-arn <arn>` when DNS is elsewhere (then DNS records are added by hand, section 4) |
 | 1.6 Who may reach the product | `--installer-arg --internal-lb-source-ranges --installer-arg <cidr>` (website) and `--installer-arg --gateway-allowed-cidrs --installer-arg <cidr,cidr>` (API). A private API: `--installer-arg --gateway-exposure --installer-arg internal` |
 | 1.7 Own VPC or new | New VPC: nothing to add (optionally `--availability-zones a,b`). Own VPC: `--installer-arg --vpc-id --installer-arg <vpc-id> --installer-arg --private-subnet-ids --installer-arg <ids> --installer-arg --public-subnet-ids --installer-arg <ids>` |
-| 1.8 Products | `--products ascend,defend` (default both) and `--defend-engine v3` (default) |
+| 1.8 Products | `--products ascend,defend` (default both); Argus v3 is the only detection engine and needs `--data-layer` |
 | 1.9 Admin email | `--installer-arg --admin-email --installer-arg <admin@customer.com>` |
 | 1.10 Alarm email(s) | `--alarm-email <ops@customer.com>` (repeat per address) |
 | 1.11 Sign-in method | `--sso-type <google\|facebook\|amazon\|apple\|saml\|oidc>`, `--sso-client-id <id>`, `--sso-domains <customer.com>`; `saml`/`oidc` also `--sso-name`, `--sso-saml-metadata-url` or `--sso-oidc-issuer` (PingOne: `--sso-type oidc --sso-name pingone --sso-oidc-issuer https://auth.pingone.com/<environment-id>/as`, section 4.6). The client secret is **not** a flag: set `SSO_CLIENT_SECRET` or type it at the hidden prompt |

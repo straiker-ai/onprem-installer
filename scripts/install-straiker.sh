@@ -151,10 +151,7 @@ ASCEND_ADJUSTMENT_WORKER="${ASCEND_ADJUSTMENT_WORKER:-}"
 # Node root volumes (system node group and every Karpenter node) on the customer-managed EBS key. Decided once, FRESH installs only:
 # changing it on a running cluster replaces every node. ENCRYPT_NODE_VOLUMES_FORCE=true overrides that guard.
 ENCRYPT_NODE_VOLUMES="${ENCRYPT_NODE_VOLUMES:-}"
-# Argus v3 only: do not install the v1 engine (charts/straiker-defend), leave the console's ARGUS_ENDPOINT unset (as the SaaS regions without
-# v1 do: Saige and the detailed health line's Argus entry go off, nothing else) and drop the defend-api edge route. Remembered.
-WITHOUT_DEFEND_V1="${WITHOUT_DEFEND_V1:-}"
-# Skip the automatic iris-grader agent/key (Ascend's graders then keep using v1, or nothing under --without-defend-v1).
+# Skip the automatic iris-grader agent/key (Ascend's Argus-based grading then stays off until a key is supplied with ARGUS_V3_GRADER_KEY).
 NO_IRIS_GRADER_MINT="${NO_IRIS_GRADER_MINT:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
@@ -278,7 +275,7 @@ ARTIFACT_CHART_NAME="straiker-artifact"
 STRAIKER_CREDENTIAL_SECRET_NAME="straiker-credential"
 
 # Shared service-to-service credentials Secret read by straiker-core,
-# straiker-inference, and straiker-defend; created by phase_shared_secrets.
+# straiker-inference and straiker-ascend; created by phase_shared_secrets.
 SHARED_SECRETS_NAME="straiker-secrets"
 
 # Application layer (frontend/bifrost/dex/caddy), installed into the same
@@ -297,24 +294,15 @@ INFERENCE_SERVICE_ACCOUNT="straiker-inference"
 # but high enough that one slow cold-start doesn't serialize every model.
 INFERENCE_CONCURRENCY=4
 
-# Argus detection engine (charts/straiker-defend) — backs Straiker's "Defend"
-# product, but always installed regardless of PRODUCTS_OPT: charts/straiker-
-# ascend's own probe-worker/recon-worker call Argus's /api/v1/detect directly
-# for several detection categories (amt_attack_* and others), so an Ascend-
-# only install still needs it running. Runs after straiker-inference and
-# straiker-system.
-DEFEND_RELEASE="straiker-defend"
-
-# Defend's detection engine: v1 (charts/straiker-defend, the default for now) or v3 (charts/straiker-argus-v3, Argus v3, needs
-# --data-layer). v3 runs next to v1 until Ascend is moved to it; then v3 becomes the default and v1 is removed.
-# Resolved by resolve_defend_engine() (flag > remembered > the data layer's v3 > v1); empty until then.
-DEFEND_ENGINE="${DEFEND_ENGINE:-}"
-DEFEND_CHART_NAME="straiker-defend"
+# Argus v1 (charts/straiker-defend, release "straiker-defend") was removed from on-prem: Argus v3 (charts/straiker-argus-v3, phase
+# straiker-argus-v3, needs --data-layer) is the only detection engine. The old release name is kept only so installs that still have it can
+# be cleaned up (retire_defend_v1).
+DEFEND_V1_RELEASE="straiker-defend"
 
 # How the local model servers (GPU) are provided. Profile: production (default; one server per GPU, never shared or
 # quantized: what customers get) or test (opt-in; may time-slice GPUs and quantize so a small cluster runs the whole fleet).
 # Mode: vllm (default; the model fleet runs on GPU nodes here) or bedrock (no GPU fleet). Bedrock is also used by Argus v3's
-# context reviewer in every mode, so it is checked whenever --defend-engine v3 is selected.
+# context reviewer in every mode, so it is checked with the data layer.
 INFERENCE_PROFILE="${INFERENCE_PROFILE:-}"
 INFERENCE_MODE="${INFERENCE_MODE:-}"
 # TESTING ONLY (not remembered): deploy just these models of the selected products, e.g. when GPU quota covers part of the fleet.
@@ -349,7 +337,6 @@ P4D_GPUS_PER_NODE=8
 P4D_NODE_VCPUS=96
 # EC2 service quota "Running On-Demand P instances" (vCPUs): p4d/p4de/p5 count here, not in the G/VT quota.
 P_VCPU_QUOTA_CODE="L-417A185B"
-DEFEND_SERVICE_ACCOUNT="straiker-defend"
 
 # Bedrock inference profiles Argus v3 may invoke (space-separated), as SaaS grants its argus pods: sol is the engine's context
 # reviewer default (infra PR #198), terra sits alongside it. Each is an inference profile, so the grant covers the profile
@@ -376,9 +363,7 @@ ARTIFACT_BROKER_WHOAMI_URL="${ARTIFACT_BROKER_BASE_URL}/whoami"
 DEFAULT_BIFROST_BASE_URL="https://bifrost.stage.straiker.ai/v1"
 
 # Thin TLS edge (charts/straiker-edge) — routes app.<appDomain> to
-# straiker-core's frontend and defend-api.<appDomain> to straiker-defend.
-# Always runs; the defend-api route just 502s until straiker-defend is
-# installed.
+# straiker-core's frontend and ascend.<appDomain> to straiker-ascend's control plane.
 EDGE_RELEASE="straiker-edge"
 EDGE_CHART_NAME="straiker-edge"
 
@@ -643,7 +628,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "dns-zone" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-defend" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge" "observability")
+declare -a ALL_PHASES=("eks-tfbe" "dns-zone" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge" "observability")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -845,10 +830,8 @@ Options:
   --saas-frontend                  With --data-layer: also create the AWS backends of the SaaS frontend (DynamoDB
                                    environment + guardrail tables, Kinesis audit stream) and a Pod Identity role for
                                    the frontend. Remembered in install state; needs a SaaS-style frontend image.
-  --defend-engine <v1|v3>          Defend's detection engine. v3 (default with --data-layer): Argus v3 (phase straiker-argus-v3),
-                                   which the console's Controls page and the Detect API need; run next to v1
-                                   (charts/straiker-defend) until Ascend moves to it. v1 (default without --data-layer): v1 only.
-                                   Remembered in install state; a later run without the flag keeps it.
+  --defend-engine v3               Accepted and ignored (Argus v1 was removed; Argus v3 is the only detection engine and needs
+                                   --data-layer). v1 is refused.
   --inference-profile <production|test>
                                    production (default): one model server per GPU, never shared or quantized, on the GPU
                                    tier each model is validated for. test: opt-in for small clusters; may time-slice GPUs
@@ -922,12 +905,7 @@ Options:
                                    cluster (what an existing install keeps). Decided once and remembered. Forcing split on an existing
                                    install creates an EMPTY iris database on the new cluster: Ascend's history on the old one is not moved
                                    (dump/restore it first: runbook 6f).
-  --without-defend-v1              Argus v3 only. Does not install the v1 engine (phase straiker-defend is skipped and an existing
-                                   release is uninstalled), leaves the console's ARGUS_ENDPOINT unset (Saige and the Argus line of
-                                   /health/detailed go off, as in the SaaS regions without v1) and drops the defend-api edge route.
-                                   Needs --defend-engine v3. Remembered. Run it once the iris-grader key exists (below), or Ascend's
-                                   graders have nothing to grade with and are switched off.
-  --no-iris-grader-mint            Do not create the iris-grader agent and key. By default phase straiker-ascend (engine v3) creates them
+  --no-iris-grader-mint            Do not create the iris-grader agent and key. By default phase straiker-ascend (with --data-layer) creates them
                                    through the registry's onboarding API from inside the cluster, checks Argus v3 accepts the key, and
                                    stores it as ARGUS_V3_API_KEY, so Ascend's workers grade through v3. Idempotent: a re-run reuses the agent.
   --encrypt-node-volumes           Encrypt the node root volumes (system node group and every Karpenter node) with a customer-managed KMS key
@@ -970,7 +948,7 @@ Options:
   --custom-domain <domain>         Used when --edge-type none, alb, or tailscale is selected.
                                    Sets straiker-core's/straiker-ascend's
                                    OIDC-redirect-URI/CORS overrides to
-                                   straiker.<domain>/straiker-defend.<domain>/straiker-ascend.<domain> — needed
+                                   straiker.<domain>/straiker-ascend.<domain> — needed
                                    whenever you already know the domain your own (or the
                                    installed alb/Caddy) ingress/LoadBalancer will route
                                    through, or Dex's login will loop. With --edge-type none,
@@ -1172,37 +1150,12 @@ validate_cluster_name() {
   fi
 }
 
-# --defend-engine: flag > remembered > v3 with --data-layer (Argus v3 is what the console's Controls page and the Detect API
-# need; without it the registry cannot read the control catalog) > v3 if its phase already ran > v1. Remembered, so a later
-# phase run without the flag does not silently fall back to v1.
-resolve_defend_engine() {
-  local v="${DEFEND_ENGINE}"
-  [[ -n "${v}" ]] || v="$(get_metadata "defend_engine")"
-  if [[ -z "${v}" ]]; then
-    if [[ "$(get_phase_status "straiker-argus-v3")" == "done" || "${DATA_LAYER}" == "true" ]]; then v="v3"; else v="v1"; fi
-  fi
-  case "${v}" in v1 | v3) ;; *)
-    echo "ERROR: --defend-engine must be v1 or v3 (got '${v}')." >&2
-    exit 1
-    ;;
-  esac
-  if [[ "${v}" == "v3" && "${DATA_LAYER}" != "true" ]]; then
-    echo "ERROR: --defend-engine v3 needs --data-layer (Argus v3 uses MSK, ElastiCache and Secrets Manager from the data tier)." >&2
-    exit 1
-  fi
-  local without_v1="${WITHOUT_DEFEND_V1}"
-  [[ "$(get_metadata "without_defend_v1")" == "true" ]] && without_v1=true
-  if [[ "${without_v1}" == true && "${v}" != "v3" ]]; then
-    echo "ERROR: --without-defend-v1 needs --defend-engine v3 (Argus v1 is the engine being removed; v3 must be the one that stays)." >&2
-    exit 1
-  fi
-  # Remember it only once it is known to be valid.
-  if [[ "${without_v1}" == true ]]; then
-    WITHOUT_DEFEND_V1=true
-    set_metadata "without_defend_v1" "true"
-  fi
-  DEFEND_ENGINE="${v}"
-  set_metadata "defend_engine" "${v}"
+# Argus v3 is the only Defend detection engine on-prem (Argus v1 was removed) and it runs on the data tier: without --data-layer there is no
+# detection engine, and Ascend's Argus-based grading stays off.
+note_argus_v3_scope() {
+  [[ "${DATA_LAYER}" == "true" ]] \
+    || log "NOTE: Argus v1 was removed from on-prem and Argus v3 needs --data-layer: this install has no Defend detection engine."
+  return 0
 }
 
 # Refuse to run --cluster-name X against a state file that belongs to cluster Y: it would silently overwrite Y's remembered
@@ -1475,17 +1428,9 @@ Installer phases:
                              Each model is its own release (named 'inference-<model>'), so one
                              model's GPU-capacity problem doesn't block the others. Skipped
                              entirely if no selected product needs a model.
- 12) straiker-defend      - install/upgrade release 'straiker-defend' (argus + its
-                             settings-sync daemon — charts/straiker-defend). Always runs,
-                             regardless of product selection — straiker-ascend's iris calls
-                             Argus's /api/v1/detect directly for several detection
-                             categories, so Ascend-only installs need this too. Runs after
-                             straiker-inference (needs its per-model Services) and
-                             straiker-system (needs its Redis/OpenSearch/Benthos and shared
-                             NodePool).
- 12b) straiker-argus-v3   - install/upgrade release 'argus-v3' (the Argus v3 engine, its
+ 12) straiker-argus-v3   - install/upgrade release 'argus-v3' (the Argus v3 engine, its
                              agent-config consumer and transcript compactor —
-                             charts/straiker-argus-v3). Only with --defend-engine v3 and
+                             charts/straiker-argus-v3). Only with
                              --data-layer: it runs on MSK, ElastiCache, Secrets Manager and
                              the argus-sa Pod Identity role from aws-data. Fills the
                              <cluster>/argus/v3 secret from the gateway and platform keys.
@@ -1540,9 +1485,8 @@ Installer phases:
                              --edge-type, prompted first if omitted): none (default) —
                              installs nothing, bring your own ingress/LoadBalancer;
                              internal — thin TLS edge (Caddy) routing app.<appDomain> to
-                             straiker-core's frontend and defend.<appDomain> to
-                             straiker-defend (502s until that phase has run, since
-                             straiker-defend is now always installed too); tailscale — same
+                             straiker-core's frontend and ascend.<appDomain> to
+                             straiker-ascend's control plane; tailscale — same
                              Caddy, but with a real cert-manager certificate for
                              --custom-domain and its Service exposed onto the tailnet at L3
                              via the operator installed in phase 14; alb — one Ingress
@@ -1953,10 +1897,6 @@ parse_args() {
         ENCRYPT_NODE_VOLUMES=true
         shift
         ;;
-      --without-defend-v1)
-        WITHOUT_DEFEND_V1=true
-        shift
-        ;;
       --no-iris-grader-mint)
         NO_IRIS_GRADER_MINT=true
         shift
@@ -1970,7 +1910,17 @@ parse_args() {
         shift
         ;;
       --defend-engine)
-        DEFEND_ENGINE=${2:-}
+        case "${2:-}" in
+          v3) ;;
+          v1)
+            echo "ERROR: Argus v1 was removed from on-prem: Argus v3 is the only detection engine (it needs --data-layer)." >&2
+            exit 2
+            ;;
+          *)
+            echo "ERROR: --defend-engine takes v3 (and is ignored): got '${2:-}'." >&2
+            exit 2
+            ;;
+        esac
         shift 2
         ;;
       --inference-profile)
@@ -2718,7 +2668,7 @@ docker_registry_with_prefix() {
 }
 
 # global.modelBucket needs the right scheme prefix for whichever backend
-# charts/straiker-inference's/straiker-defend's modelSyncCmd helper uses
+# charts/straiker-inference's modelSyncCmd helper uses
 # (aws s3 sync vs gsutil rsync) — the bare "models_bucket" metadata value
 # never carries one itself.
 model_bucket_uri() {
@@ -3425,7 +3375,7 @@ phase_aws_artifacts() {
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="namespace=${INFRA_NAMESPACE}" \
     -var="workload_namespace=${INFRA_NAMESPACE}" \
-    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]" \
+    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\"]" \
     -var="bedrock_mode=$([ "${AI_PROVIDER_MODE}" = "bedrock" ] && echo true || echo false)" \
     -var="bifrost_service_account_name=${BIFROST_SERVICE_ACCOUNT}"
 
@@ -3459,9 +3409,7 @@ phase_aws_data() {
     mark_phase_blocked "AWS region is required. Use --aws-region, AWS_REGION, or configure the AWS CLI."
     return
   fi
-  if [[ "${DEFEND_ENGINE}" == "v3" ]]; then
-    preflight_argus_v3_bedrock || return
-  fi
+  preflight_argus_v3_bedrock || return
 
   require_command aws
   require_command tofu
@@ -3615,11 +3563,6 @@ phase_aws_data() {
     "frontend/auth": {
       "description": "Frontend session signing key; synced to K8s by External Secrets",
       "generated_keys": ["SESSION_SIGNING_KEY"],
-      "password_length": 64
-    },
-    "argus/session": {
-      "description": "Defend (Argus) session secret key; synced to K8s by External Secrets",
-      "generated_keys": ["SYS__ARGUS_SESSION_SECRET_KEY"],
       "password_length": 64
     },
     "platform/keys": {
@@ -3839,7 +3782,7 @@ phase_aws_artifacts_gke() {
     -var="cluster_name=${CLUSTER_NAME}" \
     -var="namespace=${INFRA_NAMESPACE}" \
     -var="workload_namespace=${INFRA_NAMESPACE}" \
-    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\", \"${DEFEND_SERVICE_ACCOUNT}\"]"
+    -var="workload_service_account_names=[\"${INFERENCE_SERVICE_ACCOUNT}\"]"
 
   local models_bucket registry_host hauler_sa workload_sa
   models_bucket="$(tofu -chdir="${GCP_ARTIFACTS_DIR}" output -raw models_bucket_name)"
@@ -4279,9 +4222,9 @@ phase_straiker_system() {
   fi
 
   # Product -> NodePool mapping: Ascend uses karpenter.iris. karpenter.argus
-  # is NOT gated by product selection — straiker-defend is always installed
-  # (see phase_straiker_defend), since Ascend's own iris depends on Argus's
-  # /api/v1/detect directly, regardless of whether 'defend' was selected.
+  # is NOT gated by product selection — Argus v3 is always installed with the
+  # data layer, since Ascend's own iris grades through it, regardless of
+  # whether 'defend' was selected.
   # Both are non-null (enabled) by default in the chart's own values.yaml, so
   # an unselected product must be explicitly nulled to skip provisioning its
   # NodePool. Shared system services (opensearch/postgres/redis) aren't
@@ -7096,11 +7039,8 @@ phase_straiker_core() {
   fi
   cmd+=(--set-string "straiker-frontend.dex.staticAdminPasswordHash=${bootstrap_password_hash}")
 
-  # Unconditional — straiker-defend is always installed now (see
-  # phase_straiker_defend), regardless of product selection.
-  # Without v1 the console's ARGUS_ENDPOINT stays unset (the chart then omits the variable), as in the SaaS regions that have no v1.
-  [[ "${WITHOUT_DEFEND_V1}" == true ]] \
-    || cmd+=(--set "straiker-frontend.frontend.argusEndpoint=http://${DEFEND_RELEASE}.${INFRA_NAMESPACE}.svc.cluster.local")
+  # The console's ARGUS_ENDPOINT stays unset (the chart then omits the variable), as in the SaaS regions that have no Argus v1: Saige, the
+  # Argus line of /health/detailed and attachment downloads (all of which called the v1 API) are off.
   # The platform API gateway (phase platform-services) and the flags that switch the console to it. Frontends older than
   # the FEATURE_FLAG_OVERRIDES change ignore the flags; PUBLIC_API_GATEWAY is read by every build.
   if [[ " ${PLATFORM_SERVICES} " == *" api-gateway "* ]]; then
@@ -7109,8 +7049,8 @@ phase_straiker_core() {
     # accepts it (gateway_accepts_console_session); otherwise sign-in would end in a 401 and the old Defend page stays.
     if gateway_accepts_console_session; then
       cmd+=(--set "straiker-frontend.frontend.featureFlags.defend-platform-api-overview=true")
-      # Controls reads its catalog from Argus v3 (registry -> gateway -> /internal/argus/v3): only with the v3 engine.
-      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=$([[ "${DEFEND_ENGINE}" == "v3" ]] && echo true || echo false)")
+      # Controls reads its catalog from Argus v3 (registry -> gateway -> /internal/argus/v3).
+      cmd+=(--set "straiker-frontend.frontend.featureFlags.control-policies=true")
       # Controls "Who": naming users (employee-user-controls) and picking groups from connected directories (connectors).
       # Without them the editor shows a disabled "Add group / Add exception" stub.
       cmd+=(--set "straiker-frontend.frontend.featureFlags.employee-user-controls=true")
@@ -8359,28 +8299,13 @@ phase_straiker_inference() {
   fi
 }
 
-# Argus — always installed, regardless of product selection: charts/
-# straiker-ascend's own iris calls Argus's /api/v1/detect directly for
-# several detection categories, so an Ascend-only install still needs this
-# running (not just customers who selected Defend as a product). Depends on
-# straiker-system (Redis/OpenSearch/Benthos, shared NodePool) and straiker-
-# inference's per-model releases (SYS__LLM_ENDPOINTS__* targets) already
-# being up; checks straiker-system's live release status the same way
-# phase_straiker_core does, since a phase that merely ran earlier isn't proof
-# it's still healthy.
 # Argus v3 (the Defend detection engine; charts/straiker-argus-v3, vendored from straiker-ai/argus feature/argus-v3). Needs the
 # data layer: MSK (IAM), ElastiCache (TLS), the argus/v3 Secrets Manager bundle and the argus-sa Pod Identity role, all from aws-data.
 # Runs next to v1 until Ascend is moved to v3 (its current image calls v1 directly); enabled with --defend-engine v3.
 phase_straiker_argus_v3() {
-  case "${DEFEND_ENGINE}" in
-    v1 | v3) ;;
-    *)
-      mark_phase_blocked "--defend-engine must be v1 or v3 (got '${DEFEND_ENGINE}')."
-      return
-      ;;
-  esac
-  if [[ "${DEFEND_ENGINE}" != "v3" ]]; then
-    log "Argus v3 is not selected (--defend-engine v1): skipping."
+  if [[ "${DATA_LAYER}" != "true" ]]; then
+    log "Argus v3 needs --data-layer (MSK, ElastiCache, Secrets Manager) — skipping."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--data-layer not set."
     return
   fi
   require_command helm
@@ -8470,83 +8395,10 @@ phase_straiker_argus_v3() {
   # behind trace chunks (seconds instead of ~0.1 s). None is deployed, so it is off.
   cmd+=(--set "argus.llmEndpoints.kevPrompt=false")
 
-  "${cmd[@]}"
-}
-
-phase_straiker_defend() {
-  require_command helm
-  require_command kubectl
-
-  if [[ "${WITHOUT_DEFEND_V1}" == true ]]; then
-    log "--without-defend-v1: Argus v1 (${DEFEND_RELEASE}) is not installed."
-    if helm status "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
-      log "Uninstalling the existing '${DEFEND_RELEASE}' release (Argus v1 and its settings-sync); Argus v3 (argus-v3) keeps serving."
-      helm uninstall "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null || return
-      kubectl delete pdb "${DEFEND_RELEASE}" -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-    fi
-    set_phase_status "${CURRENT_PHASE}" "skipped" "--without-defend-v1."
-    return
-  fi
-
-  local infra_status
-  infra_status="$(helm status "${INFRA_RELEASE}" -n "${INFRA_NAMESPACE}" -o json 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("info",{}).get("status",""))' 2>/dev/null || true)"
-  if [[ "${infra_status}" != "deployed" ]]; then
-    mark_phase_blocked "Release '${INFRA_RELEASE}' in namespace '${INFRA_NAMESPACE}' is not healthy (status: '${infra_status:-not installed}'). straiker-defend needs its Redis/OpenSearch/Benthos — fix and re-run 'straiker-system' first (--phase straiker-system --rerun-phase)."
-    return
-  fi
-
-  local ecr_registry models_bucket
-  ecr_registry="$(get_metadata "ecr_registry")"
-  models_bucket="$(get_metadata "models_bucket")"
-  if [[ -z "${ecr_registry}" || -z "${models_bucket}" ]]; then
-    mark_phase_blocked "Missing ecr_registry/models_bucket from install state. Run phase 'aws-artifacts' first."
-    return
-  fi
-
-  ensure_k8s_ready_for_charts || return
-
-  helm repo add --force-update "${HELM_REPO_NAME}" "${HELM_REPO_URL}" >/dev/null
-  helm repo update "${HELM_REPO_NAME}" >/dev/null
-
-  local ecr_registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
-  local cmd=(
-    helm upgrade --install "${DEFEND_RELEASE}" "$(chart_ref "${DEFEND_CHART_NAME}")"
-    --namespace "${INFRA_NAMESPACE}"
-    --create-namespace
-    --set "global.dockerRegistry=${ecr_registry_prefixed}"
-    --set "global.modelBucket=$(model_bucket_uri "${models_bucket}")"
-    --wait
-    --timeout "${HELM_TIMEOUT}"
-  )
-  ha_enabled && cmd+=(--set "replicas=2")
-  # --data-layer: Redis is ElastiCache Serverless (TLS only), not straiker-system's valkey.
-  if [[ "${DATA_LAYER}" == "true" ]]; then
-    local redis_endpoint
-    redis_endpoint="$(get_metadata "data_redis_endpoint")"
-    if [[ -z "${redis_endpoint}" ]]; then
-      mark_phase_blocked "No data_redis_endpoint in install state. Run phase 'aws-data' first."
-      return
-    fi
-    cmd+=(--set-string "redis.url=rediss://${redis_endpoint}:6379")
-    ensure_synced_secret defend-session-source "${CLUSTER_NAME}/argus/session" straiker-defend-session-secret "%s" \
-      "SYS__ARGUS_SESSION_SECRET_KEY" || return
-    cmd+=(--set-string "sessionKeySecret=defend-session-source")
-  fi
-  if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
-    cmd+=(--set "cloudProvider=gke")
-    local workload_gsa
-    workload_gsa="$(get_metadata "workload_service_account_email")"
-    if [[ -n "${workload_gsa}" ]]; then
-      cmd+=(--set "gcpServiceAccountEmail=${workload_gsa}")
-    fi
-  fi
-  if [[ -n "${CHART_VERSION}" ]]; then
-    cmd+=(--version "${CHART_VERSION}")
-  fi
-
   "${cmd[@]}" || return
-  apply_ha_pdbs "${INFRA_NAMESPACE}" straiker-ascend-control-plane
+  # Without Ascend nothing else cleans up an Argus v1 release left by an older install (with Ascend, phase straiker-ascend does it after it
+  # has moved the graders to v3).
+  [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]] || retire_defend_v1
 }
 
 # --force-conflicts resolves a field-manager conflict from an out-of-band edit
@@ -8574,6 +8426,22 @@ helm_ssa_conflict_flags() {
   local help
   help="$(helm upgrade --help 2>/dev/null || true)"
   [[ "${help}" == *"--force-conflicts"* && "${help}" == *"--server-side"* ]]
+}
+
+# Argus v1 (release straiker-defend: the engine and its settings-sync) was removed from on-prem. An install made before that still has it: remove
+# the release and what only it used (its PDB, its session-key ExternalSecret and the Secret the old chart generated). Argus v3 and the
+# iris-grader key do not depend on it. Never aborts the install.
+retire_defend_v1() {
+  helm status "${DEFEND_V1_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1 || return 0
+  log "Removing the retired Argus v1 release '${DEFEND_V1_RELEASE}' (Argus v3 is the only detection engine now)..."
+  if ! helm uninstall "${DEFEND_V1_RELEASE}" -n "${INFRA_NAMESPACE}" >/dev/null; then
+    log "WARNING: could not uninstall '${DEFEND_V1_RELEASE}'. Remove it by hand: helm uninstall ${DEFEND_V1_RELEASE} -n ${INFRA_NAMESPACE}"
+    return 0
+  fi
+  kubectl delete pdb "${DEFEND_V1_RELEASE}" -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete externalsecret defend-session-source -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete secret defend-session-source straiker-defend-session-secret -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
+  return 0
 }
 
 # ── iris-grader: Ascend's graders call Argus v3 as an agent named "iris-grader" (iris/detector/argus_v3.py: used only when the endpoint AND an
@@ -8691,7 +8559,7 @@ iris_grader_key_accepted() {
 IRIS_GRADER_KEY_CHANGED=false
 ensure_iris_grader_key() {
   IRIS_GRADER_KEY_CHANGED=false
-  [[ "${DEFEND_ENGINE}" == "v3" && "${DATA_LAYER}" == "true" ]] || return 0
+  [[ "${DATA_LAYER}" == "true" ]] || return 0
   [[ "${NO_IRIS_GRADER_MINT}" == true ]] && return 0
   [[ -z "${ARGUS_V3_GRADER_KEY:-}" ]] || return 0
   if kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
@@ -8711,12 +8579,12 @@ ensure_iris_grader_key() {
   fi
   log "Creating the iris-grader agent and key for Ascend's Argus v3 grading (tenant ${tenant})..."
   onboard="$(registry_call "${tenant}" POST /api/v3/onboard/custom-agent \
-    '{"label":"iris-grader","mode":"api","fields":{"archetype":"chat_assistant"}}' "iris-grader-${CLUSTER_NAME}")" || { log "WARNING: could not create the iris-grader agent: Ascend's graders are unchanged."; return 0; }
+    '{"label":"iris-grader","mode":"api","fields":{"archetype":"chat_assistant"}}' "iris-grader-${CLUSTER_NAME}")" || { log "WARNING: could not create the iris-grader agent: Ascend's Argus-based grading stays off."; return 0; }
   key="$(printf '%s' "${onboard}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("api_key",""))' 2>/dev/null || true)"
   if [[ -z "${key}" ]]; then
     # The agent already existed (the key is returned only once): read its active key back.
     iid="$(printf '%s' "${onboard}" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("integration") or {}).get("id",""))' 2>/dev/null || true)"
-    [[ -n "${iid}" ]] || { log "WARNING: the registry's onboarding answer had no integration id: Ascend's graders are unchanged."; return 0; }
+    [[ -n "${iid}" ]] || { log "WARNING: the registry's onboarding answer had no integration id: Ascend's Argus-based grading stays off."; return 0; }
     keys="$(registry_call "${tenant}" GET "/api/v3/integrations/${iid}/keys")" || { log "WARNING: could not list the iris-grader keys."; return 0; }
     kid="$(printf '%s' "${keys}" | python3 -c '
 import json, sys
@@ -8727,11 +8595,11 @@ print(next((k["id"] for k in rows if k.get("status") == "active"), ""))' 2>/dev/
     key="$(registry_call "${tenant}" GET "/api/v3/integrations/${iid}/keys/${kid}/reveal" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("api_key",""))' 2>/dev/null || true)"
   fi
   if [[ "${key}" != sk_agt_* ]]; then
-    log "WARNING: no usable iris-grader key came back: Ascend's graders are unchanged."
+    log "WARNING: no usable iris-grader key came back: Ascend's Argus-based grading stays off."
     return 0
   fi
   if ! iris_grader_key_accepted "${key}"; then
-    log "WARNING: Argus v3 has not accepted the iris-grader key yet (its configuration may still be propagating). Not stored: Ascend's graders are unchanged. Re-run --phase straiker-ascend in a few minutes."
+    log "WARNING: Argus v3 has not accepted the iris-grader key yet (its configuration may still be propagating). Not stored: Ascend's Argus-based grading stays off. Re-run --phase straiker-ascend in a few minutes."
     return 0
   fi
   patch_shared_secret "ARGUS_V3_API_KEY" "${key}"
@@ -8821,10 +8689,11 @@ phase_straiker_ascend() {
     fi
   fi
 
-  # Argus v3 for the graders: the in-cluster api-gateway (plain HTTP behind the NLB, Service port 443). Iris still uses v1 until the
-  # iris-grader key (ARGUS_V3_API_KEY in straiker-secrets) exists, so this is safe to set before the key is minted.
+  # Argus v3 for the graders (the only Argus engine on-prem): the in-cluster api-gateway (plain HTTP behind the NLB, Service port 443).
+  # Iris uses it only when the iris-grader key (ARGUS_V3_API_KEY in straiker-secrets) exists; without a key, or without the data layer (no Argus
+  # v3), its Argus-based grading is switched off (such results are unknown and excluded from scoring) instead of retrying a missing engine.
   local ascend_v3_args=()
-  if [[ "${DEFEND_ENGINE}" == "v3" ]]; then
+  if [[ "${DATA_LAYER}" == "true" ]]; then
     ascend_v3_args=(--set-string "argus.v3.endpoint=http://api-gateway.${INFRA_NAMESPACE}.svc.cluster.local:443/api/v3/detect")
     if [[ -n "${ARGUS_V3_GRADER_KEY:-}" ]]; then
       patch_shared_secret "ARGUS_V3_API_KEY" "${ARGUS_V3_GRADER_KEY}"
@@ -8832,16 +8701,11 @@ phase_straiker_ascend() {
     else
       # Create the iris-grader agent and key ourselves (idempotent, never aborts the install), then see whether a key is stored.
       ensure_iris_grader_key
-      if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
-        if [[ "${WITHOUT_DEFEND_V1}" == true ]]; then
-          # No v1 to fall back to: an enabled grader would retry a service that is not there on every turn. Off until the key exists.
-          ascend_v3_args+=(--set "argus.enabled=false")
-          log "NOTE: no iris-grader key and no Argus v1 (--without-defend-v1): Ascend's Argus-based grading is switched off until the key exists (re-run this phase)."
-        else
-          log "NOTE: no iris-grader key yet (ARGUS_V3_API_KEY): Ascend keeps grading through Argus v1. Re-run this phase (the key is created automatically), or mint it by hand (runbook 'Ascend on Argus v3') and set ARGUS_V3_GRADER_KEY."
-        fi
-      fi
     fi
+  fi
+  if ! kubectl get secret "${SHARED_SECRETS_NAME}" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.ARGUS_V3_API_KEY}' 2>/dev/null | grep -q .; then
+    ascend_v3_args+=(--set "argus.enabled=false")
+    log "NOTE: no iris-grader key (ARGUS_V3_API_KEY): Ascend's Argus-based grading is off until it exists. Re-run --phase straiker-ascend (the key is created automatically with --data-layer), or mint it by hand (runbook 'Ascend on Argus v3') and set ARGUS_V3_GRADER_KEY."
   fi
   # Workers that were already running read the key at start: roll them when this run stored a new one (a fresh install starts them with it).
   local ascend_existed=false
@@ -8933,6 +8797,8 @@ phase_straiker_ascend() {
     log "Rolling Ascend's probe and recon workers so they pick up the iris-grader key (one pod at a time)."
     kubectl -n "${INFRA_NAMESPACE}" rollout restart deploy/straiker-ascend-probe-worker deploy/straiker-ascend-recon-worker >/dev/null || true
   fi
+  # The workers no longer point at Argus v1: the old release (installs made before its removal) can go.
+  retire_defend_v1
   apply_ha_pdbs "${INFRA_NAMESPACE}" straiker-edge
 }
 
@@ -9177,7 +9043,7 @@ phase_edge_infra() {
   esac
   local san_hostnames_json
   san_hostnames_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
-    "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
+    "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-ascend)")"
 
   # AWS WAF for the ALB edge types (waf.tf). Per-host source allowlists: the console hosts get
   # --internal-lb-source-ranges, the api-gateway (when it rides the xalb ALB) gets --gateway-allowed-cidrs. One shared
@@ -9208,7 +9074,7 @@ api = split(os.environ["API_CIDRS"])
 if os.environ["API_HOST"] and api:
     out[os.environ["API_HOST"]] = api
 print(json.dumps(out))
-' "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-defend)" "$(custom_domain_hostname straiker-ascend)")"
+' "$(custom_domain_hostname straiker)" "$(custom_domain_hostname straiker-ascend)")"
     fi
   fi
 
@@ -9317,8 +9183,7 @@ phase_cert_manager() {
 
 # Thin TLS edge (charts/straiker-edge) — always runs (frontend needs it
 # regardless of product selection). Depends only on straiker-core's frontend
-# Service existing; doesn't check straiker-defend's status since its
-# defend-api route is allowed to 502 until that's installed.
+# Service existing.
 phase_straiker_edge() {
   require_command helm
   require_command kubectl
@@ -9332,7 +9197,7 @@ phase_straiker_edge() {
   fi
 
   if [[ "${EDGE_TYPE}" == "none" ]]; then
-    log "Edge type is 'none' — skipping straiker-edge entirely. Point your own ingress/LoadBalancer at straiker-frontend-service, straiker-defend, and straiker-ascend-control-plane directly."
+    log "Edge type is 'none' — skipping straiker-edge entirely. Point your own ingress/LoadBalancer at straiker-frontend-service and straiker-ascend-control-plane directly."
     return
   fi
 
@@ -9416,7 +9281,6 @@ phase_straiker_edge() {
     --set "edgeType=${EDGE_TYPE}"
   )
   ha_enabled && cmd+=(--set "replicas=2")
-  [[ "${WITHOUT_DEFEND_V1}" == true ]] && cmd+=(--set "disabledRoutes={defend-api}")
   if [[ "${EDGE_TYPE}" == "tailscale" ]]; then
     cmd+=(--set "tailscale.domain=$(get_metadata "custom_domain")")
     cmd+=(--set "tailscale.clusterIssuerEmail=${TAILSCALE_CLUSTER_ISSUER_EMAIL:-$(get_metadata "tailscale_cluster_issuer_email")}")
@@ -9684,17 +9548,15 @@ show_access_info() {
     if [[ -n "${custom_domain}" ]]; then
       log "Straiker is installed. Edge type is 'none' — OIDC/CORS are configured for:"
       log "  Frontend : https://$(custom_domain_hostname straiker)/"
-      log "  Defend   : https://$(custom_domain_hostname straiker-defend)/"
       log "  Ascend   : https://$(custom_domain_hostname straiker-ascend)/"
       log ""
       log "No ingress was installed for these hostnames — point your own"
       log "ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
-      log "  straiker-frontend-service:80, straiker-defend:80, straiker-ascend-control-plane:80"
+      log "  straiker-frontend-service:80, straiker-ascend-control-plane:80"
     else
       log "Straiker is installed. Edge type is 'none' — no ingress was installed for you."
       log "Point your own ingress/LoadBalancer at these ClusterIP Services (namespace ${INFRA_NAMESPACE}):"
       log "  Frontend : straiker-frontend-service:80"
-      log "  Defend   : straiker-defend:80"
       log "  Ascend   : straiker-ascend-control-plane:80"
     fi
     return
@@ -9791,19 +9653,17 @@ show_access_info() {
   edge_port="${edge_port:-8443}"
 
   # Collect routed hostnames; fall back to well-known defaults.
-  local app_host defend_host ascend_host
+  local app_host ascend_host
   app_host="$(printf '%s'    "${caddyfile}" | grep -o 'app\.[^ {:]*'    | head -1 || true)"
-  defend_host="$(printf '%s' "${caddyfile}" | grep -o 'defend\.[^ {:]*' | head -1 || true)"
   ascend_host="$(printf '%s' "${caddyfile}" | grep -o 'ascend\.[^ {:]*' | head -1 || true)"
   [[ -n "${app_host}" ]]    || app_host="app.straiker.internal"
-  [[ -n "${defend_host}" ]] || defend_host="defend.straiker.internal"
   [[ -n "${ascend_host}" ]] || ascend_host="ascend.straiker.internal"
 
   log ""
   log "Straiker is installed. To reach it from your machine:"
   log ""
   log "  1. Add all hosts to /etc/hosts (one line):"
-  log "       echo '127.0.0.1  ${app_host} ${defend_host} ${ascend_host}' | sudo tee -a /etc/hosts"
+  log "       echo '127.0.0.1  ${app_host} ${ascend_host}' | sudo tee -a /etc/hosts"
   log ""
   log "  2. Start a port-forward to the edge:"
   log "       kubectl -n ${INFRA_NAMESPACE} port-forward svc/straiker-edge ${edge_port}:${edge_port}"
@@ -9812,14 +9672,9 @@ show_access_info() {
   log "       https://${app_host}:${edge_port}/"
   log ""
   log "  Ascend : https://${ascend_host}:${edge_port}/"
-  log "  Defend : https://${defend_host}:${edge_port}/"
   log ""
-  log "Smoke test the Defend API (needs one of your application's API keys):"
-  log "  curl -sk -X POST https://${defend_host}:${edge_port}/api/v1/detect \\"
-  log "    -H \"Authorization: <api-key>\" \\"
-  log "    -H \"Content-Type: application/json\" \\"
-  log "    -H \"Straiker-Debug: true\" \\"
-  log "    -d '{\"prompt\":\"What is the capital of France?\"}' | jq"
+  log "Smoke test the Defend API (Argus v3, through the api-gateway; needs an agent API key from the console):"
+  log "  DETECT_API_KEY=sk_agt_... scripts/smoke-test-detect.sh"
   if [[ -n "$(get_metadata "gateway_domain")" && "$(get_metadata "gateway_exposure")" == "public" ]]; then
     log ""
     log "API gateway (SDK / agents): https://$(get_metadata "gateway_domain")   (TLS: $(get_metadata "gateway_cert_source" | sed 's/own/your ACM certificate/;s/issued/ACM certificate issued by the installer/'))"
@@ -10027,7 +9882,7 @@ URIs and CORS origin still need to match wherever you actually route
 frontend/defend/ascend to (your own ingress/LoadBalancer) — otherwise Dex's
 login will loop. If you already know that domain, enter it now and this
 installer will set those overrides for you (straiker.<domain>,
-straiker-defend.<domain>, straiker-ascend.<domain>). Leave blank to set
+straiker-ascend.<domain>). Leave blank to set
 them yourself later via --values.
 EOF
         CUSTOM_ORIGIN_DOMAIN="$(prompt_line "Custom origin domain (e.g. acmecorp.com; blank to skip): " || true)"
@@ -10047,7 +9902,7 @@ EOF
 Edge type 'alb' needs the domain frontend/defend/ascend will be reachable
 at — it drives both the ALB's Ingress host rules and straiker-core's/
 straiker-ascend's OIDC redirect URIs/CORS origin (straiker.<domain>,
-straiker-defend.<domain>, straiker-ascend.<domain>).
+straiker-ascend.<domain>).
 EOF
       CUSTOM_ORIGIN_DOMAIN="$(prompt_line "Custom origin domain (e.g. acmecorp.com): " || true)"
       if [[ -z "${CUSTOM_ORIGIN_DOMAIN}" ]]; then
@@ -10130,7 +9985,7 @@ EOF
 Edge type 'tailscale' needs the domain frontend/defend/ascend will be
 reachable at — it drives the Let's Encrypt certificate's SANs and
 straiker-core's/straiker-ascend's OIDC redirect URIs/CORS origin
-(straiker.<domain>, straiker-defend.<domain>, straiker-ascend.<domain>).
+(straiker.<domain>, straiker-ascend.<domain>).
 The Route53 zone for this domain must already exist in this AWS account
 (cert-manager's DNS-01 solver needs to write a challenge TXT record there).
 EOF
@@ -10153,7 +10008,7 @@ EOF
 Edge type 'xalb' needs the domain frontend/defend/ascend will be reachable
 at — it drives the ALB's Ingress host rules, the DNS-validated
 certificate's SANs, and straiker-core's/straiker-ascend's OIDC redirect
-URIs/CORS origin (straiker.<domain>, straiker-defend.<domain>,
+URIs/CORS origin (straiker.<domain>,
 straiker-ascend.<domain>). The Route53 zone for this domain must already
 exist in this AWS account.
 EOF
@@ -10763,7 +10618,6 @@ run_phase() {
     ai-provider-secrets) phase_ai_provider_secrets ;;
     straiker-core) phase_straiker_core ;;
     straiker-inference) phase_straiker_inference ;;
-    straiker-defend) phase_straiker_defend ;;
     straiker-argus-v3) phase_straiker_argus_v3 ;;
     straiker-ascend) phase_straiker_ascend ;;
     tailscale-operator) phase_tailscale_operator ;;
@@ -10878,7 +10732,7 @@ main() {
 
   check_state_matches_cluster
   validate_cluster_name
-  resolve_defend_engine
+  note_argus_v3_scope
   capture_install_config
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
   # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).
