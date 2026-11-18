@@ -1,0 +1,75 @@
+{{- /*
+Adjustment worker: re-counts an assessment's report after a finding is disputed or undisputed (the control plane
+queues the event on the fp_adjustments Redis stream). It MUST stay a single replica: each event is a read-modify-write
+of the assessment's counts and two workers would overwrite each other. Hence no HPA, and Recreate (a rolling update
+would briefly run two). Same image as the other Ascend workers.
+*/ -}}
+{{- if .Values.adjustmentWorker.enabled }}
+{{- $aw := .Values.adjustmentWorker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: straiker-ascend-adjustment-worker
+  namespace: {{ include "ascend.namespace" . }}
+  labels:
+    {{- include "ascend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: adjustment-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: straiker-ascend-adjustment-worker
+  template:
+    metadata:
+      labels:
+        app: straiker-ascend-adjustment-worker
+    spec:
+      terminationGracePeriodSeconds: 300
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: adjustment-worker
+          image: {{ include "ascend.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "run_adjustment_worker.py"]
+          resources:
+            {{- toYaml $aw.resources | nindent 12 }}
+          env:
+            {{- include "ascend.commonEnv" . | nindent 12 }}
+            - name: SYS__INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: SYS__PUBLISH_TEST_RUN_SUMMARY
+              value: {{ .Values.publishTestRunSummary | quote }}
+            - name: SYS__STRAIKER_CONTROL_PLANE_INTERNAL_ENDPOINT
+              value: {{ include "ascend.foundationEndpoint" . | quote }}
+            - name: SYS__DATA_EXFILTRATION_ENDPOINT
+              value: {{ include "ascend.externalUrl" . | quote }}
+            - name: SYS__DB_HOST
+              value: {{ required "db.host is required" .Values.db.host | quote }}
+            - name: SYS__DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: SYS__DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: SYS__DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: SYS__DB_SSL_MODE
+              value: {{ .Values.db.sslMode | quote }}
+            - name: SYS__ASCEND_RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ascend.dbPasswordSecretName" . }}
+                  key: {{ include "ascend.dbPasswordSecretKey" . }}
+      {{- include "ascend.nodeSelector" . | nindent 6 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -380,6 +380,12 @@ Apply: `scripts/install-straiker.sh ... --vpc-flow-logs --cloudtrail --phase obs
 
 **Bifrost (`--bifrost-postgres`, opt-in, remembered).** Until now Bifrost kept its configuration and request logs in a per-pod SQLite file, so its 2 replicas did not share state. With the flag the `straiker-bifrost` chart writes `config_store` and `logs_store` (Postgres) into `config.json`, host from Aurora (the `ascend` cluster in `split`), password from `straiker-db-dsn` (`PASSWORD_bifrost`). Not verified: the exact `config_store` schema of the pinned Bifrost image (v1.6.7); check the pods start and `/health` answers after enabling.
 
+## 6g. Ascend adjustment worker
+
+`straiker-ascend` (0.1.15) now runs `straiker-ascend-adjustment-worker`, as the SaaS regions do (`iris-adjustment-worker`). When a finding is disputed or undisputed, the control plane queues an event on the `fp_adjustments` Redis stream; the worker re-counts the assessment's stored report from it. Without it disputes were queued and never applied. It uses the same `straiker/iris` image, the iris Valkey and the control-plane endpoint as `report-worker`.
+
+It is **always one replica** (the iris code does a read-modify-write per assessment and says so): no HPA, `--production-sizing` does not change it, and the Deployment is `Recreate`, so an upgrade has a short gap in which disputes wait in the stream and are processed afterwards. Check it: `kubectl -n straiker get deploy straiker-ascend-adjustment-worker`, then dispute a finding in an Ascend report and see the counts change. Not verified yet on a running install.
+
 ## 7. Known gaps and manual steps
 
 - **Straiker-side prerequisites** in section 2 are manual (customer key, image tags, mirror run).

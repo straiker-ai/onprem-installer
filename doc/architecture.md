@@ -113,7 +113,7 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 | straiker-bifrost (LLM gateway) | `maximhq/bifrost:v1.6.7` | 1 | 8090 | 250m / 1 CPU | general |
 | straiker-defend (Defend v1) | `straiker/argus:onprem-v2026.8.24` | 1 (+ settings-sync) | 8080 | 300m, 3Gi / 6Gi | general; PDB min 1 |
 | argus-v3 (Defend v3): app, agent-config, compactor | `straiker/argus:v3-42f2001...` | app 2 (HPA 2-6), 1, 1 | 8080 (9090 metrics) | app 1 CPU, 4Gi | general |
-| Ascend: control-plane, probe-worker, report-worker, recon-worker, cleanup CronJob (02:00), db-migrate | `straiker/iris:onprem-v2026.11.6.1` | 1 each | 8081 (MCP 8181) | 250m-500m, 256Mi-2Gi | iris |
+| Ascend: control-plane, probe-worker, report-worker, recon-worker, adjustment-worker (always 1 replica), cleanup CronJob (02:00), db-migrate | `straiker/iris:onprem-v2026.11.6.1` | 1 each | 8081 (MCP 8181) | 250m-500m, 256Mi-2Gi | iris |
 | Jobs: frontend migrate and bootstrap | `frontend-migrate`, `postgres:16-alpine` | one-off | | | general |
 
 ### Platform services (all `v2026.11.3` except api-gateway)

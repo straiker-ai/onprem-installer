@@ -1440,7 +1440,7 @@ Installer phases:
                              <cluster>/argus/v3 secret from the gateway and platform keys.
  13) straiker-ascend     - install/upgrade release 'straiker-ascend' (iris automated
                              red-teaming engine — charts/straiker-ascend: control-plane,
-                             probe-worker, probe-shadow, recon-worker, report-worker, and a
+                             probe-worker, probe-shadow, recon-worker, report-worker, adjustment-worker (single replica), and a
                              daily assessment-cleanup CronJob). Only when 'ascend' is
                              selected. Runs after straiker-core (shared Postgres via
                              straiker-system + frontend's admin-API callback), ai-provider-

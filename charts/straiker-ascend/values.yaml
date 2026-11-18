@@ -331,6 +331,18 @@ reportWorker:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 60
 
+# ── Component: adjustment-worker ──────────────────────────────────────────
+# Re-counts an assessment's report after a finding is disputed or undisputed (events on the fp_adjustments Redis
+# stream). SINGLE REPLICA ONLY (read-modify-write per assessment): no replicaCount, no HPA; the Deployment is Recreate.
+adjustmentWorker:
+  enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
 # ── Component: recon-worker ───────────────────────────────────────────────
 # Processes reconnaissance assessment tasks from the Redis queue. Requires
 # PostgreSQL -- stores recon turns, tasks, and results.
