@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Where the Helm charts are read from: this repo's charts/, or (--charts-from-ecr) a copy pulled back from the install's ECR.
+CHARTS_ROOT="${REPO_ROOT}/charts"
 
 # OpenTofu's default registry client timeout (10s) is too short for large
 # providers (hashicorp/aws in particular) on slow connections — small providers
@@ -132,6 +134,9 @@ ENABLE_CLOUDTRAIL="${ENABLE_CLOUDTRAIL:-}"
 CLOUDTRAIL_MULTI_REGION="${CLOUDTRAIL_MULTI_REGION:-}"
 # Encryption-key layout: "single" (one data key, every existing install) or "split" (own keys for EFS/secrets/EBS, fresh installs).
 KMS_LAYOUT="${KMS_LAYOUT:-}"
+# Deploy the Straiker charts from the customer ECR (OCI) instead of straight from charts/. Remembered once set.
+CHARTS_FROM_ECR="${CHARTS_FROM_ECR:-}"
+CHARTS_ROOT_READY=false
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
 
 # --data-layer: also create the AWS backends of the SaaS frontend (full DynamoDB tables, Kinesis audit stream,
@@ -882,6 +887,10 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
+  --charts-from-ecr                Package the charts in charts/, push them to the install's ECR ("<prefix>/charts/<name>", OCI) and
+                                   deploy every release from there (the reference layout; Argo-compatible). Needs the aws-artifacts phase
+                                   (it creates the repos). Remembered; if a chart cannot be packaged or pulled, that chart is
+                                   used straight from charts/ with a warning.
   --kms-layout single|split        Encryption keys. split = own customer-managed keys for EFS (models), Secrets Manager and EBS
                                    volumes, plus the transcripts/logs keys (default on a FRESH install). single = the one shared data
                                    key (what an existing install keeps: changing it would replace the EFS model cache and re-key
@@ -1852,6 +1861,10 @@ parse_args() {
       --kms-layout)
         KMS_LAYOUT=${2:-}
         shift 2
+        ;;
+      --charts-from-ecr)
+        CHARTS_FROM_ECR=true
+        shift
         ;;
       --admin-email)
         ADMIN_EMAIL=${2:-}
@@ -3742,7 +3755,7 @@ phase_artifacts_sync() {
     ecr_registry_prefixed="$(docker_registry_with_prefix "${ecr_registry}")"
 
     local artifact_chart_ref="${HELM_REPO_NAME}/${ARTIFACT_CHART_NAME}"
-    local local_artifact_chart="${REPO_ROOT}/charts/${ARTIFACT_CHART_NAME}"
+    local local_artifact_chart="${CHARTS_ROOT}/${ARTIFACT_CHART_NAME}"
     # Prefer the in-workspace chart when present so local fixes apply immediately
     # during installer development/testing; fall back to the published repo
     # chart for bundle-only installs.
@@ -3855,7 +3868,7 @@ ensure_multiarch_images() {
   # Set but empty (--multiarch-override none) stays off.
   if [[ -z "${MULTIARCH_OVERRIDES+x}" ]]; then
     local bifrost_tag
-    bifrost_tag="$(awk '/onprem-base\/maximhq\/bifrost/{f=1;next} f&&/tag:/{print $2; exit}' "${REPO_ROOT}/charts/straiker-artifact/values.yaml" 2>/dev/null || true)"
+    bifrost_tag="$(awk '/onprem-base\/maximhq\/bifrost/{f=1;next} f&&/tag:/{print $2; exit}' "${CHARTS_ROOT}/straiker-artifact/values.yaml" 2>/dev/null || true)"
     [[ -n "${bifrost_tag}" ]] && MULTIARCH_OVERRIDES="maximhq/bifrost:${bifrost_tag}=docker.io/maximhq/bifrost:${bifrost_tag}"
   fi
   [[ -n "${MULTIARCH_OVERRIDES:-}" ]] || return 0
@@ -3965,7 +3978,7 @@ phase_straiker_system() {
   # Prefer the in-workspace chart (as the artifact chart does) so local chart changes apply at once, e.g. the
   # straiker-clickhouse node pool. A pinned --chart-version, or a bundle without charts/, uses the published chart.
   local infra_chart_ref="${HELM_REPO_NAME}/${INFRA_CHART_NAME}"
-  local local_infra_chart="${REPO_ROOT}/charts/${INFRA_CHART_NAME}"
+  local local_infra_chart="${CHARTS_ROOT}/${INFRA_CHART_NAME}"
   if [[ -z "${CHART_VERSION}" && -d "${local_infra_chart}" ]]; then
     helm dependency build "${local_infra_chart}" >/dev/null
     infra_chart_ref="${local_infra_chart}"
@@ -4269,7 +4282,7 @@ phase_clickhouse() {
   # has no password there. Add the missing ones here (generated, merged, existing values untouched).
   ensure_clickhouse_secret_keys || return
   ensure_clickhouse_passwords_secret || return
-  helm upgrade --install straiker-clickhouse "${REPO_ROOT}/charts/straiker-clickhouse" \
+  helm upgrade --install straiker-clickhouse "${CHARTS_ROOT}/straiker-clickhouse" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
     --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/clickhouse/clickhouse-server"
 }
@@ -4387,7 +4400,7 @@ eso_preview_diff() {
   done
 
   log "Previewing the ExternalSecret-built straiker-db-dsn / platform-secret against the live Secrets..."
-  if ! helm template straiker-data "${REPO_ROOT}/charts/straiker-data" --namespace "${INFRA_NAMESPACE}" "$@" \
+  if ! helm template straiker-data "${CHARTS_ROOT}/straiker-data" --namespace "${INFRA_NAMESPACE}" "$@" \
         --set-string eso.previewSuffix=-preview --show-only templates/eso-secrets.yaml \
       | kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null; then
     mark_phase_blocked "Could not render/apply the preview ExternalSecrets for straiker-data."
@@ -4528,7 +4541,7 @@ phase_data_bootstrap() {
 
   eso_preview_diff "${data_sets[@]}" || return
 
-  helm upgrade --install straiker-data "${REPO_ROOT}/charts/straiker-data" \
+  helm upgrade --install straiker-data "${CHARTS_ROOT}/straiker-data" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
     "${data_sets[@]}" || return
 
@@ -4570,7 +4583,7 @@ phase_ch_sync() {
   fi
   # Tables missing in Postgres (registry not installed yet) are skipped each cycle and picked up
   # once registry's migration creates them, so this can run before platform-services.
-  helm upgrade --install straiker-ch-sync "${REPO_ROOT}/charts/straiker-ch-sync" \
+  helm upgrade --install straiker-ch-sync "${CHARTS_ROOT}/straiker-ch-sync" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
     --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/clickhouse/clickhouse-server" \
     --set-string postgres.host="${aurora_host}" \
@@ -4610,7 +4623,7 @@ phase_ingest() {
     mark_phase_blocked "grid.raw_event does not exist yet. Install grid (PLATFORM_SERVICES must include grid, so its migration runs) first."
     return
   fi
-  helm upgrade --install straiker-ingest "${REPO_ROOT}/charts/straiker-ingest" \
+  helm upgrade --install straiker-ingest "${CHARTS_ROOT}/straiker-ingest" \
     --namespace "${INFRA_NAMESPACE}" --wait --timeout 10m \
     --set-string image.repository="$(docker_registry_with_prefix "${ecr_registry}")/redpandadata/connect" \
     --set-string bus.brokers="${brokers//,/\\,}" \
@@ -4682,7 +4695,7 @@ GATEWAY_CONSOLE_SESSION_FROM="2.3.13"
 gateway_accepts_console_session() {
   [[ "${DATA_LAYER}" == "true" ]] || return 1
   local tag
-  tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${REPO_ROOT}/charts/platform-api-gateway/Chart.yaml")"
+  tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${CHARTS_ROOT}/platform-api-gateway/Chart.yaml")"
   TAG="${tag}" MIN="${GATEWAY_CONSOLE_SESSION_FROM}" python3 -c '
 import os, re, sys
 num = lambda v: tuple(int(x) for x in re.findall(r"\d+", v.split("-")[0])[:3])
@@ -4696,7 +4709,7 @@ gateway_via_alb() {
 }
 
 install_api_gateway() {
-  local ecr_registry=$1 chart="${REPO_ROOT}/charts/platform-api-gateway" tag tmp table
+  local ecr_registry=$1 chart="${CHARTS_ROOT}/platform-api-gateway" tag tmp table
   require_command openssl
   remember_gateway_settings || return 1
   gateway_cert_require_issued || return 1
@@ -5747,12 +5760,58 @@ ses_identity_verified() {
   [[ "${status}" == "True" ]]
 }
 
+# --charts-from-ecr: publish every chart in charts/ to the install's ECR, then pull each back and point CHARTS_ROOT at the pulled copy,
+# so what is deployed is exactly what ECR holds. Once per run; any failure falls back to charts/ for that chart (never blocks).
+setup_charts_root() {
+  [[ "${CHARTS_ROOT_READY}" == true ]] && return 0
+  CHARTS_ROOT_READY=true
+  [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
+  if [[ "${CHARTS_FROM_ECR}" == true ]]; then
+    set_metadata "charts_from_ecr" "true"
+  elif [[ "$(get_metadata "charts_from_ecr")" == "true" ]]; then
+    CHARTS_FROM_ECR=true
+  else
+    return 0
+  fi
+  local registry
+  registry="$(get_metadata "ecr_registry")"
+  if [[ -z "${registry}" ]]; then
+    log "--charts-from-ecr: the ECR registry is not known yet (run phase aws-artifacts first): using charts/ for now."
+    return 0
+  fi
+  require_command helm
+  local base="oci://${registry}/${TF_PREFIX}/charts" work chart name version pushed=0 pulled=0
+  if ! aws ecr get-login-password --region "${AWS_REGION}" | helm registry login "${registry}" --username AWS --password-stdin >/dev/null 2>&1; then
+    log "WARNING: --charts-from-ecr: could not log in to ${registry}; using charts/."
+    return 0
+  fi
+  work="$(mktemp -d)"
+  mkdir -p "${work}/pkg" "${work}/charts"
+  for chart in "${REPO_ROOT}"/charts/*/; do
+    [[ -f "${chart}Chart.yaml" ]] || continue
+    name="$(basename "${chart}")"
+    version="$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "${chart}Chart.yaml" | head -1)"
+    if helm package "${chart}" -d "${work}/pkg" >/dev/null 2>&1 \
+      && helm push "${work}/pkg/${name}-${version}.tgz" "${base}" >/dev/null 2>&1; then
+      pushed=$((pushed + 1))
+      if helm pull "${base}/${name}" --version "${version}" --untar --untardir "${work}/charts" >/dev/null 2>&1; then
+        pulled=$((pulled + 1))
+        continue
+      fi
+    fi
+    log "WARNING: chart '${name}' could not be published to or pulled from ${base}: using charts/${name} directly."
+    ln -s "${chart%/}" "${work}/charts/${name}"
+  done
+  CHARTS_ROOT="${work}/charts"
+  log "Charts deployed from ECR (${base}): ${pushed} pushed, ${pulled} pulled."
+}
+
 # Chart reference for an installer-owned chart: the in-workspace copy (so local chart changes apply at once,
 # as for the artifact/infra/data charts), unless --chart-version pins the published one or the bundle has no charts/.
 chart_ref() {
   local name="$1"
-  if [[ -z "${CHART_VERSION}" && -d "${REPO_ROOT}/charts/${name}" ]]; then
-    printf '%s' "${REPO_ROOT}/charts/${name}"
+  if [[ -z "${CHART_VERSION}" && -d "${CHARTS_ROOT}/${name}" ]]; then
+    printf '%s' "${CHARTS_ROOT}/${name}"
   else
     printf '%s' "${HELM_REPO_NAME}/${name}"
   fi
@@ -6223,7 +6282,7 @@ for j in items:
 # ask for a tag the mirror does not carry.
 mirrored_image_tag() {
   awk -v repo="onprem-base/$1" '$0 ~ "source:.*" repo "$" { found = 1; next } found && $1 == "tag:" { gsub(/"/, "", $2); print $2; exit }' \
-    "${REPO_ROOT}/charts/straiker-artifact/values.yaml"
+    "${CHARTS_ROOT}/straiker-artifact/values.yaml"
 }
 
 # Installs the vendored platform service charts (opt-in via --data-layer). Images come
@@ -6255,7 +6314,7 @@ phase_platform_services() {
       install_api_gateway "${ecr_registry}" || return
       continue
     fi
-    chart="${REPO_ROOT}/charts/platform-${svc}"
+    chart="${CHARTS_ROOT}/platform-${svc}"
     [[ -d "${chart}" ]] || { mark_phase_blocked "Unknown platform service '${svc}' (no ${chart})."; return; }
     tag="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${chart}/Chart.yaml")"
     key="straiker.${svc}"
@@ -7947,7 +8006,7 @@ phase_straiker_argus_v3() {
   ensure_k8s_ready_for_charts || return
   ensure_argus_v3_secret || return
 
-  local chart="${REPO_ROOT}/charts/straiker-argus-v3"
+  local chart="${CHARTS_ROOT}/straiker-argus-v3"
   if [[ ! -f "${chart}/values-onprem.yaml" ]]; then
     mark_phase_blocked "charts/straiker-argus-v3/values-onprem.yaml not found: this phase needs the in-workspace chart."
     return
@@ -10029,6 +10088,7 @@ run_phase() {
   CURRENT_PHASE="${phase}"
   set_phase_status "${phase}" "in_progress"
   log "Phase '${phase}'..."
+  setup_charts_root
 
   case "${phase}" in
     eks-tfbe) phase_eks_tfbe ;;

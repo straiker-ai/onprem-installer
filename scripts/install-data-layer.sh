@@ -42,6 +42,7 @@ FLOW_LOGS_TRAFFIC=""
 ENABLE_CLOUDTRAIL=""
 CLOUDTRAIL_MULTI_REGION=""
 KMS_LAYOUT=""
+CHARTS_FROM_ECR=""
 PRODUCTION_SIZING=""
 EXTRA_FLAGS=() # SES / SSO flags, passed through to install-straiker.sh as given
 SSO_TYPE=""
@@ -105,6 +106,7 @@ Options:
                              and the type's other --sso-* flags (see install-straiker.sh --help)
   --production-sizing        production replica counts and HPAs (already on with --provision-strategy ha|max)
   --kms-layout L             single | split: own KMS keys for EFS, secrets and EBS (default: split on a fresh install, single on an existing one; never changes later)
+  --charts-from-ecr          push the charts to the install's ECR (OCI) and deploy every release from there (needs the aws-artifacts phase)
   --vpc-flow-logs            opt-in audit: VPC Flow Logs into CloudWatch Logs (--flow-logs-traffic ALL|ACCEPT|REJECT)
   --cloudtrail               opt-in audit: a CloudTrail trail into a private S3 bucket (--cloudtrail-multi-region for all regions)
   --skip-capacity-probe      skip the brief real launch of the GPU instances that proves capacity right after the cluster is built
@@ -151,6 +153,7 @@ while [[ $# -gt 0 ]]; do
     --cloudtrail-multi-region) CLOUDTRAIL_MULTI_REGION=true; shift ;;
     --production-sizing) PRODUCTION_SIZING=true; shift ;;
     --kms-layout) KMS_LAYOUT="${2:-}"; shift 2 ;;
+    --charts-from-ecr) CHARTS_FROM_ECR=true; shift ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
       | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
@@ -371,6 +374,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ "${CLOUDTRAIL_MULTI_REGION}" == true ]] && run_args+=(--cloudtrail-multi-region)
 [[ "${PRODUCTION_SIZING}" == true ]] && run_args+=(--production-sizing)
 [[ -n "${KMS_LAYOUT}" ]] && run_args+=(--kms-layout "${KMS_LAYOUT}")
+[[ "${CHARTS_FROM_ECR}" == true ]] && run_args+=(--charts-from-ecr)
 [[ -n "${AVAILABILITY_ZONES}" ]] && run_args+=(--availability-zones "${AVAILABILITY_ZONES}")
 [[ -n "${GPU_CAPACITY_RESERVATION}" ]] && run_args+=(--gpu-capacity-reservation "${GPU_CAPACITY_RESERVATION}")
 [[ ${#EXTRA_FLAGS[@]} -gt 0 ]] && run_args+=("${EXTRA_FLAGS[@]}")

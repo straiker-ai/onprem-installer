@@ -50,3 +50,14 @@ variable "bifrost_service_account_name" {
   type        = string
   default     = "straiker-bifrost"
 }
+
+variable "chart_names" {
+  description = "Helm charts the installer publishes to ECR (repos \"<prefix>/charts/<name>\"): the directories of charts/ that hold a Chart.yaml."
+  type        = list(string)
+  default = [
+    "platform-api-gateway", "platform-connect", "platform-databridge", "platform-foundation", "platform-grid",
+    "platform-portico", "platform-registry", "straiker-argus-v3", "straiker-artifact", "straiker-ascend", "straiker-ch-sync",
+    "straiker-clickhouse", "straiker-core", "straiker-data", "straiker-defend", "straiker-edge", "straiker-inference",
+    "straiker-ingest", "straiker-system",
+  ]
+}

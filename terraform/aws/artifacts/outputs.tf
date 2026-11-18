@@ -22,3 +22,7 @@ output "bedrock_role_arn" {
   value       = var.bedrock_mode ? aws_iam_role.bifrost_bedrock[0].arn : ""
   description = "ARN of the Bedrock-invoke IAM role for bifrost's Pod Identity. Empty when bedrock_mode=false."
 }
+
+output "ecr_chart_repository_urls" {
+  value = { for name, repo in aws_ecr_repository.charts : name => repo.repository_url }
+}

@@ -14,3 +14,18 @@ resource "aws_ecr_repository" "mirror" {
 
   tags = local.common_tags
 }
+
+# One ECR repo per Helm chart, "<prefix>/charts/<chart>": the installer packages the charts it ships (charts/) and pushes them
+# here (OCI), then deploys from here with --charts-from-ecr. MUTABLE so a re-push of the same chart version replaces it.
+resource "aws_ecr_repository" "charts" {
+  for_each = toset(var.chart_names)
+
+  name                 = "${var.prefix}/charts/${each.value}"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = local.common_tags
+}
