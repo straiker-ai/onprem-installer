@@ -86,6 +86,10 @@ straiker:
       # 0 = unlimited (one-shot the whole backfill — avoid in deployed envs).
       maxWindowHours: 24
       initialBackfillHours: 8760
+    # grid.entity.observed consumer (every replica joins the group). Needs the bus brokers,
+    # the topic and its .dlq provisioned, and platform-sa's read, group and DLQ-write grants.
+    entityObserved:
+      enabled: false
     # Agent purge worker (leader-elected like the loops above). Runs only when the
     # platform-secret carries REGISTRY_CLICKHOUSE_PURGE_USERNAME/PASSWORD.
     agentPurge:
@@ -93,6 +97,10 @@ straiker:
       batchSize: 20
       mutationWaitSeconds: 300
       maxAttempts: 5
+      # Each batch writes its refs to grid.read_suppression before its DELETEs, so
+      # grid's span read path stops counting a purged agent at once. Needs the
+      # purge user's INSERT on grid.read_suppression (grid migration 00022).
+      readSuppression: false
 
     # Outbound S2S to the detection engine THROUGH the api-gateway's internal tier:
     # the registry fetches the read-only Argus Control Definition contract
@@ -157,6 +165,14 @@ straiker:
     # source, so the chart only sets how often the elected replica reads the connected app.
     directory:
       refreshHours: 24
+    # NVIDIA OpenShell: the same split as Agentforce -- the tenant's identity-provider client lives with the integration, and
+    # this is only how often the gateway's sandbox list is re-read.
+    openshell:
+      sweepHours: 1
+    # Databricks: each tenant's Discover and Ascend service principals live with the integration; this is only how often
+    # the Genie spaces are re-read.
+    databricks:
+      sweepHours: 6
     scan:
       # The address is the same in every cluster —
       # http://prism.surveyor.svc.cluster.local:8080, an in-cluster ClusterIP in the

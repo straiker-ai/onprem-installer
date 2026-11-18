@@ -106,9 +106,6 @@ straiker:
     delivery:
       mode: configmap
       streamsConfigMap: databridge-streams
-      # Governance posture for data_types with no field catalog: deny (export
-      # nothing - the safe default) or passthrough (raw).
-      uncataloged: deny
       # Partition count for provisioned bus topics (source topics + their .dlq).
       topicPartitions: 3
 

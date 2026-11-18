@@ -1,7 +1,7 @@
 apiVersion: v2
 name: platform-portico
-version: "2026.11.300"
-appVersion: "v2026.11.3"
+version: "2026.11.1704"
+appVersion: "v2026.11.17.4"
 description: Straiker Platform portico - the grouped product facade plane (Defend, Ascend, ...) over the product engines
 home: https://straiker.ai
 keywords:

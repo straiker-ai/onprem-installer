@@ -1,7 +1,7 @@
 apiVersion: v2
 name: platform-connect
-version: "2026.11.300"
-appVersion: "v2026.11.3"
+version: "2026.11.1704"
+appVersion: "v2026.11.17.4"
 description: Straiker Platform connect - connections + authentication plane (customer connection registry, provider credentials, OAuth/token exchange) hosting the notify delivery subservice (send orchestration, message audit, async delivery worker)
 home: https://straiker.ai
 keywords:

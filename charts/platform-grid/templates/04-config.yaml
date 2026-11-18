@@ -37,3 +37,12 @@ data:
   # values while the address stays a single shared constant.
   GRID_PLATFORM_REGISTRY_BASE_URL: {{ if .Values.straiker.grid.overlay.enabled }}{{ .Values.straiker.grid.overlay.registryBaseURL | quote }}{{ else }}""{{ end }}
   GRID_PLATFORM_OVERLAY_TIMEOUT_MS: {{ .Values.straiker.grid.overlay.timeoutMS | quote }}
+  GRID_READ_PATH_ENABLED: {{ .Values.straiker.grid.readPath.enabled | quote }}
+  GRID_READ_PATH_SCAN_WINDOW_HOURS: {{ .Values.straiker.grid.readPath.scanWindowHours | quote }}
+  # int64: Helm reads a values number as a float, which would render 5000000 as 5e+06.
+  GRID_READ_PATH_UNFILTERED_SCAN_SESSIONS: {{ .Values.straiker.grid.readPath.unfilteredScanSessions | int64 | quote }}
+  GRID_READ_PATH_TOPOLOGY: {{ .Values.straiker.grid.readPath.topology | quote }}
+  GRID_READ_PATH_TOPOLOGY_RETRY_MS: {{ .Values.straiker.grid.readPath.topologyRetryMs | int64 | quote }}
+  GRID_READ_PATH_INSIGHTS: {{ .Values.straiker.grid.readPath.insights | quote }}
+  GRID_READ_PATH_COVERAGE_FROM: {{ .Values.straiker.grid.readPath.coverageFrom | quote }}
+  GRID_READ_PATH_SCAN_FINDINGS: {{ .Values.straiker.grid.readPath.scanFindings | quote }}

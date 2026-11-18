@@ -19,10 +19,9 @@ data:
   # The ingest role's shared push listener binds this addr; matches the ingest
   # container's listener port + the internal ingest Service.
   DATABRIDGE_INGEST_LISTEN_ADDR: ":{{ .Values.straiker.databridge.roles.ingest.listenerPort }}"
-  # Governance: field-catalog directory (baked into the image) + the posture for
-  # data_types with no catalog (deny = export nothing; passthrough = raw).
+  # Governance: field-catalog directory (baked into the image). Governed routes
+  # deliver no fields for a data_type with no catalog.
   DATABRIDGE_CATALOG_DIR: {{ .Values.straiker.databridge.catalog.dir | quote }}
-  DATABRIDGE_DELIVERY_UNCATALOGED: {{ .Values.straiker.databridge.delivery.uncataloged | quote }}
   DATABRIDGE_DELIVERY_TOPIC_PARTITIONS: {{ .Values.straiker.databridge.delivery.topicPartitions | quote }}
   {{- with .Values.straiker.databridge.bus }}
   # Event-bus auth (non-secret). Broker list comes from env (chart Redpanda) or

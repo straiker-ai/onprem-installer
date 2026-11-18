@@ -41,6 +41,9 @@ data:
   REGISTRY_RECONCILE_LAG_SECONDS: {{ .Values.straiker.registry.reconcile.lagSeconds | quote }}
   REGISTRY_RECONCILE_MAX_WINDOW_HOURS: {{ .Values.straiker.registry.reconcile.maxWindowHours | quote }}
   REGISTRY_RECONCILE_INITIAL_BACKFILL_HOURS: {{ .Values.straiker.registry.reconcile.initialBackfillHours | quote }}
+  # grid.entity.observed consumer, beside the scan above while parity is measured. Uses
+  # the bus below; topic and group default in code.
+  REGISTRY_ENTITY_OBSERVED_ENABLED: {{ .Values.straiker.registry.entityObserved.enabled | default false | quote }}
   # Agent purge worker: deletes a deleted agent's ClickHouse facts. Same CH service as
   # above with its own delete-scoped user (REGISTRY_CLICKHOUSE_PURGE_USERNAME/PASSWORD
   # in the platform-secret, docs/INFRA.md §8a). Absent those => worker off, jobs queue.
@@ -48,6 +51,7 @@ data:
   REGISTRY_AGENT_PURGE_BATCH_SIZE: {{ .Values.straiker.registry.agentPurge.batchSize | quote }}
   REGISTRY_AGENT_PURGE_MUTATION_WAIT_SECONDS: {{ .Values.straiker.registry.agentPurge.mutationWaitSeconds | quote }}
   REGISTRY_AGENT_PURGE_MAX_ATTEMPTS: {{ .Values.straiker.registry.agentPurge.maxAttempts | quote }}
+  REGISTRY_PURGE_READ_SUPPRESSION_ENABLED: {{ .Values.straiker.registry.agentPurge.readSuppression | quote }}
   # API-gateway base URL for the outbound S2S control-definitions fetch (non-secret).
   # The bearer is REGISTRY_GATEWAY_S2S_KEY (platform-secret). Empty => surface disabled.
   REGISTRY_GATEWAY_URL: {{ .Values.straiker.registry.gateway.url | quote }}
@@ -68,6 +72,8 @@ data:
   # Workforce directory refresh cadence, in hours. 0 disables the ticker. The pull
   # credential is per tenant and is not configured here.
   REGISTRY_DIRECTORY_REFRESH_HOURS: {{ .Values.straiker.registry.directory.refreshHours | default 24 | quote }}
+  REGISTRY_OPENSHELL_SWEEP_HOURS: {{ .Values.straiker.registry.openshell.sweepHours | quote }}
+  REGISTRY_DATABRICKS_SWEEP_HOURS: {{ .Values.straiker.registry.databricks.sweepHours | quote }}
   REGISTRY_SCAN_URL: {{ .Values.straiker.registry.scan.url | quote }}
   REGISTRY_SCAN_TIMEOUT_MS: {{ .Values.straiker.registry.scan.timeoutMs | quote }}
   REGISTRY_SCAN_ORCHESTRATOR_ENABLED: {{ .Values.straiker.registry.scan.orchestratorEnabled | quote }}

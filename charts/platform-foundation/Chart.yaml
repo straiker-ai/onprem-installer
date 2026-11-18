@@ -1,7 +1,7 @@
 apiVersion: v2
 name: platform-foundation
-version: "2026.11.300"
-appVersion: "v2026.11.3"
+version: "2026.11.1704"
+appVersion: "v2026.11.17.4"
 description: Straiker Platform foundation - public /api/v3 API and platform API-key management
 home: https://straiker.ai
 keywords:

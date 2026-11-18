@@ -99,6 +99,52 @@ straiker:
       # browse read; 0 uses the client default (750ms).
       timeoutMS: 0
 
+    # The span layout's read path for GET /inventory/flow (internal/setquery),
+    # for every tenant when enabled. It reads what ingest's write path builds
+    # (ingest writePath.enabled): span and session rows, the dimension
+    # snapshots, the seal's derived rows and its result cache, so turn it on
+    # only once that has run for every tenant (the backfill, docs/BACKFILL.md).
+    # A request the span path can't serve, or one before the tenant's first
+    # derived step, falls back to today's handler. Read at boot, so a change
+    # needs a rollout. A filtered flow over scanWindowHours reads the seal's
+    # result cache where it covers the window; one within it scans session rows.
+    # 720 (30 days) scans every console window. The cached read costs a fixed
+    # ~0.6 s of analysis, which makes it slower than the scan on small tenants,
+    # and grid's cached read is unmeasured at prod's largest tenant's size
+    # (about 90k sessions a day), where a big tile's 30-day scan misses 800 ms.
+    # The default map's unfiltered views by connector and with agents by
+    # entity, and its per-identity map, which the span rows don't count, scan
+    # session rows when the window holds unfilteredScanSessions sessions or
+    # fewer (0 leaves them to today's handler): the scan's memory and reads
+    # grow with the sessions, about 1 KB a session. 5M covers prod's largest
+    # tenant's 30-day map (3.1M sessions) with about 60% headroom.
+    # topology answers the topology's and blast radius's traffic edges, and an
+    # agent-scoped compliance posture's agent edges, from the
+    # seal's per-day edge rows (migration 00028) instead of topology_edge, with
+    # enabled; a tenant before its first derived step with edge rows, or a read
+    # the edge rows refuse, takes topology_edge. A read whose edge rows two
+    # derived attempts may be landing waits topologyRetryMs and reads again,
+    # then takes the rows as they stand; it must fit the 25 s span deadline.
+    # insights answers the insights overview with lifecycle=defend or none,
+    # alone or under agent, identity, tool and surface filters, the timeseries
+    # with lifecycle=defend or none, alone or under agent, identity, tool and
+    # check filters, ungrouped or by agent, and the flow with no filter, from
+    # session rows and ingest's facts, with enabled. An overview or flow serves
+    # a window starting at or after coverageFrom (RFC 3339): the first second
+    # from which the cluster's session rows hold every MCP server and skill
+    # their sessions' events named, measured on each cluster (empty takes
+    # today's handler for every overview and flow window).
+    readPath:
+      enabled: false
+      scanWindowHours: 720
+      unfilteredScanSessions: 5000000
+      topology: false
+      topologyRetryMs: 5000
+      insights: false
+      coverageFrom: ""
+      # Off until the seal is writing scan rows and the frontend reads the box.
+      scanFindings: false
+
     # Shared platform Kubernetes Secret (one per env, synced by ESO from the env's
     # {env}/platform Secrets Manager blob) consumed via envFrom; keys are namespaced
     # by the GRID_ prefix. REQUIRED keys for Grid in the {env}/platform blob:
@@ -172,13 +218,17 @@ straiker:
     # owns the estate PG system of record and its reconciliation write path.
 
     replicas: 1
+    # An unfiltered map with identities by entity for prod-use1's largest tenant (about
+    # 94k identities) holds about 300 MiB while grid builds and encodes it, so leave
+    # room for two at once. Building it takes about 2 CPU-seconds, which a 500m limit
+    # stretched to 4 s of throttling.
     resources:
       limits:
-        cpu: 500m
-        memory: 256Mi
+        cpu: "2"
+        memory: 1Gi
       requests:
         cpu: 100m
-        memory: 128Mi
+        memory: 256Mi
 
     hpa:
       enabled: false
