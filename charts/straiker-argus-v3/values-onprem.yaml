@@ -69,3 +69,6 @@ argus:
     enabled: true
   compactor:
     enabled: true
+    # The chart default is a placeholder ARN (a Straiker dev role) that no customer account can assume: every transcript write would
+    # fail with AccessDenied on AssumeRole. Empty = write as the pod's own role (argus-sa), which has the artifacts bucket grant.
+    transcriptRoleArn: ""

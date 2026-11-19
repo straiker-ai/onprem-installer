@@ -56,8 +56,12 @@ users:
   # No <grants> for admin: a config user without grants has full rights, and an explicit
   # "GRANT ALL ... WITH GRANT OPTION" makes clickhouse-server 25.8 exit (code 91) at startup.
   admin:         { accessManagement: true }                                                  # DDL: grid migrations, bootstrap
-  grid_query_ro: { grants: ["GRANT SELECT ON *.*"], readonly: true }                         # grid + registry read path
-  grid_ingest:   { grants: ["GRANT INSERT ON grid.*"] }                                      # Kafka -> landing tables (chart straiker-ingest)
+  # dictGet is a separate privilege in ClickHouse 25.x (SELECT does not include it); grid reads grid.dict_agent / dict_entity_alias.
+  grid_query_ro: { grants: ["GRANT SELECT ON *.*", "GRANT dictGet ON *.*"], readonly: true } # grid + registry read path
+  # Kafka -> landing tables (chart straiker-ingest). The materialized views fed by grid.raw_event (session_fact, agent_integration,
+  # activity_daily, ...) run as the inserting user, so it also needs SELECT on grid: without it every insert's view push fails with
+  # ACCESS_DENIED and Sessions, Findings and the dashboards stay empty.
+  grid_ingest:   { grants: ["GRANT INSERT, SELECT ON grid.*"] }
   grid_purge:    { grants: ["GRANT ALTER DELETE, SYSTEM VIEWS, SELECT ON *.*"] }            # registry agent purge
   # ch-sync CronJob (charts/straiker-ch-sync): copies registry tables from Aurora via postgresql() into grid.*. Only what a cycle
   # runs: read and insert on grid, OPTIMIZE for the hourly merge, the PostgreSQL table function and the temporary tables it reads through. No DDL, no access management.
