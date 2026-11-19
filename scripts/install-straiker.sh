@@ -4880,6 +4880,10 @@ install_api_gateway() {
       --set-string "straiker.apiGateway.dynamodb.environmentTable=${table}"
       --set-string "straiker.apiGateway.integrationKeys.secretPrefix=${CLUSTER_NAME}/platform/integration/"
       --set-string "straiker.apiGateway.integrationKeys.region=${AWS_REGION}"
+      # PAT -> token exchange (POST /auth/token): PATs are created in the console and validated by the platform's foundation service, with
+      # PLATFORM_VALIDATE_KEY from the Secrets Manager bundle above. The gateway signs the token itself (no Cognito).
+      --set-string "straiker.apiGateway.pat.mode=foundation"
+      --set-string "straiker.apiGateway.foundation.baseUrl=http://foundation.${INFRA_NAMESPACE}.svc.cluster.local"
     )
   else
     log "api-gateway: read-only mode (no DynamoDB table in state; run with --data-layer for full mode)."
@@ -4907,6 +4911,19 @@ install_api_gateway() {
   kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.signing-key\.pem}' | base64 -d > "${key_file}"
   client_id="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-id}' | base64 -d)"
   client_secret="$(kubectl get secret api-gateway-oauth -n "${INFRA_NAMESPACE}" -o jsonpath='{.data.client-secret}' | base64 -d)"
+
+  # Additional API clients added with scripts/api-client.sh (Secret api-gateway-oauth-clients: key = client id, value = its secret).
+  # Re-applied here so a re-run of this phase never drops them.
+  local -a extra_client_args=()
+  local extra_i=1 extra_name
+  while IFS= read -r extra_name; do
+    [[ -n "${extra_name}" ]] || continue
+    extra_client_args+=(--set-string "straiker.apiGateway.oauth.inmemory.clients[${extra_i}].client-id=${extra_name}"
+      --set-string "straiker.apiGateway.oauth.inmemory.clients[${extra_i}].client-secret=$(kubectl get secret api-gateway-oauth-clients -n "${INFRA_NAMESPACE}" -o jsonpath="{.data.${extra_name}}" 2>/dev/null | base64 -d)")
+    extra_i=$((extra_i + 1))
+  done < <(kubectl get secret api-gateway-oauth-clients -n "${INFRA_NAMESPACE}" -o json 2>/dev/null | python3 -c 'import json,sys
+try: print("\n".join(sorted(json.load(sys.stdin).get("data", {}))))
+except Exception: pass')
 
   # Allowed source CIDRs -> straiker.apiGateway.service.sourceRanges[i] (public only; empty = none).
   local gateway_cidr_args=() cidr_i=0 cidr_item service_exposure
@@ -4947,6 +4964,7 @@ install_api_gateway() {
     --set-file straiker.apiGateway.oauth.inmemory.signingKey="${key_file}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-id=${client_id}" \
     --set-string "straiker.apiGateway.oauth.inmemory.clients[0].client-secret=${client_secret}" \
+    ${extra_client_args[@]+"${extra_client_args[@]}"} \
     "${mode_args[@]}"
   local rc=$?
   rm -f "${key_file}"
@@ -7454,6 +7472,26 @@ remember_inference_settings() {
   fi
 }
 
+# Number of GPU nodes (allocatable nvidia.com/gpu > 0) that run no inference-* pod.
+idle_gpu_node_count() {
+  local nodes_json pods_json
+  nodes_json="$(mktemp)"; pods_json="$(mktemp)"
+  kubectl get nodes -o json >"${nodes_json}" 2>/dev/null || echo '{"items":[]}' >"${nodes_json}"
+  kubectl get pods -n "${INFRA_NAMESPACE}" -o json >"${pods_json}" 2>/dev/null || echo '{"items":[]}' >"${pods_json}"
+  python3 - "${nodes_json}" "${pods_json}" <<'PY'
+import json, sys
+nodes = json.load(open(sys.argv[1]))["items"]
+pods = json.load(open(sys.argv[2]))["items"]
+busy = {p["spec"].get("nodeName") for p in pods
+        if p["metadata"]["name"].startswith("inference-") and p.get("status", {}).get("phase") in ("Running", "Pending")}
+gpu = [n["metadata"]["name"] for n in nodes
+       if int(n.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu", "0") or 0) > 0
+       and not n.get("spec", {}).get("unschedulable")]
+print(len([n for n in gpu if n not in busy]))
+PY
+  rm -f "${nodes_json}" "${pods_json}"
+}
+
 # The G/VT vCPU quota gates how many GPU nodes Karpenter can start: too low and servers sit Pending forever, so say so up front.
 check_gpu_vcpu_quota() {
   local nodes=$1 needed quota used available quota_code quota_name family_re node_vcpus request
@@ -8008,7 +8046,17 @@ plan_inference_gpus() {
         log "The ${have} ${itype} node(s) in the cluster hold the ${planned} model servers: no new GPU nodes needed."
       fi
     elif [[ ${planned} -gt ${running} ]]; then
-      check_gpu_vcpu_quota $((planned - running)) || return 1
+      # One server per node here: GPU nodes already in the cluster that hold no model server (left over after a reinstall) take the
+      # missing servers without any new vCPU, so only the rest needs quota.
+      local missing idle
+      missing=$((planned - running))
+      idle="$(idle_gpu_node_count)"
+      if [[ ${idle:-0} -gt 0 ]]; then
+        log "${idle} GPU node(s) already in the cluster hold no model server and take the ${missing} missing server(s) first."
+        missing=$((missing - idle))
+        [[ ${missing} -lt 0 ]] && missing=0
+      fi
+      if [[ ${missing} -gt 0 ]]; then check_gpu_vcpu_quota "${missing}" || return 1; fi
     else
       log "All ${planned} model servers already run: no new GPU nodes needed."
     fi
@@ -9701,6 +9749,22 @@ show_access_info() {
   fi
 }
 
+# API access for automation: the token endpoint and the OAuth client the installer created. Only the pointers are printed, never the secret.
+show_api_client_reminder() {
+  [[ "${DATA_LAYER}" == "true" ]] || return 0
+  local gw
+  gw="$(get_metadata "gateway_domain")"
+  if [[ -z "${gw}" && "${EDGE_TYPE}" == "xalb" && -n "$(get_metadata "custom_domain")" ]]; then gw="api.$(get_metadata "custom_domain")"; fi
+  [[ -n "${gw}" ]] || return 0
+  log ""
+  log "API access (scripts, CI, integrations): the API gateway is https://${gw}"
+  log "  Token endpoint : POST https://${gw}/auth/token   (grant_type=client_credentials; client_id and client_secret in the form body or HTTP Basic)"
+  log "  Client         : id 'onprem-client'; the secret is in Kubernetes Secret api-gateway-oauth (namespace ${INFRA_NAMESPACE})."
+  log "  Manage clients : scripts/api-client.sh list | show --reveal | add NAME | rotate | remove NAME | token"
+  log "  Detection API  : POST https://${gw}/api/v3/detect with an agent key (sk_agt_...) created in the console, as the Bearer token."
+  log "  (The console host straiker.<domain> has its own /oauth/token for browser sign-in only; do not use it for API clients.)"
+}
+
 # Reminder printed at the end of every successful run — the bootstrap admin
 # (see phase_shared_secrets/phase_straiker_core) always exists whichever
 # edge type was used, so this runs unconditionally rather than living inside
@@ -10783,6 +10847,7 @@ main() {
   log "Install completed successfully."
   log "State file: ${STATE_FILE}"
   show_access_info
+  show_api_client_reminder
   show_bootstrap_admin_reminder
 }
 

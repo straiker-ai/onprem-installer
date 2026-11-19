@@ -125,6 +125,13 @@ data:
         u2s-client-id: {{ .Values.straiker.apiGateway.cognito.u2sClientId | default "" | quote }}
         # Region of the Cognito user pool; auto-derived from the issuer URL when unset.
         region: {{ .Values.straiker.apiGateway.cognito.region | default (regexFind "[a-z]{2}-[a-z]+-[0-9]" .Values.straiker.apiGateway.cognito.issuerUrl) | default "us-east-1" }}
+      {{- with .Values.straiker.apiGateway.foundation }}
+      {{- if .baseUrl }}
+      # Where PATs are validated (pat.mode=foundation). Unset keeps the gateway default (http://foundation.platform).
+      foundation:
+        base-url: {{ .baseUrl | quote }}
+      {{- end }}
+      {{- end }}
       secret-manager:
         enabled: true
         secret-name: {{ .Values.straiker.apiGateway.secretManager.secretName | default "dev-secrets" }}

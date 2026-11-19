@@ -16,8 +16,13 @@ straiker:
       mode: inmemory
       inmemory:
         tokenTtlSeconds: 3600
+    # PAT -> token exchange (POST /auth/token, grant urn:ietf:params:oauth:grant-type:token-exchange): the gateway signs the token itself
+    # (no Cognito). 'foundation' checks PATs against the platform's foundation service (created in the console); the installer sets it,
+    # with foundation.baseUrl, whenever the Secrets Manager key bundle (PLATFORM_VALIDATE_KEY) is available. 'inmemory' = an empty list.
     pat:
       mode: inmemory
+    foundation:
+      baseUrl: ""
     # Unused (in-memory auth) but the template requires strings, not nulls.
     cognito: { issuerUrl: "", domain: "", u2sClientId: "", region: "" }
     dynamodb: { environmentTable: "" }

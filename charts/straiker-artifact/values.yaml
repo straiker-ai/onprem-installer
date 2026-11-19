@@ -105,7 +105,7 @@ imageMirror:
       tag: onprem-v2026.11.18
       destRepository: straiker/iris
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/api-gateway
-      tag: v2.3.13-rc2
+      tag: v2.3.13-rc3
       destRepository: straiker/api-gateway
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/foundation
       tag: v2026.11.17.4

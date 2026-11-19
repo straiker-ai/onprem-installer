@@ -14,7 +14,7 @@ Everything is created in **one AWS account and one region**.
 | Images and models | ECR repos, S3 model bucket; image and model sync Jobs | copies from Straiker's artifact registry |
 | Aurora PostgreSQL | **one** shared cluster, 17.x, port 3306, 2-16 ACU, writer + reader in two AZs | same settings as the SaaS clusters; all databases (platform services, frontend, iris, bifrost) |
 | MSK Serverless, ElastiCache Serverless (TLS), EFS, DynamoDB, Secrets Manager | data services | models volume is EFS |
-| ClickHouse | 1 shard x 2 replicas + 3-member Keeper | servers on the `straiker-clickhouse` pool (`r6g/r7g.2xlarge`) |
+| ClickHouse | 1 shard x 2 replicas + 3-member Keeper | servers on the `straiker-clickhouse` pool (`r7g.4xlarge`) |
 | Platform services | foundation, registry, databridge, portico, grid, api-gateway, ingest | grid's ClickHouse migrations run as Replicated tables |
 | Products | frontend + dex + bifrost, 5 GPU inference models (x2 replicas), Defend, Ascend | AI provider: Bedrock by default |
 | GPU nodes | customers: **2 x p4d.24xlarge** (pool grows to 4, never expired by age); test installs: one g5/g6e-class node per model server (`--gpu-fleet per-model`) | see "GPU fleet" in section 2 |
@@ -366,7 +366,7 @@ API through the api-gateway with the console's own signed session. All automatic
 
 | Piece | Where | Why |
 |---|---|---|
-| Gateway accepts the console session | api-gateway `feature/onprem-session-auth` (image `v2.3.13-rc2`, **not on main yet**), env `ONPREM_SESSION_SIGNING_KEY` from the console's `frontend-session-source` secret | the on-prem console signs its own session instead of passing a Cognito token |
+| Gateway accepts the console session | api-gateway `feature/onprem-session-auth` (image `v2.3.13-rc3`, **not on main yet**), env `ONPREM_SESSION_SIGNING_KEY` from the console's `frontend-session-source` secret | the on-prem console signs its own session instead of passing a Cognito token |
 | Role -> scopes for that session | gateway `straiker.onprem-session.role-scopes` (= foundation `authz/permissions.yaml`) | platform services authorize on scopes; SaaS puts them in the Cognito token |
 | Flags `defend-platform-api-overview`, `control-policies` | phase `straiker-core` | turn the views on |
 | Organization record (`tenant_directory`) | phase `straiker-core` (`ensure_platform_tenant`): the console's first `customers` id, named after `--straiker-customer-name` | otherwise "no tenant record was found for your organization" |
@@ -461,6 +461,49 @@ Run a fresh install with `--kms-layout split --aurora-layout split --encrypt-nod
 | No v1 | `kubectl get deploy | grep defend`; the console | no `straiker-defend`; frontend env has no `ARGUS_ENDPOINT`; Saige "taking a break"; no `defend` host routed |
 | No legacy in-cluster stores | `scripts/audit-legacy-incluster.sh --kubeconfig <file> --expect-clean` (read-only) | `PASS`: no Valkey, no Postgres, no bundled OpenSearch (only `straiker-benthos` remains), and Benthos writes to the managed OpenSearch domain |
 | Verify | `--phase verify-data-layer` | all PASS (Vector `WARN` is expected) |
+
+## 6k. API access: OAuth client credentials (and what is not supported)
+
+Customers' scripts, CI and integrations authenticate to the API gateway (`https://api.<domain>`, for example `api.onprem.straiker.ai`) in one of two ways:
+
+| Use | How | Where the credential comes from |
+|---|---|---|
+| Send traffic to the detection engine | `POST /api/v3/detect` with `Authorization: Bearer sk_agt_...` | An agent key created in the console (Defend, agent, API key) |
+| Call other gateway APIs as a service | OAuth 2.0 client credentials: `POST /auth/token` returns a one-hour bearer token | The client the installer created, or one added with `scripts/api-client.sh` |
+
+**Token request** (form body or HTTP Basic; the path is `/auth/token`, with no `/api/v3` and no `/oauth` prefix):
+
+```bash
+curl -sS -X POST https://api.<domain>/auth/token -d grant_type=client_credentials -d client_id=<id> -d client_secret=<secret>
+```
+
+**Do not use the console host** (`straiker.<domain>`) for this. Its `/oauth/token` belongs to browser sign-in and answers `unsupported_grant_type` to anything but `authorization_code` and `refresh_token`.
+
+**Clients.** The installer creates one client, `onprem-client`, once: its secret is in Kubernetes Secret `api-gateway-oauth` (namespace `straiker`). The install summary prints the endpoint and where to look. Manage clients with `scripts/api-client.sh`:
+
+```bash
+scripts/api-client.sh list                    # client ids
+scripts/api-client.sh show --reveal           # the first client's id and secret
+scripts/api-client.sh add ci-pipeline         # a new client; the secret is printed once
+scripts/api-client.sh rotate [NAME]           # a new secret (default: onprem-client)
+scripts/api-client.sh remove ci-pipeline      # additional clients only
+scripts/api-client.sh token [NAME]            # end-to-end check: requests a token, prints its first characters
+```
+
+Extra clients live in Secret `api-gateway-oauth-clients` and are re-applied whenever the installer installs the gateway (phase `platform-services`). `add`, `rotate` and `remove` do one rolling gateway restart. Every client has the same access; per-client scopes do not exist yet.
+
+**Personal access tokens (PAT) exchange** (needs api-gateway `v2.3.13-rc3` or later, which adds the self-hosted exchange; `rc2` and earlier answer `unsupported_grant_type`). A user creates a PAT in the console, then exchanges it for a one-hour user token:
+
+```bash
+curl -sS -X POST https://api.<domain>/auth/token \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token_type=urn:straiker:params:oauth:token-type:pat \
+  -d subject_token=<the PAT> [-d scope="defend:read inventory:read"]
+```
+
+The response's `access_token` is the bearer for `/api/v3/*`. `scope` can only narrow what the PAT grants. How it works on-prem: the gateway checks the PAT with the platform's `foundation` service (installer settings `pat.mode=foundation`, `foundation.baseUrl`, key `PLATFORM_VALIDATE_KEY` from the Secrets Manager bundle) and signs the token itself with its own key; there is no Cognito or Lambda involved. A wrong, revoked or expired PAT gets `invalid_grant`. Without the Secrets Manager bundle (read-only gateway mode) PAT validation uses the static list `straiker.apiGateway.pat.tokens`, empty by default.
+
+Not yet verified: which `/api/v3/*` management endpoints accept a client-credentials token, and the scopes it carries.
 
 ## 6j. Old in-cluster Postgres, Valkey and OpenSearch
 

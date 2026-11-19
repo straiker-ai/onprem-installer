@@ -24,7 +24,7 @@ flowchart TB
   alb -->|straiker-ascend.domain| ascend[Ascend control plane]
   alb -->|api.domain| gw[api-gateway]
 
-  subgraph eks[Amazon EKS 1.35 - one region - Karpenter]
+  subgraph eks[Amazon EKS 1.36 - one region - Karpenter]
     fe --> bifrost[bifrost LLM gateway]
     gw --> argus3[argus-v3 app]
     gw --> plat[foundation / registry / databridge / portico / grid / connect]
@@ -69,7 +69,7 @@ Everything lives in **one AWS account and one region**. Nothing in the product n
 | Layer | Service and settings | Created by |
 |---|---|---|
 | Network | VPC `10.0.0.0/16` (or your own), public and private subnets, IGW, NAT (1 for `min`, one per zone for `ha`/`max`), subnets tagged for load balancers and Karpenter | `terraform/aws/eks` |
-| Cluster | EKS 1.35, public API by default (`--private-api-endpoint` available), add-ons: vpc-cni, coredns, kube-proxy, EBS CSI, EFS CSI, Pod Identity agent; system managed node group `m5.large`/`m5a.large`, tainted `CriticalAddonsOnly` | `eks` |
+| Cluster | EKS 1.36, public API by default (`--private-api-endpoint` available), add-ons: vpc-cni, coredns, kube-proxy, EBS CSI, EFS CSI, Pod Identity agent; system managed node group `m7g.xlarge` (Graviton, 2 nodes), tainted `CriticalAddonsOnly` | `eks` |
 | Node scaling | Karpenter 1.14, SQS interruption queue, EventBridge rules, node IAM role | `eks`, `straiker-system` chart |
 | Images and models | 16 ECR repositories `<prefix>/<image>`, versioned S3 models bucket, hauler and models-reader roles (Pod Identity, no static keys) | `terraform/aws/artifacts` |
 | Relational | **One Aurora PostgreSQL cluster**, engine 17.x (newest in the region), serverless v2 2-16 ACU, writer + reader in two zones, port 3306, TLS, final snapshot `<cluster>-aurora-final`. Holds the databases foundation, registry, databridge, connect, notify, frontend, iris, bifrost | `terraform/aws/data` |
@@ -92,11 +92,11 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 
 | NodePool | Arch / instances | Label and taint | Disk | Limit | Runs |
 |---|---|---|---|---|---|
-| system (managed node group) | `m5.large`, `m5a.large` | taint `CriticalAddonsOnly` | | | CoreDNS, controllers |
+| system (managed node group) | `m7g.xlarge` (arm64) | taint `CriticalAddonsOnly` | | | CoreDNS, controllers |
 | straiker-shared | arm64 `m/c 6g/7g` large-xlarge | `purpose=general` | 50 Gi | 50 CPU | frontend, dex, bifrost, Defend, argus-v3, platform services, keepers, ingest |
 | straiker-argus | arm64 `m/c 6g/7g` xlarge-4xlarge | `purpose=straiker-argus`, tainted | 50 Gi | 100 CPU | not used by the on-prem values |
 | straiker-iris | arm64 `m/c 6g/7g` xlarge-2xlarge | `purpose=straiker-iris`, tainted | 50 Gi | 100 CPU | Ascend (control plane and workers) |
-| straiker-clickhouse | arm64 `r6g/r7g.2xlarge` | `purpose=straiker-clickhouse`, tainted | 50 Gi | 32 CPU | ClickHouse servers |
+| straiker-clickhouse | arm64 `r7g.4xlarge` | `purpose=straiker-clickhouse`, tainted | 50 Gi | 32 CPU | ClickHouse servers |
 | straiker-gpu | amd64. Customers: **`p4d.24xlarge`** (2 nodes for the fleet, grows to 4). Test installs: `g6e`/`g5`/`g6` one GPU per node | `purpose=argus-model-workers`, taint `nvidia.com/gpu` | 200 Gi, 3000 iops | 20 GPUs | the model servers; WhenEmpty after 1 h; can use a Capacity Reservation first |
 
 ---
@@ -118,7 +118,7 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 
 | Service | Role | Replicas | Notes |
 |---|---|---|---|
-| api-gateway `v2.3.13-rc2` | public API, auth, routing to the services below | 1 | 8080, management 9090; reached through the ALB host `api.<domain>`; 1 CPU, 1Gi |
+| api-gateway `v2.3.13-rc3` | public API, auth, routing to the services below | 1 | 8080, management 9090; reached through the ALB host `api.<domain>`; 1 CPU, 1Gi |
 | foundation | tenants, users, roles, API keys | 1 | migrate Job |
 | registry | agent and control catalog; also CDC source for ClickHouse | 1 | migrate and catalog-seed Jobs |
 | databridge | api, ingest, reconcile, benthos delivery | 1 each | ingest only reachable in-namespace |
@@ -260,7 +260,7 @@ The dl-test values above come from the recorded install state file, cross-checke
 - **kev-non-agentic has no caller** in the charts or installer: it runs (and costs two GPUs) but nothing uses it yet.
 - **Gateway route name:** one api-gateway route points at `iris-control-plane-service`, but Ascend's Service is `straiker-ascend-control-plane`. Not yet verified at runtime; the route may not resolve.
 - **Unavailable Defend detectors** (text classifier, prompt-kev, judge, groundedness, insecure-output, topic-relevance) are by design; the engine reports them as unavailable, not as failures.
-- **api-gateway `v2.3.13-rc2`** carries the on-prem session authentication and is not yet on the api-gateway `main` branch.
+- **api-gateway `v2.3.13-rc3`** carries the on-prem session authentication and is not yet on the api-gateway `main` branch.
 - **No managed dashboards:** CloudWatch covers metrics, logs and alarms; Grafana, OpenTelemetry and Argo CD from the SaaS reference are not included.
 - Customer requirements before running: `doc/customer-prerequisites-checklist.md`. Egress list: `doc/egress-allowlist.md`. Run, recover, tear down: `doc/data-layer-install-runbook.md`.
 
