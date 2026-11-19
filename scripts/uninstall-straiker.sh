@@ -1685,6 +1685,48 @@ run_phase() {
   set_phase_status "${phase}" "done"
 }
 
+# Names of clusters this script must never touch: scripts/protected-clusters.txt (Straiker-internal, not in the customer bundle),
+# ~/.straiker/protected-clusters and the comma-separated env STRAIKER_PROTECTED_CLUSTERS. There is no override flag.
+cluster_is_protected() {
+  local name=$1 f line script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  [[ -z "${name}" ]] && return 1
+  for f in "${script_dir}/protected-clusters.txt" "${HOME}/.straiker/protected-clusters"; do
+    [[ -f "${f}" ]] || continue
+    while IFS= read -r line; do
+      line="${line%%#*}"; line="${line//[[:space:]]/}"
+      [[ -n "${line}" && "${line}" == "${name}" ]] && return 0
+    done < "${f}"
+  done
+  [[ ",${STRAIKER_PROTECTED_CLUSTERS:-}," == *",${name},"* ]]
+}
+
+# Runs before any phase. Refuses (never just warns) when the target is a protected cluster, or when kubectl's current context is not
+# the cluster this install state belongs to: helm-uninstall acts on whatever kubectl points at, so a leftover KUBECONFIG or context
+# from another cluster (dl-test, a production cluster) would otherwise be uninstalled by mistake.
+guard_target_cluster() {
+  resolve_destroy_inputs
+  if cluster_is_protected "${CLUSTER_NAME}"; then
+    echo "REFUSED: '${CLUSTER_NAME}' is on the protected-clusters list (production, stage or dev). This script never acts on it." >&2
+    exit 2
+  fi
+  [[ "${CLOUD_PROVIDER}" == "gke" ]] && return 0
+  local server host expected exp_host
+  server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+  [[ -z "${server}" ]] && return 0   # no kubectl context at all: nothing for the Helm steps to reach
+  host="${server#*://}"; host="${host%%[:/]*}"
+  command -v aws >/dev/null 2>&1 || { echo "REFUSED: aws CLI is needed to confirm kubectl points at '${CLUSTER_NAME}'." >&2; exit 2; }
+  expected="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.endpoint' --output text 2>/dev/null || true)"
+  exp_host=""
+  if [[ -n "${expected}" && "${expected}" != "None" ]]; then exp_host="${expected#*://}"; exp_host="${exp_host%%[:/]*}"; fi
+  if [[ "${host}" != "${exp_host}" ]]; then
+    echo "REFUSED: kubectl points at ${server} (context '$(kubectl config current-context 2>/dev/null)', KUBECONFIG='${KUBECONFIG:-<default>}'), which is not cluster '${CLUSTER_NAME}' of this install (${expected:-not found in ${AWS_REGION}/profile '${AWS_PROFILE:-<default>}'})." >&2
+    echo "Point kubectl at the right cluster, or remove the stale one, then re-run:" >&2
+    echo "  unset KUBECONFIG; aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_REGION} ${AWS_PROFILE:+--profile ${AWS_PROFILE}}" >&2
+    exit 2
+  fi
+}
+
 main() {
   trap 'on_error $LINENO' ERR
   trap on_interrupt HUP INT TERM
@@ -1702,6 +1744,7 @@ main() {
   fi
 
   build_phase_list
+  guard_target_cluster
 
   set_uninstall_status "in_progress" "Uninstaller started."
   update_state "${STATE_SECTION}" "" "in_progress" "namespace=${NAMESPACE}, release=${RELEASE_NAME:-<all>}"

@@ -76,6 +76,17 @@ _EKS_STATUS=$(aws eks describe-cluster --name "${CLUSTER}" --region "${REGION}" 
   --query 'cluster.status' --output text 2>/dev/null || echo "")
 [[ -n "${_EKS_STATUS}" && "${_EKS_STATUS}" != "None" ]] && CLUSTER_IN_REGION=true
 
+# Never act on Straiker's own clusters (names from protected-clusters.txt, ~/.straiker/protected-clusters, env STRAIKER_PROTECTED_CLUSTERS).
+for _f in "${BASE}/protected-clusters.txt" "${HOME}/.straiker/protected-clusters"; do
+  [[ -f "${_f}" ]] || continue
+  if sed 's/#.*//; s/[[:space:]]//g' "${_f}" | grep -qx -- "${CLUSTER}"; then
+    echo "REFUSED: '${CLUSTER}' is on the protected-clusters list. This script never acts on it." >&2; exit 2
+  fi
+done
+if [[ ",${STRAIKER_PROTECTED_CLUSTERS:-}," == *",${CLUSTER},"* ]]; then
+  echo "REFUSED: '${CLUSTER}' is protected (STRAIKER_PROTECTED_CLUSTERS)." >&2; exit 2
+fi
+
 echo "NUKE — Straiker on-prem EKS teardown"
 echo "====================================="
 echo "  cluster : ${CLUSTER}"
