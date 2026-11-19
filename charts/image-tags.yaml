@@ -17,9 +17,9 @@
 # used, independent of this manifest.
 images:
   straiker/frontend:
-    tag: onprem-v2026.11.8-rc6
+    tag: onprem-v2026.11.8-rc7
   straiker/frontend-migrate:
-    tag: onprem-v2026.11.8-rc6
+    tag: onprem-v2026.11.8-rc7
   straiker/iris:
     tag: onprem-v2026.11.18
   straiker/vllm:

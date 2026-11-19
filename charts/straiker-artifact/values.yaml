@@ -92,10 +92,10 @@ imageMirror:
       tag: v0.2.2
       destRepository: straiker/kev-lw-server
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend
-      tag: onprem-v2026.11.8-rc6
+      tag: onprem-v2026.11.8-rc7
       destRepository: straiker/frontend
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/frontend-migrate
-      tag: onprem-v2026.11.8-rc6
+      tag: onprem-v2026.11.8-rc7
       destRepository: straiker/frontend-migrate
     # Argus v3 engine (feature/argus-v3 head), the only Argus engine on-prem (v1 was removed).
     - source: 631748089429.dkr.ecr.us-east-1.amazonaws.com/onprem-base/straiker/argus

@@ -366,7 +366,7 @@ API through the api-gateway with the console's own signed session. All automatic
 
 | Piece | Where | Why |
 |---|---|---|
-| Gateway accepts the console session | api-gateway `feature/onprem-session-auth` (image `v2.3.13-rc3`, **not on main yet**), env `ONPREM_SESSION_SIGNING_KEY` from the console's `frontend-session-source` secret | the on-prem console signs its own session instead of passing a Cognito token |
+| Gateway accepts the console session | api-gateway `release/onprem-next` (image `v2.3.13-rc3`, **not on main yet**), env `ONPREM_SESSION_SIGNING_KEY` from the console's `frontend-session-source` secret | the on-prem console signs its own session instead of passing a Cognito token |
 | Role -> scopes for that session | gateway `straiker.onprem-session.role-scopes` (= foundation `authz/permissions.yaml`) | platform services authorize on scopes; SaaS puts them in the Cognito token |
 | Flags `defend-platform-api-overview`, `control-policies` | phase `straiker-core` | turn the views on |
 | Organization record (`tenant_directory`) | phase `straiker-core` (`ensure_platform_tenant`): the console's first `customers` id, named after `--straiker-customer-name` | otherwise "no tenant record was found for your organization" |

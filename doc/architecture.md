@@ -107,7 +107,7 @@ are found by the tag `karpenter.sh/discovery: <cluster>`.
 
 | Pod | Image : tag | Replicas | Port | Requests / limits | Node pool |
 |---|---|---|---|---|---|
-| straiker-frontend (console) | `straiker/frontend:onprem-v2026.11.8-rc6` | 1 | 8080 | 250m, 256Mi / 1 CPU, 1Gi | general |
+| straiker-frontend (console) | `straiker/frontend:onprem-v2026.11.8-rc7` | 1 | 8080 | 250m, 256Mi / 1 CPU, 1Gi | general |
 | dex (OIDC) | `dexidp/dex:v2.45.1` | 1 | 5556 | 100m / 500m | general |
 | straiker-bifrost (LLM gateway) | `maximhq/bifrost:v1.6.7` | 1 | 8090 | 250m / 1 CPU | general |
 | argus-v3 (Defend v3): app, agent-config, compactor | `straiker/argus:v3-42f2001...` | app 2 (HPA 2-6), 1, 1 | 8080 (9090 metrics) | app 1 CPU, 4Gi | general |
