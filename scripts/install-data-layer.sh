@@ -493,6 +493,12 @@ if [[ -n "${CUSTOMER_KEY_FILE}" ]]; then
   first_run_key_args=(--straiker-customer-key "$(tr -d '[:space:]' < "${CUSTOMER_KEY_FILE}")")
 fi
 
+# --rerun-phase (passed with --installer-arg) means "redo these phases once". Re-applying it on every pass would restart a phase that is
+# waiting on something in the cluster (for example artifacts-sync's jobs) from its beginning each time, so it would never get past the
+# wait. Passes after the first resume without it.
+resume_args=()
+for a in "${run_args[@]}"; do [[ "${a}" == "--rerun-phase" ]] || resume_args+=("${a}"); done
+
 start_epoch="$(date +%s)"
 deadline=$(( start_epoch + TIMEOUT_MINUTES * 60 ))
 pass=0
@@ -501,8 +507,10 @@ while true; do
   log "installer pass ${pass}"
   if [[ ${pass} -eq 1 && ${#first_run_key_args[@]} -gt 0 ]]; then
     "${INSTALLER}" "${run_args[@]}" "${first_run_key_args[@]}" || die "installer exited with an error (see above). Fix it and re-run this command to resume."
-  else
+  elif [[ ${pass} -eq 1 ]]; then
     "${INSTALLER}" "${run_args[@]}" || die "installer exited with an error (see above). Fix it and re-run this command to resume."
+  else
+    "${INSTALLER}" "${resume_args[@]}" || die "installer exited with an error (see above). Fix it and re-run this command to resume."
   fi
 
   summary="$(state_summary)"
