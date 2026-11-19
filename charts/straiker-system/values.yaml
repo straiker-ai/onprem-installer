@@ -235,8 +235,8 @@ eks:
         purpose: straiker-iris
 
   clickhouse:
-    instanceFamilies: ["r6g", "r7g"]
-    instanceSizes: ["2xlarge"]
+    instanceFamilies: ["r7g"]
+    instanceSizes: ["4xlarge"]
     nodeClass:
       name: straiker-clickhouse
       amiSelectorTerms:

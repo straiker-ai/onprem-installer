@@ -77,6 +77,7 @@ module "eks" {
   eks_managed_node_groups = {
     system = {
       instance_types = var.system_node_instance_types
+      ami_type       = var.system_node_ami_type
       subnet_ids     = local.system_node_subnet_ids
       min_size       = local.system_node_sizing.min_size
       max_size       = local.system_node_sizing.max_size

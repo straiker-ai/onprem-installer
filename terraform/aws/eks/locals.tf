@@ -56,7 +56,8 @@ locals {
   system_node_subnet_ids = var.provision_strategy == "min" ? [local.private_subnet_ids[0]] : local.private_subnet_ids
 
   system_node_sizing = {
-    min = { min_size = 1, max_size = 1, desired_size = 1 }
+    # two system nodes even on min (Karpenter and CoreDNS keep two replicas); on min they share the one zone
+    min = { min_size = 2, max_size = 3, desired_size = 2 }
     ha  = { min_size = 2, max_size = 3, desired_size = 2 }
     max = { min_size = 3, max_size = 5, desired_size = 3 }
   }[var.provision_strategy]

@@ -12,7 +12,7 @@ variable "region" {
 variable "cluster_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 variable "vpc_cidr" {
@@ -91,9 +91,15 @@ variable "byo_vpc_confirm" {
 }
 
 variable "system_node_instance_types" {
-  description = "Instance types for the system managed node group (runs Karpenter + addons)"
+  description = "Instance types for the system managed node group (runs Karpenter + addons). Graviton by default (m7g.xlarge, 4 vCPU / 16 GiB); the types must match system_node_ami_type."
   type        = list(string)
-  default     = ["m5.large", "m5a.large"]
+  default     = ["m7g.xlarge"]
+}
+
+variable "system_node_ami_type" {
+  description = "AMI type of the system managed node group. AL2023_ARM_64_STANDARD for Graviton (default); use AL2023_x86_64_STANDARD together with x86 types in system_node_instance_types."
+  type        = string
+  default     = "AL2023_ARM_64_STANDARD"
 }
 
 variable "provision_strategy" {
