@@ -151,6 +151,13 @@ ASCEND_ADJUSTMENT_WORKER="${ASCEND_ADJUSTMENT_WORKER:-}"
 # Node root volumes (system node group and every Karpenter node) on the customer-managed EBS key. Decided once, FRESH installs only:
 # changing it on a running cluster replaces every node. ENCRYPT_NODE_VOLUMES_FORCE=true overrides that guard.
 ENCRYPT_NODE_VOLUMES="${ENCRYPT_NODE_VOLUMES:-}"
+# SaaS-style sign-in (--saas-auth, remembered): Cognito Lambda triggers as in SaaS, the api-gateway on Cognito (PAT exchange through
+# CUSTOM_AUTH, tokens carry straikerId/role/scopes). COGNITO_LAMBDA_ZIP = foundation's environment-api lambda.zip.
+SAAS_AUTH="${SAAS_AUTH:-}"
+COGNITO_LAMBDA_ZIP="${COGNITO_LAMBDA_ZIP:-}"
+NO_SAAS_AUTH="${NO_SAAS_AUTH:-}"
+# Enable the triggers even when the preflight cannot find the first admin in foundation (they would lock that account out).
+SAAS_AUTH_SKIP_ADMIN_CHECK="${SAAS_AUTH_SKIP_ADMIN_CHECK:-}"
 # Skip the automatic iris-grader agent/key (Ascend's Argus-based grading then stays off until a key is supplied with ARGUS_V3_GRADER_KEY).
 NO_IRIS_GRADER_MINT="${NO_IRIS_GRADER_MINT:-}"
 RESET_ADMIN_PASSWORD="${RESET_ADMIN_PASSWORD:-false}"
@@ -627,7 +634,7 @@ STRAIKER_CUSTOMER_KEY=""
 PRODUCTS_OPT=""
 
 declare -a VALUES_FILES=()
-declare -a ALL_PHASES=("eks-tfbe" "dns-zone" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "straiker-edge" "observability")
+declare -a ALL_PHASES=("eks-tfbe" "dns-zone" "eks-cluster" "karpenter" "k8s-preflight" "aws-artifacts" "gateway-cert" "aws-data" "external-secrets" "artifacts-sync" "straiker-system" "shared-secrets" "clickhouse" "data-bootstrap" "ch-sync" "platform-services" "ingest" "verify-data-layer" "ai-provider-secrets" "straiker-core" "straiker-inference" "straiker-argus-v3" "straiker-ascend" "tailscale-operator" "edge-infra" "cert-manager" "alb-controller" "external-dns" "cognito-triggers" "straiker-edge" "observability")
 declare -a RUN_PHASES=()
 
 CURRENT_PHASE=""
@@ -911,6 +918,17 @@ Options:
                                    (alias <cluster>-ebs) instead of the AWS-managed default. FRESH installs only: on a running cluster it would
                                    replace every node, so the flag is then ignored (ENCRYPT_NODE_VOLUMES_FORCE=true overrides). Creates the Auto
                                    Scaling service-linked role when the account has none. Decided once and remembered.
+  --saas-auth                      With --data-layer: sign-in as in SaaS. Cognito Lambda triggers (pre-authentication, pre-sign-up, pre-token-generation
+                                   and the three CUSTOM_AUTH triggers) on the pool, foundation behind an internal NLB for them, and the api-gateway on
+                                   Cognito (user tokens from the pool, PAT exchange through CUSTOM_AUTH). Needs --cognito-lambda-zip. Remembered.
+                                   Phases: aws-data (security groups, secret containers), platform-services (NLB, gateway), cognito-triggers (zip upload,
+                                   secrets, triggers). The console's own session stays accepted by the gateway next to Cognito tokens.
+  --no-saas-auth                   Back out of --saas-auth: the next phase aws-data removes the Cognito triggers; the next platform-services puts the
+                                   gateway back on its own tokens. Keeps the security groups, secret containers and the uploaded zip.
+  --saas-auth-skip-admin-check     Phase cognito-triggers: enable the triggers even if the first admin is not an active user in foundation (it then
+                                   cannot sign in with email and password).
+  --cognito-lambda-zip <path>      foundation's environment-api lambda.zip (scripts/build-cognito-lambda-zip.sh builds it). Uploaded to the install's
+                                   state bucket; only read with --saas-auth.
   --ascend-adjustment-worker       Run Ascend's adjustment worker (applies finding disputes to reports; always one replica). Needs an iris image
                                    that contains run_adjustment_worker.py (onprem-v2026.11.18 or newer). Remembered; off by default.
   --bifrost-postgres               Bifrost keeps its configuration and request logs in its Postgres database (needed to share state
@@ -1896,6 +1914,22 @@ parse_args() {
         ;;
       --encrypt-node-volumes)
         ENCRYPT_NODE_VOLUMES=true
+        shift
+        ;;
+      --saas-auth)
+        SAAS_AUTH=true
+        shift
+        ;;
+      --cognito-lambda-zip)
+        COGNITO_LAMBDA_ZIP=${2:-}
+        shift 2
+        ;;
+      --no-saas-auth)
+        NO_SAAS_AUTH=true
+        shift
+        ;;
+      --saas-auth-skip-admin-check)
+        SAAS_AUTH_SKIP_ADMIN_CHECK=true
         shift
         ;;
       --no-iris-grader-mint)
@@ -3491,6 +3525,12 @@ phase_aws_data() {
     saas_frontend_on=true
     saas_frontend_data=true
   fi
+  # --saas-auth: containers for the two plain-string secrets the Cognito triggers read by name (values: phase cognito-triggers).
+  local saas_auth_secrets=""
+  if saas_auth_provisioned; then
+    saas_auth_secrets='"platform/cognito/pat-exchange-assertion-secret": { "description": "PAT exchange assertion secret (plain string, shared with the api-gateway); read by the Cognito triggers" },
+    "platform/platform-internal-s2s-key": { "description": "Foundation internal S2S key (plain string); read by the Cognito triggers", "password_length": 48 },'
+  fi
   local saas_frontend_identity='"frontend": {
       "namespace": "'"${INFRA_NAMESPACE}"'",
       "service_account": "straiker-frontend",
@@ -3557,6 +3597,7 @@ phase_aws_data() {
     }
   },
   "secrets": {
+    ${saas_auth_secrets}
     "platform/shared": {
       "description": "Shared service keys and bootstrap admin login (Secret straiker-secrets); synced to K8s by External Secrets",
       "generated_keys": [$(printf '"%s",' ${SHARED_SECRET_PROPS} | sed 's/,$//')]
@@ -3610,6 +3651,27 @@ EOF
   export TF_VAR_ses_domains TF_VAR_ses_existing
   if [[ "${saas_frontend_on}" == "true" ]]; then TF_VAR_saas_frontend='{}'; else TF_VAR_saas_frontend='null'; fi
   export TF_VAR_saas_frontend
+  # --saas-auth: the security groups first (foundation's internal load balancer needs its own before it exists), the triggers
+  # themselves once the zip is uploaded and the load balancer has an address (phase cognito-triggers re-runs this phase).
+  TF_VAR_cognito_trigger_network=false
+  TF_VAR_cognito_triggers=null
+  # Once created, the security groups stay after --no-saas-auth (foundation's NLB may still use one; destroying it would fail).
+  saas_auth_provisioned && TF_VAR_cognito_trigger_network=true
+  saas_auth_on && TF_VAR_cognito_triggers="$(cognito_triggers_json)"
+  # Client credentials as in SaaS (Frankfurt's resource servers and scopes): one S2S app client "api" with every scope; its id and
+  # secret land in Secrets Manager <cluster>/cognito/s2s/api (scripts/api-client.sh shows them).
+  TF_VAR_cognito_resource_servers='{}'
+  TF_VAR_cognito_s2s_clients='{}'
+  if saas_auth_on; then
+    TF_VAR_cognito_resource_servers='{
+      "compass":      {"name": "Compass",      "scopes": {"read": "Read Only", "admin": "admin task only", "write": "Write Only"}},
+      "detection_v2": {"name": "Pathfinder",   "scopes": {"read": "Read Only", "write": "Read and Write"}},
+      "findings":     {"name": "Findings API", "scopes": {"write": "Add Findings"}},
+      "policy":       {"name": "Policy API",   "scopes": {"read": "Read Only", "admin": "Management CRUD"}}
+    }'
+    TF_VAR_cognito_s2s_clients='{"api": {"scopes": ["compass/admin", "compass/read", "compass/write", "detection_v2/read", "detection_v2/write", "findings/write", "policy/admin", "policy/read"]}}'
+  fi
+  export TF_VAR_cognito_trigger_network TF_VAR_cognito_triggers TF_VAR_cognito_resource_servers TF_VAR_cognito_s2s_clients
   # Cognito needs its service-linked role (email.cognito-idp.amazonaws.com) to send through SES. Create it only when the
   # account has none; when it exists, keep creating it only if THIS install's Terraform state owns it (otherwise a later
   # "exists" would make Terraform destroy a role it created, and an unowned one would fail with "has been taken").
@@ -3627,8 +3689,11 @@ EOF
   set_metadata "cognito_create_email_slr" "${cog_slr}"
 
   # $1 = cognito_use_ses (true once the SES identity is verified).
+  # STRAIKER_TF_PLAN_ONLY=true: plan with exactly the same variables, apply nothing (the phase stops after the plan).
   data_apply() {
-    tofu -chdir="${DATA_DIR}" apply -auto-approve -input=false \
+    local -a verb=(apply -auto-approve)
+    [[ "${STRAIKER_TF_PLAN_ONLY:-}" == true ]] && verb=(plan)
+    tofu -chdir="${DATA_DIR}" "${verb[@]}" -input=false \
       -var="region=${AWS_REGION}" \
       -var="cluster_name=${CLUSTER_NAME}" \
       -var="vpc_id=${vpc_id}" \
@@ -3646,6 +3711,10 @@ EOF
   local use_ses=false
   ses_identity_verified && use_ses=true
   data_apply "${use_ses}"
+  if [[ "${STRAIKER_TF_PLAN_ONLY:-}" == true ]]; then
+    mark_phase_blocked "Plan only (STRAIKER_TF_PLAN_ONLY=true): nothing was applied. Review the plan above, then run the same command without it."
+    return
+  fi
   if [[ -n "$(get_metadata "ses_existing_arn")" && "${use_ses}" != "true" ]]; then
     log "The customer's SES identity $(get_metadata "ses_existing_arn") is not verified for sending: Cognito keeps its default sender; fix the identity, then re-run phase aws-data."
   fi
@@ -3722,6 +3791,12 @@ EOF
   for cf in pool_id issuer client_id secret_name admin_secret_name saml_acs_url entity_id oidc_redirect_uri; do
     set_metadata "cognito_${cf}" "$(printf '%s' "${cognito_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("main",{}).get("'"${cf}"'",""))' 2>/dev/null || true)"
   done
+  if saas_auth_on; then
+    set_metadata "cognito_lambda_sg" "$(tofu -chdir="${DATA_DIR}" output -json cognito_trigger_network 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("lambda_security_group_id",""))' 2>/dev/null || true)"
+    set_metadata "cognito_u2s_client_id" "$(tofu -chdir="${DATA_DIR}" output -raw cognito_u2s_client_id 2>/dev/null || true)"
+    set_metadata "cognito_s2s_secret" "$(tofu -chdir="${DATA_DIR}" output -json cognito_s2s_clients 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("api",{}).get("secret_name",""))' 2>/dev/null || true)"
+    set_metadata "foundation_nlb_sg" "$(tofu -chdir="${DATA_DIR}" output -json cognito_trigger_network 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("nlb_security_group_id",""))' 2>/dev/null || true)"
+  fi
   write_sso_handoff
   if [[ "${saas_frontend_on}" == "true" ]]; then
     local saas_json
@@ -4833,6 +4908,184 @@ gateway_via_alb() {
   [[ "${EDGE_TYPE}" == "xalb" && "$(get_metadata "gateway_exposure")" == "public" ]]
 }
 
+# ---- SaaS-style sign-in (--saas-auth): Cognito Lambda triggers ----------------------------------------------------------------
+# The triggers are foundation's environment-api Lambdas, as in SaaS (terraform/aws/data/cognito_triggers.tf). They resolve users through
+# foundation's internal NLB, which exists only after platform-services, so: phase aws-data creates the security groups and the two
+# secret containers; platform-services installs foundation with the NLB and the gateway on Cognito; this phase uploads the zip, fills the
+# secrets, waits for the NLB address and re-applies the data module with the triggers.
+saas_auth_on() { [[ "$(get_metadata "saas_auth")" == "true" ]]; }
+# --saas-auth was on at some point: its security groups and secret containers exist and stay (state), even after --no-saas-auth.
+saas_auth_provisioned() { saas_auth_on || [[ -n "$(get_metadata "foundation_nlb_sg")" ]]; }
+
+# An ELB name is at most 32 characters and cannot start with "internal-".
+foundation_nlb_name() { local n="${CLUSTER_NAME}-foundation-nlb"; printf '%s' "${n:0:32}"; }
+
+remember_saas_auth() {
+  # Back out: the next aws-data run removes the triggers from the pool (and the next platform-services run puts the gateway back on
+  # its own tokens). Security groups and secret containers are kept.
+  if [[ "${NO_SAAS_AUTH}" == true ]]; then
+    set_metadata "saas_auth" "false"
+    set_metadata "cognito_triggers_ready" "false"
+    return 0
+  fi
+  [[ "${SAAS_AUTH}" == true ]] && set_metadata "saas_auth" "true"
+  if [[ -n "${COGNITO_LAMBDA_ZIP}" ]]; then
+    local abs
+    abs="$(cd "$(dirname "${COGNITO_LAMBDA_ZIP}")" 2>/dev/null && pwd)/$(basename "${COGNITO_LAMBDA_ZIP}")"
+    set_metadata "cognito_lambda_zip" "${abs}"
+  fi
+  return 0
+}
+
+# The cognito_triggers Terraform variable: null until the zip is uploaded and the NLB has an address (cognito_triggers_ready).
+cognito_triggers_json() {
+  if [[ "$(get_metadata "cognito_triggers_ready")" != "true" ]]; then printf 'null'; return; fi
+  python3 - "$(get_metadata "bootstrap_bucket")" "$(get_metadata "cognito_lambda_key")" "$(get_metadata "foundation_internal_url")" "${CLUSTER_NAME}" <<'PY'
+import json, sys
+bucket, key, url, cluster = sys.argv[1:5]
+print(json.dumps({
+    "lambda_code": {"bucket": bucket, "key": key},
+    "platform_authz": {"internal_base_url": url},
+    "pat_exchange_assertion_secret": f"{cluster}/platform/cognito/pat-exchange-assertion-secret",
+    "platform_internal_s2s_secret": f"{cluster}/platform/platform-internal-s2s-key",
+}))
+PY
+}
+
+# One value of a JSON key bundle in Secrets Manager.
+secret_bundle_value() { # $1 secret name, $2 key
+  aws secretsmanager get-secret-value --secret-id "$1" --region "${AWS_REGION}" --query SecretString --output text 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$2" 2>/dev/null
+}
+
+# Ask foundation whether an email is a platform user, as the triggers will (/internal/platform/v3/authz/resolve, Bearer the internal S2S
+# key), through a short port-forward. Prints "<http code>|<status>|<roles>"; code 000 = foundation not reachable.
+foundation_resolve_user() { # $1 email, $2 S2S key
+  local port=18093 pf_pid out code body
+  kubectl port-forward -n "${INFRA_NAMESPACE}" svc/foundation "${port}:80" >/dev/null 2>&1 &
+  pf_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -s -m 2 -o /dev/null "http://127.0.0.1:${port}/healthz" 2>/dev/null && break
+    sleep 1
+  done
+  out="$(curl -s -m 10 -w '\n%{http_code}' -H "Authorization: Bearer $2" \
+    "http://127.0.0.1:${port}/internal/platform/v3/authz/resolve?email=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1")" 2>/dev/null || true)"
+  kill "${pf_pid}" >/dev/null 2>&1 || true
+  wait "${pf_pid}" 2>/dev/null || true
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  printf '%s|%s\n' "${code:-000}" "$(printf '%s' "${body}" | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin); print("%s|%s" % (d.get("status", ""), ",".join(d.get("roles") or [])))
+except Exception:
+    print("|")' 2>/dev/null)"
+}
+
+phase_cognito_triggers() {
+  if ! saas_auth_on; then
+    log "Skipping the Cognito triggers: --saas-auth is not set."
+    set_phase_status "${CURRENT_PHASE}" "skipped" "--saas-auth not set."
+    return
+  fi
+  if [[ "${CLOUD_PROVIDER}" == "gke" ]]; then
+    mark_phase_blocked "--saas-auth is AWS-only."
+    return
+  fi
+  require_command aws
+  require_command kubectl
+  require_command tofu
+  ensure_k8s_ready_for_charts || return
+
+  local zip bucket sha key
+  zip="$(get_metadata "cognito_lambda_zip")"
+  if [[ -z "${zip}" || ! -s "${zip}" ]]; then
+    mark_phase_blocked "--saas-auth needs --cognito-lambda-zip PATH: foundation's environment-api lambda.zip (scripts/build-cognito-lambda-zip.sh builds it from the foundation repo)."
+    return
+  fi
+  bucket="$(get_metadata "bootstrap_bucket")"
+  [[ -n "${bucket}" ]] || { mark_phase_blocked "No bootstrap bucket in the install state; run phase eks-tfbe first."; return; }
+  if command -v sha256sum >/dev/null 2>&1; then sha="$(sha256sum "${zip}" | cut -c1-16)"; else sha="$(shasum -a 256 "${zip}" | cut -c1-16)"; fi
+  key="artifacts/cognito-triggers/${sha}/lambda.zip"
+  if aws s3api head-object --bucket "${bucket}" --key "${key}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    log "Lambda zip already in s3://${bucket}/${key}."
+  else
+    log "Uploading the Lambda zip to s3://${bucket}/${key}..."
+    aws s3 cp "${zip}" "s3://${bucket}/${key}" --region "${AWS_REGION}" --only-show-errors || { mark_phase_blocked "Cannot upload the Lambda zip to s3://${bucket}/${key}."; return; }
+  fi
+
+  # The two plain-string secrets the triggers read by name (containers made by phase aws-data); values copied from the key bundles so
+  # they match the gateway's and foundation's.
+  local pat_secret s2s_secret pat_val s2s_val
+  pat_secret="${CLUSTER_NAME}/platform/cognito/pat-exchange-assertion-secret"
+  s2s_secret="${CLUSTER_NAME}/platform/platform-internal-s2s-key"
+  pat_val="$(secret_bundle_value "${CLUSTER_NAME}/platform/api-gateway" "PAT_EXCHANGE_ASSERTION_SECRET")"
+  s2s_val="$(secret_bundle_value "${CLUSTER_NAME}/platform/keys" "PLATFORM_INTERNAL_S2S_API_KEY")"
+  if [[ -z "${pat_val}" || -z "${s2s_val}" ]]; then
+    mark_phase_blocked "The key bundles ${CLUSTER_NAME}/platform/api-gateway and /platform/keys have no PAT_EXCHANGE_ASSERTION_SECRET / PLATFORM_INTERNAL_S2S_API_KEY yet; run phases aws-data and shared-secrets first."
+    return
+  fi
+  local sname sval
+  for sname in "${pat_secret}" "${s2s_secret}"; do
+    [[ "${sname}" == "${pat_secret}" ]] && sval="${pat_val}" || sval="${s2s_val}"
+    aws secretsmanager put-secret-value --secret-id "${sname}" --secret-string "${sval}" --region "${AWS_REGION}" >/dev/null 2>&1 \
+      || { mark_phase_blocked "Cannot write ${sname}: run phase aws-data with --saas-auth first (it creates the secret)."; return; }
+  done
+
+  # Preflight: with the triggers on, email/password sign-in needs the user in foundation's directory (pre-authentication), and a token
+  # without an active platform user carries no authority. The first admin is put there by foundation's bootstrapOperators; check it.
+  local admin res rcode rstatus rroles
+  admin="$(get_metadata "admin_email")"
+  if [[ -n "${admin}" ]]; then
+    res="$(foundation_resolve_user "${admin}" "${s2s_val}")"
+    IFS='|' read -r rcode rstatus rroles <<<"${res}"
+    if [[ "${rcode}" == "200" && "${rstatus}" == "active" ]]; then
+      log "Preflight: first admin ${admin} is an active platform user (roles: ${rroles:-none})."
+    elif [[ "${SAAS_AUTH_SKIP_ADMIN_CHECK}" == true ]]; then
+      log "WARNING: preflight could not confirm ${admin} as an active platform user (HTTP ${rcode}, status '${rstatus}'); continuing because of --saas-auth-skip-admin-check."
+    else
+      case "${rcode}" in
+        404) mark_phase_blocked "Preflight: ${admin} is not in foundation's user directory, so the Cognito triggers would refuse their sign-in. Foundation creates it at start from authz.bootstrapOperators, which platform-services sets from the admin email with --saas-auth: re-run phase platform-services, or invite the user on the Users page, then re-run this phase. Override: --saas-auth-skip-admin-check." ;;
+        200) mark_phase_blocked "Preflight: ${admin} is in foundation but '${rstatus}', not active: it would sign in with no authority. Activate it, then re-run. Override: --saas-auth-skip-admin-check." ;;
+        *) mark_phase_blocked "Preflight: cannot ask foundation about ${admin} (HTTP ${rcode}): check 'kubectl get pods -n ${INFRA_NAMESPACE} -l app.straiker.io/app=foundation'. Override: --saas-auth-skip-admin-check." ;;
+      esac
+      return
+    fi
+  else
+    log "WARNING: no admin email in the install state: cannot check that an administrator can still sign in once the triggers are on."
+  fi
+  if [[ -n "$(get_metadata "sso_type")" ]]; then
+    log "NOTE: with the triggers, SSO users ($(get_metadata "sso_type"), $(get_metadata "sso_domains")) must be invited on the Users page before their first sign-in; pre-sign-up refuses unknown users (SaaS behaviour). The console no longer creates them on first sign-in."
+  fi
+
+  # Foundation's internal NLB (installed by platform-services with --saas-auth; the load balancer controller provisions it).
+  local nlb_host="" try
+  log "Waiting for foundation's internal NLB (up to 10 minutes)..."
+  for try in $(seq 1 60); do
+    nlb_host="$(kubectl get svc foundation-internal-nlb -n "${INFRA_NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+    [[ -n "${nlb_host}" ]] && break
+    sleep 10
+  done
+  if [[ -z "${nlb_host}" ]]; then
+    mark_phase_blocked "Foundation's internal NLB has no address: check 'kubectl get svc foundation-internal-nlb -n ${INFRA_NAMESPACE}' (needs the AWS Load Balancer Controller: phase alb-controller; and phase platform-services run with --saas-auth)."
+    return
+  fi
+  set_metadata "foundation_internal_url" "http://${nlb_host}"
+  set_metadata "cognito_lambda_key" "${key}"
+  set_metadata "cognito_triggers_ready" "true"
+
+  # Re-apply the data module: the six trigger functions, their roles, and the pool's lambda_config.
+  phase_aws_data || return
+  [[ "${INSTALL_BLOCKED}" == true ]] && return 0
+
+  local lc
+  lc="$(aws cognito-idp describe-user-pool --user-pool-id "$(get_metadata "cognito_pool_id")" --region "${AWS_REGION}" --query 'UserPool.LambdaConfig.PreTokenGeneration' --output text 2>/dev/null || true)"
+  if [[ -z "${lc}" || "${lc}" == "None" ]]; then
+    mark_phase_blocked "The pool has no pre-token-generation trigger after the apply; check the Terraform output above."
+    return
+  fi
+  log "Cognito triggers are on: pool $(get_metadata "cognito_pool_id") calls ${lc##*:}."
+}
+
 install_api_gateway() {
   local ecr_registry=$1 chart="${CHARTS_ROOT}/platform-api-gateway" tag tmp table
   require_command openssl
@@ -4885,6 +5138,17 @@ install_api_gateway() {
       --set-string "straiker.apiGateway.pat.mode=foundation"
       --set-string "straiker.apiGateway.foundation.baseUrl=http://foundation.${INFRA_NAMESPACE}.svc.cluster.local"
     )
+    # --saas-auth: the gateway on Cognito as in SaaS (user tokens from the pool's JWKS, PAT exchange through CUSTOM_AUTH on the
+    # frontend client, client credentials from the pool's domain). The console's own session stays accepted next to it.
+    if saas_auth_on && [[ -n "$(get_metadata "cognito_issuer")" && -n "$(get_metadata "cognito_u2s_client_id")" ]]; then
+      mode_args+=(
+        --set-string "straiker.apiGateway.oauth.mode=cognito"
+        --set-string "straiker.apiGateway.cognito.issuerUrl=$(get_metadata "cognito_issuer")"
+        --set-string "straiker.apiGateway.cognito.domain=straiker-${CLUSTER_NAME}.auth.${AWS_REGION}.amazoncognito.com"
+        --set-string "straiker.apiGateway.cognito.u2sClientId=$(get_metadata "cognito_u2s_client_id")"
+        --set-string "straiker.apiGateway.cognito.region=${AWS_REGION}"
+      )
+    fi
   else
     log "api-gateway: read-only mode (no DynamoDB table in state; run with --data-layer for full mode)."
     # Static environment the gateway authenticates agents against (schema: api-gateway
@@ -6677,7 +6941,19 @@ phase_platform_services() {
     key="straiker.${svc}"
     local -a extra=()
     case "${svc}" in
-      foundation) extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}") ;;
+      foundation)
+        extra+=(--set-string "${key}.bus.saslRegion=${AWS_REGION}")
+        if saas_auth_on; then
+          # Internal NLB for the Cognito trigger Lambdas (they resolve users through foundation); its security group admits only them.
+          extra+=(--set "${key}.internalNlb.enabled=true" --set-string "${key}.internalNlb.name=$(foundation_nlb_name)"
+            --set-string "${key}.internalNlb.securityGroup=$(get_metadata "foundation_nlb_sg")")
+          # The first admin must exist in foundation's user directory: with the triggers, email/password sign-in is refused for anyone
+          # who is not a platform user. Foundation ensures this operator at every start (ensure-only; the Users page owns the rest).
+          if [[ -n "$(get_metadata "admin_email")" ]]; then
+            extra+=(--set-string "${key}.authz.bootstrapOperators=$(get_metadata "admin_email")")
+          fi
+        fi
+        ;;
       registry)
         extra+=(--set-string "${key}.bus.sasl.region=${AWS_REGION}" --set-string "${key}.secrets.prefix=${CLUSTER_NAME}/platform/integration/")
         # Argus control catalog (Controls page, default policies): fetched through the gateway's /internal/argus tier with
@@ -9759,7 +10035,12 @@ show_api_client_reminder() {
   log ""
   log "API access (scripts, CI, integrations): the API gateway is https://${gw}"
   log "  Token endpoint : POST https://${gw}/auth/token   (grant_type=client_credentials; client_id and client_secret in the form body or HTTP Basic)"
-  log "  Client         : id 'onprem-client'; the secret is in Kubernetes Secret api-gateway-oauth (namespace ${INFRA_NAMESPACE})."
+  if saas_auth_on; then
+    log "  Client         : Cognito app client 'api' (client credentials, SaaS scopes); id and secret in Secrets Manager $(get_metadata "cognito_s2s_secret")."
+    log "  PAT exchange   : through the Cognito triggers (phase cognito-triggers must be done)."
+  else
+    log "  Client         : id 'onprem-client'; the secret is in Kubernetes Secret api-gateway-oauth (namespace ${INFRA_NAMESPACE})."
+  fi
   log "  Manage clients : scripts/api-client.sh list | show --reveal | add NAME | rotate | remove NAME | token"
   log "  Detection API  : POST https://${gw}/api/v3/detect with an agent key (sk_agt_...) created in the console, as the Bearer token."
   log "  (The console host straiker.<domain> has its own /oauth/token for browser sign-in only; do not use it for API clients.)"
@@ -10706,6 +10987,7 @@ run_phase() {
     cert-manager) phase_cert_manager ;;
     alb-controller) phase_alb_controller ;;
     external-dns) phase_external_dns ;;
+    cognito-triggers) phase_cognito_triggers ;;
     straiker-edge) phase_straiker_edge ;;
     observability) phase_observability ;;
     *)
@@ -10818,6 +11100,7 @@ main() {
   capture_install_config
   require_defend_prereqs
   remember_inference_settings || exit 1 # after capture_install_config: it needs the selected products
+  remember_saas_auth
   # The gateway's domain/certificate choice is validated now, not 25 minutes into the install (same function, run without touching state).
   if [[ "${DATA_LAYER}" == "true" ]]; then
     ( mark_phase_blocked() { echo "ERROR: $1" >&2; return 1; }; set_metadata() { :; }; remember_gateway_settings ) || exit 1

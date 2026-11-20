@@ -97,6 +97,8 @@ Options:
                              api.D certificate is still requested by the installer (it prints the DNS records to add)
   --products LIST            default: ascend,defend
   --ai-provider-mode M       own-keys | bedrock | trial-key (default: bedrock)
+  --saas-auth                sign-in as in SaaS: Cognito Lambda triggers, foundation behind an internal NLB, the gateway on Cognito (PAT exchange via CUSTOM_AUTH)
+  --cognito-lambda-zip PATH  foundation's environment-api lambda.zip for --saas-auth (scripts/build-cognito-lambda-zip.sh builds it)
   --multiarch-override R=U   image whose copy in your ECR lacks arm64, as <repo>:<tag>=<upstream> (repeatable).
                              Default: maximhq/bifrost at the tag pinned in charts/straiker-artifact, from Docker Hub.
                              Pass --multiarch-override none to disable.
@@ -178,6 +180,8 @@ while [[ $# -gt 0 ]]; do
     --ascend-adjustment-worker) ASCEND_ADJUSTMENT_WORKER=true; shift ;;
     --encrypt-node-volumes) ENCRYPT_NODE_VOLUMES=true; shift ;;
     --no-iris-grader-mint) NO_IRIS_GRADER_MINT=true; shift ;;
+    --saas-auth | --no-saas-auth | --saas-auth-skip-admin-check) EXTRA_FLAGS+=("$1"); shift ;;
+    --cognito-lambda-zip) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;
     --ses-domain | --ses-route53-zone-id | --ses-identity-arn | --ses-from | --ses-configuration-set | --sso-name | --sso-domains \
       | --sso-client-id | --sso-oidc-issuer | --sso-oidc-client-id | --sso-saml-metadata-url | --sso-saml-metadata-file | --sso-email-claim \
       | --sso-apple-team-id | --sso-apple-key-id | --sso-apple-private-key-file) EXTRA_FLAGS+=("$1" "${2:-}"); shift 2 ;;

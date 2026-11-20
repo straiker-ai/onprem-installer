@@ -16,6 +16,10 @@
 # api-gateway-oauth-clients (one key per client, the value is its secret); the installer re-applies them whenever it installs the
 # gateway. After a change this script applies it to the running gateway (helm upgrade --reuse-values, one gateway restart).
 # Secrets are never written to disk or the shell history; add/rotate print the new secret exactly once.
+#
+# Cognito mode (installer --saas-auth): the gateway passes client credentials to the Cognito pool, so clients are Cognito app clients
+# managed by Terraform (cognito_s2s_clients; the installer creates "api"). list/show/token then read Secrets Manager
+# "<cluster>/cognito/s2s/<name>" with your AWS credentials (AWS_PROFILE); add/rotate/remove are done in Terraform.
 set -uo pipefail
 
 NS="straiker"
@@ -87,6 +91,62 @@ apply() {
   echo "Applying ${i} client(s) to the gateway (one rolling restart)..." >&2
   h upgrade api-gateway "${CHART}" --reuse-values --wait --timeout 10m "${sets[@]}" >/dev/null || die "helm upgrade failed; the Secret was changed but the gateway still has the old clients."
 }
+
+# The gateway's OAuth mode, and in Cognito mode the cluster prefix and region of its Secrets Manager bundle.
+gw_values="$(h get values api-gateway -o json 2>/dev/null || echo '{}')"
+gw_field() { printf '%s' "${gw_values}" | python3 -c 'import json,sys
+v = json.load(sys.stdin).get("straiker", {}).get("apiGateway", {})
+for part in sys.argv[1].split("."):
+    v = v.get(part, {}) if isinstance(v, dict) else {}
+print(v if isinstance(v, str) else "")' "$1" 2>/dev/null; }
+if [[ "$(gw_field oauth.mode)" == "cognito" ]]; then
+  bundle="$(gw_field secretManager.secretName)"
+  sm_region="$(gw_field secretManager.region)"
+  cluster="${bundle%/platform/api-gateway}"
+  NAME="${NAME:-api}"
+  s2s_secret="${cluster}/cognito/s2s/${NAME}"
+  s2s_json() { aws secretsmanager get-secret-value --secret-id "${s2s_secret}" --region "${sm_region}" --query SecretString --output text; }
+  case "${CMD}" in
+    list)
+      echo "Cognito mode: clients are Cognito app clients managed by Terraform (cognito_s2s_clients). The installer creates 'api':"
+      echo "  ${cluster}/cognito/s2s/api  (Secrets Manager, ${sm_region})"
+      ;;
+    show)
+      command -v aws >/dev/null 2>&1 || die "aws CLI is required in Cognito mode."
+      j="$(s2s_json)" || die "Cannot read ${s2s_secret} (AWS credentials for the install's account? AWS_PROFILE=...)."
+      echo "client_id:     $(printf '%s' "${j}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')"
+      if [[ "${REVEAL}" == true ]]; then
+        echo "client_secret: $(printf '%s' "${j}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_secret"])')"
+      else
+        echo "client_secret: (hidden; add --reveal to print it)"
+      fi
+      ;;
+    token)
+      command -v aws >/dev/null 2>&1 || die "aws CLI is required in Cognito mode."
+      j="$(s2s_json)" || die "Cannot read ${s2s_secret}."
+      host="${URL}"
+      [[ -n "${host}" ]] || host="$(k get ingress -o jsonpath='{range .items[*]}{.spec.rules[*].host}{"\n"}{end}' 2>/dev/null | tr ' ' '\n' | grep '^api\.' | head -1)"
+      [[ -n "${host}" ]] || die "Cannot find the gateway host; pass --url https://api.<domain>."
+      [[ "${host}" == http* ]] || host="https://${host}"
+      cid="$(printf '%s' "${j}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')"
+      csec="$(printf '%s' "${j}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_secret"])')"
+      code="$(curl -s -m 20 -o /tmp/.api-client-token.$$ -w '%{http_code}' -X POST "${host%/}/auth/token" -u "${cid}:${csec}" -d grant_type=client_credentials)"
+      echo "POST ${host%/}/auth/token (Cognito client ${NAME}) -> HTTP ${code}"
+      python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1])); t = d.get("access_token", "")
+    print("access_token:", (t[:12] + "...") if t else "(none)", " expires_in:", d.get("expires_in"), " scope:", d.get("scope"), " error:", d.get("error"))
+except Exception as e:
+    print("unreadable response:", e)' "/tmp/.api-client-token.$$"
+      rm -f "/tmp/.api-client-token.$$"
+      ;;
+    add | rotate | remove)
+      die "Cognito mode: clients are Cognito app clients in Terraform (terraform/aws/data, cognito_s2s_clients). Add or change one there and re-run phase aws-data."
+      ;;
+    *) usage; exit 2 ;;
+  esac
+  exit 0
+fi
 
 case "${CMD}" in
   list)
