@@ -163,3 +163,35 @@ output "saas_frontend" {
     audit_logs_stream              = aws_kinesis_stream.saas_audit[0].name
   } : null
 }
+
+output "cognito_triggers" {
+  description = "The Cognito trigger Lambdas (null when var.cognito_triggers has no lambda_code): function names and ARNs, and the client the PAT exchange uses."
+  value = local.triggers_on ? {
+    functions     = { for k, f in aws_lambda_function.cognito_trigger : k => { name = f.function_name, arn = f.arn } }
+    u2s_client_id = aws_cognito_user_pool_client.u2s[0].id
+    vpc_attached  = local.trigger_vpc != null
+  } : null
+}
+
+output "cognito_trigger_network" {
+  description = "Security groups of the Cognito triggers and of foundation's internal load balancer (null unless var.cognito_trigger_network)."
+  value = var.cognito_trigger_network ? {
+    lambda_security_group_id = aws_security_group.cognito_trigger[0].id
+    nlb_security_group_id    = aws_security_group.foundation_nlb[0].id
+  } : null
+}
+
+output "cognito_s2s_clients" {
+  description = "S2S app clients: key => client id and the Secrets Manager secret holding id and secret."
+  value = {
+    for k, c in aws_cognito_user_pool_client.s2s : k => {
+      client_id   = c.id
+      secret_name = aws_secretsmanager_secret.s2s_client[k].name
+    }
+  }
+}
+
+output "cognito_u2s_client_id" {
+  description = "App client of the PAT exchange (no secret, custom-auth only); the api-gateway's cognito.u2s-client-id. Empty unless var.cognito_trigger_network."
+  value       = try(aws_cognito_user_pool_client.u2s[0].id, "")
+}

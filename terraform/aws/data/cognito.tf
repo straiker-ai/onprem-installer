@@ -71,6 +71,19 @@ resource "aws_cognito_user_pool" "this" {
     }
   }
 
+  # The SaaS triggers (cognito_triggers.tf): claims, user resolution and the PAT exchange. Main pool only.
+  dynamic "lambda_config" {
+    for_each = each.key == "main" && local.triggers_on ? [1] : []
+    content {
+      pre_authentication             = aws_lambda_function.cognito_trigger["pre-authentication"].arn
+      pre_sign_up                    = aws_lambda_function.cognito_trigger["pre-sign-up"].arn
+      pre_token_generation           = aws_lambda_function.cognito_trigger["pre-token-generation"].arn
+      define_auth_challenge          = aws_lambda_function.cognito_trigger["define-auth-challenge"].arn
+      create_auth_challenge          = aws_lambda_function.cognito_trigger["create-auth-challenge"].arn
+      verify_auth_challenge_response = aws_lambda_function.cognito_trigger["verify-auth-challenge"].arn
+    }
+  }
+
   password_policy {
     minimum_length                   = 8
     require_lowercase                = true

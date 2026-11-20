@@ -246,6 +246,66 @@ variable "cognito_pools" {
   default = { main = {} }
 }
 
+variable "cognito_triggers" {
+  description = <<-EOT
+    Cognito Lambda triggers, as SaaS (see cognito_triggers.tf): pre-authentication, pre-sign-up, pre-token-generation and the three
+    CUSTOM_AUTH triggers behind the PAT exchange, on the "main" pool. null (default) or no lambda_code = no triggers.
+      lambda_code                    the S3 object holding foundation's environment-api lambda.zip (the installer uploads it)
+      platform_authz                 foundation's internal URL (http://<internal load balancer>) and the enabled/timeout settings
+      pat_exchange_assertion_secret  Secrets Manager name or ARN of a PLAIN-STRING secret, shared with the api-gateway
+      platform_internal_s2s_secret   the same for foundation's resolve endpoint key
+      operator_domains               email domains whose users may hold the operator role
+      dynamodb_table                 key of var.dynamodb_tables the triggers read (user records)
+  EOT
+  type = object({
+    lambda_code = optional(object({
+      bucket = string
+      key    = string
+    }))
+    runtime = optional(string, "nodejs22.x")
+    platform_authz = optional(object({
+      internal_base_url = string
+      enabled           = optional(string, "")
+      timeout_ms        = optional(string, "")
+    }))
+    pat_exchange_assertion_secret = optional(string)
+    platform_internal_s2s_secret  = optional(string)
+    operator_domains              = optional(string, "")
+    dynamodb_table                = optional(string, "environment")
+    log_retention_days            = optional(number, 30)
+  })
+  default = null
+}
+
+variable "cognito_trigger_network" {
+  description = <<-EOT
+    Network for the Cognito triggers that call foundation (cognito_triggers.tf): a security group for the Lambdas (egress only) and one
+    for foundation's internal load balancer that admits only the Lambdas on port 80. Create it with the data tier, before foundation
+    is installed, so the load balancer can use its security group; the triggers themselves come later (cognito_triggers). The Lambdas
+    run in var.private_subnet_ids, which need a NAT route (they still call DynamoDB, Cognito and Secrets Manager).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "cognito_resource_servers" {
+  description = "OAuth resource servers on the \"main\" pool, keyed by identifier, with their scopes (name => description); see cognito_s2s.tf. SaaS: compass, detection_v2, findings, policy."
+  type = map(object({
+    name   = string
+    scopes = map(string)
+  }))
+  default = {}
+}
+
+variable "cognito_s2s_clients" {
+  description = "Client-credentials app clients on the \"main\" pool, keyed by stable name: the <identifier>/<scope> scopes they may request. Secret in Secrets Manager \"<cluster>/cognito/s2s/<key>\"."
+  type = map(object({
+    scopes                        = list(string)
+    access_token_validity_minutes = optional(number, 60)
+  }))
+  default = {}
+}
+
 variable "cognito_identity_providers" {
   description = <<-EOT
     The customer's identity provider, federated into the "main" Cognito pool (key = Cognito provider name).
