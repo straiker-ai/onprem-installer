@@ -44,7 +44,13 @@ data:
           <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
           <profile>default</profile>
           <quota>default</quota>
-          <grants><query>GRANT SELECT ON grid.*</query></grants>
+          {{- /* dictGet is a separate privilege in ClickHouse 25.x. grid's dictionaries call dictGet on each other (dict_agent reads
+                 dict_entity_alias), and they load as "default": without it dict_agent stays FAILED after a restart and the
+                 Insights and Inventory pages return 502. */}}
+          <grants>
+            <query>GRANT SELECT ON grid.*</query>
+            <query>GRANT dictGet ON grid.*</query>
+          </grants>
         </default>
         {{- range $u, $cfg := .Values.users }}
         <{{ $u }}>
