@@ -505,6 +505,43 @@ The response's `access_token` is the bearer for `/api/v3/*`. `scope` can only na
 
 Not yet verified: which `/api/v3/*` management endpoints accept a client-credentials token, and the scopes it carries.
 
+## 6l. SaaS-style sign-in: Cognito Lambda triggers (`--saas-auth`)
+
+By default an on-prem install has no Cognito Lambda triggers: the console signs its own session (`SESSION_SIGNING_KEY`) and the api-gateway signs PAT and client-credentials tokens itself (section 6k). `--saas-auth` builds the sign-in the way SaaS (Frankfurt, `infra` `platform/cognito-environment-api`) has it. Verified end to end on dl-test (2026-11-20).
+
+| Piece | What it is |
+|---|---|
+| Six triggers on the pool | `pre-authentication`, `pre-sign-up`, `pre-token-generation` (resolve the user in foundation's directory; the token gets `straikerId`, `role`, scopes) and `define/create/verify-auth-challenge` (the CUSTOM_AUTH flow of the PAT exchange). Foundation's `environment-api` Lambdas, one zip (the build Frankfurt pins). |
+| Foundation behind an internal NLB | `foundation-internal-nlb` (a second Service). Its security group admits only the trigger Lambdas; the controller opens the pods to it (`manage-backend-security-group-rules`). The three resolving triggers run in the private subnets. |
+| First admin in foundation | `authz.bootstrapOperators` = the admin email (role `superuser`), set by the installer with `--saas-auth`. Without a platform user, email and password sign-in is refused. |
+| Gateway on Cognito | `oauth.mode=cognito`: user tokens verified against the pool's JWKS, client credentials from the pool's domain, PAT exchange through CUSTOM_AUTH on a client of its own (`<pool>-u2s`, no secret: the gateway sends no SECRET_HASH, so it cannot use the console's confidential client). The console's own session is still accepted. |
+| S2S client | Resource servers `compass`, `detection_v2`, `findings`, `policy` (Frankfurt's scopes) and app client `api`; id and secret in Secrets Manager `<cluster>/cognito/s2s/api`. |
+
+**Order.** `aws-data` (security groups, secret containers, the `u2s` and S2S clients), `platform-services` (foundation with the NLB and the bootstrap operator, the gateway on Cognito), `cognito-triggers` (uploads the zip to the state bucket, copies the two secret values from the key bundles, preflight, waits for the NLB address, applies the triggers, checks the pool).
+
+```bash
+# build the zip once (foundation's environment-api; the same build Frankfurt pins), then:
+scripts/build-cognito-lambda-zip.sh <path to foundation>/environment-api ./cognito-lambda.zip
+scripts/install-straiker.sh --cluster-name <c> --data-layer --saas-auth --cognito-lambda-zip ./cognito-lambda.zip --phase aws-data --rerun-phase
+scripts/install-straiker.sh --cluster-name <c> --data-layer --phase platform-services --rerun-phase
+scripts/install-straiker.sh --cluster-name <c> --data-layer --phase cognito-triggers --rerun-phase
+```
+
+**Safety built in.**
+- `STRAIKER_TF_PLAN_ONLY=true` in front of the `aws-data` or `cognito-triggers` command runs `tofu plan` with the installer's exact variables and stops (for `cognito-triggers` the zip is still uploaded and the two secrets filled, which the plan needs). Redirect the output to a file; do not cut it short with a pipe that exits early (it kills `tofu` and leaves the state lock).
+- Preflight in `cognito-triggers`: it asks foundation (the same `/authz/resolve` the triggers use) whether the first admin is an active platform user, and stops if not. `--saas-auth-skip-admin-check` overrides.
+- Back out: `--no-saas-auth`, then re-run `aws-data` (removes the triggers from the pool) and `platform-services` (gateway back on its own tokens). Security groups, secret containers, the clients and the zip stay.
+
+**What changes for users.**
+- Email and password sign-in goes through `pre-authentication`: the user must exist in foundation's directory (the Users page writes it).
+- With SSO, users must be invited on the Users page before their first sign-in: `pre-sign-up` refuses unknown users (SaaS behaviour). The console returns to its login page without a message.
+- The gateway has no in-memory OAuth client: client credentials come from the Cognito `api` client (`scripts/api-client.sh list | show --reveal | token`); add or change clients in Terraform (`cognito_s2s_clients`).
+- The invite email needs a recipient SES can send to (a verified address while the account is in the SES sandbox).
+
+**Checks (dl-test).** Admin email and password sign-in (the trigger log shows `found_in: 'platform'`); an uninvited Google account refused (`missing_user` in `dl-<cluster>-pre-sign-up`); PAT exchange gives a Cognito ID token that is accepted with its scopes and refused outside them; client credentials from the `api` client return a Cognito access token; `/api/v3/detect` with an agent key unchanged.
+
+**Not built, by design:** SaaS's OpenSearch proxy, uploads and audit-delivery Lambdas exist because the SaaS console runs on Vercel outside the VPC; the on-prem console runs in the cluster and reaches OpenSearch and S3 directly. The console keeps its own session (accepted by the gateway next to Cognito tokens).
+
 ## 6j. Old in-cluster Postgres, Valkey and OpenSearch
 
 The data tier replaces them (Aurora, ElastiCache, the managed OpenSearch domain), and current `straiker-system` does not create Postgres or Valkey for it
