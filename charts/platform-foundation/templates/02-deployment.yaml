@@ -25,6 +25,10 @@ spec:
       {{- include "straiker.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # The settings come from a ConfigMap through envFrom, which the pods read only at start: a changed value (for example
+        # authz.bootstrapOperators) must roll the pods.
+        checksum/config: {{ include (print $.Template.BasePath "/04-config.yaml") . | sha256sum }}
       labels:
         app.straiker.io/app: foundation
         {{- include "straiker.labels" . | nindent 8 }}

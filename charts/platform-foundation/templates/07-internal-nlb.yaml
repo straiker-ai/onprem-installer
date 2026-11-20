@@ -1,0 +1,42 @@
+{{- /*
+Internal NLB for the Cognito trigger Lambdas (pre-authentication, pre-sign-up, pre-token-generation): they run in the VPC and resolve
+users through foundation's /internal/platform/v3/authz/resolve. A second Service, so the ClusterIP Service the other workloads use is
+untouched (SaaS puts the NLB annotations on that one Service). Off unless straiker.foundation.internalNlb.enabled.
+*/}}
+{{- with .Values.straiker.foundation.internalNlb }}
+{{- if .enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "straiker.name" $ }}-internal-nlb
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "straiker.labels" $ | nindent 4 }}
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    # AWS ELB names cannot begin with "internal-".
+    service.beta.kubernetes.io/aws-load-balancer-name: {{ .name | quote }}
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+    {{- if .securityGroup }}
+    # The load balancer's own security group: it admits only the Cognito triggers (terraform/aws/data, cognito_trigger_network).
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: {{ .securityGroup | quote }}
+    # Without this the controller adds no rule that lets that group reach the pods: the targets stay unhealthy and the Lambdas cannot
+    # reach foundation. With it the controller opens the pod port to the load balancer's security group.
+    service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules: "true"
+    {{- end }}
+spec:
+  type: LoadBalancer
+  # The controller (not the in-tree provider) owns the load balancer.
+  loadBalancerClass: service.k8s.aws/nlb
+  selector:
+    app.straiker.io/app: foundation
+    {{- include "straiker.selectorLabels" $ | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: {{ $.Values.straiker.foundation.port }}
+{{- end }}
+{{- end }}

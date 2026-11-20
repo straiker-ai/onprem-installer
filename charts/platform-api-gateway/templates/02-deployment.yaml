@@ -18,6 +18,10 @@ spec:
       {{- include "straiker.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # The gateway reads its configuration file only at start: a changed value (the OAuth mode, the PAT exchange client, the foundation
+        # URL) must roll the pods, or the running gateway keeps the old settings while Helm reports the new ones.
+        checksum/config: {{ include (print $.Template.BasePath "/04-config.yaml") . | sha256sum }}
       labels:
         app.straiker.io/app: api-gateway
         {{- include "straiker.labels" . | nindent 8 }}

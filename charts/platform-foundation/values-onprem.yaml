@@ -10,6 +10,8 @@ straiker:
     serviceAccount: { create: false, name: platform-sa }
     replicas: 1
     hpa: { enabled: false }
+    # Internal NLB for the Cognito trigger Lambdas (installer flag --saas-auth). name and securityGroup are set by the installer.
+    internalNlb: { enabled: false, name: "", securityGroup: "" }
     bus: { tls: true, saslMechanism: aws_msk_iam }   # saslRegion set by the installer
     authz:
       operatorDomains: "*"
