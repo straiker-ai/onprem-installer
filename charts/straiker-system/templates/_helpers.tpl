@@ -88,6 +88,16 @@ spec:
   disruption:
     consolidationPolicy: {{ .pool.disruption.consolidationPolicy }}
     consolidateAfter: {{ .pool.disruption.consolidateAfter }}
+    budgets:
+      {{- if .root.Values.karpenter.blockDrift }}
+      # The node classes follow al2023@latest: every new EKS node image would otherwise mark every node Drifted and replace the whole
+      # cluster within minutes, restarting ClickHouse, the gateway and the console together. Nodes still rotate when they expire
+      # (expireAfter) and new nodes get the latest image. Set karpenter.blockDrift=false to let drift replace nodes (a planned upgrade).
+      - nodes: "0"
+        reasons:
+          - Drifted
+      {{- end }}
+      - nodes: "10%"
   limits:
     {{- toYaml .pool.limits | nindent 4 }}
 {{- end }}

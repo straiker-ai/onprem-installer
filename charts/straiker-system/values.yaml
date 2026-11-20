@@ -12,6 +12,9 @@ clusterName: ""
 
 # Karpenter
 karpenter:
+  # true (default): a new AMI release (the node classes use al2023@latest) does not replace running nodes (budget 0 for reason Drifted).
+  # Nodes are replaced when they expire, and a planned upgrade sets this to false for one run. false = Karpenter's default behaviour.
+  blockDrift: true
   gpu:
     nodePool:
       name: straiker-gpu
