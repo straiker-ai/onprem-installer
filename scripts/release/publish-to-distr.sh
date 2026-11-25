@@ -297,7 +297,10 @@ push_models() {
 push_release() {
   local manifest="${WORK_DIR}/release.json" img_ref="${REGISTRY}/images:${VERSION}" ch_ref="${REGISTRY}/charts:${VERSION}"
   log "read the images artifact and digest every artifact for the release manifest"
-  local layers md ref
+  local layers md ref r
+  for r in "${img_ref}" "${ch_ref}" "$(jq -r '.installer.dest' "${LIST}")" $(jq -r '.models[].dest' "${LIST}"); do
+    crane digest "${r}" >/dev/null 2>&1 || { echo "ERROR: ${r} is not in the registry yet. Push it first (--only images,charts,installer,models), then the release." >&2; exit 1; }
+  done
   layers="$(oras manifest fetch "${img_ref}" | jq '[.layers[] | {
     file: .annotations["org.opencontainers.image.title"], layerDigest: .digest, size: .size,
     repo: .annotations["io.straiker.repo"], tag: .annotations["io.straiker.tag"], sourceDigest: .annotations["io.straiker.digest"],
