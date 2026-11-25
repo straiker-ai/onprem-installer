@@ -273,12 +273,12 @@ push_charts() {
   local from repo
   while IFS=$'\t' read -r name ver from repo; do
     log "chart ${name} ${ver} (third-party)"
-    if [[ -n "${from}" ]]; then helm pull "${from}" --version "${ver}" -d "${out}" >/dev/null
+    if [[ "${from}" != "-" ]]; then helm pull "${from}" --version "${ver}" -d "${out}" >/dev/null
     else
       helm repo add --force-update "tp-${name}" "${repo}" >/dev/null
       helm pull "tp-${name}/${name}" --version "${ver}" -d "${out}" >/dev/null
     fi
-  done < <(jq -r '.thirdPartyCharts[] | [.name, .version, (.from // ""), (.repo // "")] | @tsv' "${LIST}")
+  done < <(jq -r '.thirdPartyCharts[] | [.name, .version, (.from // "-"), (.repo // "-")] | @tsv' "${LIST}")
   local files=() f
   for f in "${out}"/*.tgz; do files+=("$(basename "${f}"):application/vnd.straiker.onprem.chart.v1.tgz"); done
   log "push  ${#files[@]} charts -> ${REGISTRY}/charts:${VERSION}"
