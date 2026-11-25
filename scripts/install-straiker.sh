@@ -139,6 +139,9 @@ KMS_LAYOUT="${KMS_LAYOUT:-}"
 # Deploy the Straiker charts from the customer ECR (OCI) instead of straight from charts/. Remembered once set.
 CHARTS_FROM_ECR="${CHARTS_FROM_ECR:-}"
 CHARTS_ROOT_READY=false
+# --release-dir: a release downloaded from Distr (scripts/straiker-release.sh pull). Images and models are loaded from it
+# into this install's ECR and S3 bucket instead of being copied in-cluster from Straiker's registry and bucket.
+RELEASE_DIR="${RELEASE_DIR:-}"
 # Opt-in OpenTelemetry: a collector (traces -> X-Ray, metrics -> CloudWatch) and an otel-secret the services read. Remembered.
 ENABLE_OTEL="${ENABLE_OTEL:-}"
 # Aurora layout: "single" (one shared cluster, every existing install) or "split" (a second cluster, "<cluster>-aurora-ascend", for the
@@ -892,6 +895,9 @@ Options:
                                    (e.g. Entra OIDC without an email claim: preferred_username).
   --allow-sso-change               Allow replacing a different SSO provider already set up (users signed in through
                                    the old one are orphaned).
+  --release-dir <dir>              A release downloaded from Distr (scripts/straiker-release.sh pull). The artifacts-sync phase pushes
+                                   its images to this install's ECR and its models to the models bucket from this machine, instead of
+                                   the in-cluster copy from Straiker's registry. Needs oras and aws on this machine.
   --charts-from-ecr                Package the charts in charts/, push them to the install's ECR ("<prefix>/charts/<name>", OCI) and
                                    deploy every release from there (the reference layout; Argo-compatible). Needs the aws-artifacts phase
                                    (it creates the repos). Remembered; if a chart cannot be packaged or pulled, that chart is
@@ -1877,6 +1883,10 @@ parse_args() {
       --charts-from-ecr)
         CHARTS_FROM_ECR=true
         shift
+        ;;
+      --release-dir)
+        RELEASE_DIR=${2:-}
+        shift 2
         ;;
       --otel)
         ENABLE_OTEL=true
@@ -3840,6 +3850,57 @@ check_artifact_job() {
   echo "running"
 }
 
+# --release-dir: loads a release downloaded from Distr into this install's ECR and models bucket, from this machine.
+# Replaces the in-cluster mirror/model-sync Jobs (no Straiker registry, bucket or broker token involved). Images go to
+# "<registry>/<prefix>/<repo>:<tag>" exactly where those Jobs would put them; models to s3://<bucket>/models/<name>/.
+# Idempotent: an image already in ECR with the release's digest is skipped; aws s3 sync only uploads what differs.
+release_load_artifacts() {
+  local ecr_registry_prefixed=$1 models_bucket=$2 manifest="${RELEASE_DIR}/release.json"
+  require_command aws
+  require_command oras
+  require_command python3
+  [[ -s "${manifest}" ]] || { mark_phase_blocked "--release-dir '${RELEASE_DIR}' has no release.json. Run scripts/straiker-release.sh pull first."; return 1; }
+
+  local ecr_host="${ecr_registry_prefixed%%/*}"
+  if ! aws ecr get-login-password --region "${AWS_REGION}" | oras login "${ecr_host}" -u AWS --password-stdin >/dev/null 2>&1; then
+    mark_phase_blocked "Could not log in to ECR ${ecr_host} with oras. Check AWS credentials for region ${AWS_REGION}."
+    return 1
+  fi
+
+  local repo tag digest got n=0 total
+  total="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["images"]))' "${manifest}")"
+  log "Loading ${total} images from ${RELEASE_DIR}/images into ${ecr_registry_prefixed}..."
+  while IFS=$'\t' read -r repo tag digest; do
+    n=$((n + 1))
+    [[ -d "${RELEASE_DIR}/images/${repo}/${tag}" ]] || { mark_phase_blocked "Image ${repo}:${tag} is missing from ${RELEASE_DIR}/images. Re-run scripts/straiker-release.sh pull."; return 1; }
+    got="$(oras manifest fetch --descriptor "${ecr_registry_prefixed}/${repo}:${tag}" 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest",""))' 2>/dev/null || true)"
+    if [[ "${got}" == "${digest}" ]]; then
+      log "  [${n}/${total}] ${repo}:${tag} already in ECR."
+      continue
+    fi
+    log "  [${n}/${total}] ${repo}:${tag} -> ECR"
+    if ! oras cp --from-oci-layout "${RELEASE_DIR}/images/${repo}/${tag}:${tag}" "${ecr_registry_prefixed}/${repo}:${tag}" >/dev/null; then
+      mark_phase_blocked "Could not push ${repo}:${tag} to ${ecr_registry_prefixed}. Does the ECR repository '${TF_PREFIX}/${repo}' exist (terraform/aws/artifacts image_names)?"
+      return 1
+    fi
+  done < <(python3 -c '
+import json,sys
+for i in json.load(open(sys.argv[1]))["images"]:
+    print("\t".join([i["repo"], i["tag"], i["digest"]]))' "${manifest}")
+
+  local models=() m
+  while IFS= read -r m; do [[ -n "${m}" ]] && models+=("${m}"); done < <(inference_models_for_products)
+  for m in "${models[@]}"; do
+    [[ -d "${RELEASE_DIR}/models/${m}" ]] || { mark_phase_blocked "Model '${m}' is missing from ${RELEASE_DIR}/models. Re-run scripts/straiker-release.sh pull."; return 1; }
+    log "Uploading model '${m}' to s3://${models_bucket}/models/${m}/ (only changed files)..."
+    aws s3 sync "${RELEASE_DIR}/models/${m}/" "s3://${models_bucket}/models/${m}/" \
+      --region "${AWS_REGION}" --exclude '.straiker-done-*' --only-show-errors \
+      || { mark_phase_blocked "Uploading model '${m}' to s3://${models_bucket} failed. Re-run the same command to continue."; return 1; }
+  done
+  log "Release ${RELEASE_DIR} loaded: ${total} images in ECR, ${#models[@]} model(s) in s3://${models_bucket}/models/."
+}
+
 # Installs the straiker-artifact chart (mirror + model-sync Jobs) and blocks
 # the installer here until both report complete — straiker-system's workloads
 # pull images through the ECR mirror these Jobs populate, so it must not run first.
@@ -3854,6 +3915,22 @@ phase_artifacts_sync() {
   # and disturbing already-running Jobs for no reason. So: once the release
   # exists, later invocations skip straight to polling. --rerun-phase forces a
   # real redo (e.g. to fix a bad credential).
+  if [[ -n "${RELEASE_DIR}" ]]; then
+    local rel_ecr rel_bucket
+    rel_ecr="$(get_metadata "ecr_registry")"
+    rel_bucket="$(get_metadata "models_bucket")"
+    if [[ -z "${rel_ecr}" || -z "${rel_bucket}" ]]; then
+      mark_phase_blocked "Missing ecr_registry/models_bucket from install state. Run phase 'aws-artifacts' first."
+      return
+    fi
+    # "if !": a load problem is reported with mark_phase_blocked (re-runnable), not as a failed phase.
+    if ! release_load_artifacts "$(docker_registry_with_prefix "${rel_ecr}")" "${rel_bucket}"; then
+      return
+    fi
+    # Bifrost in the release is already the multi-arch upstream index (publish-to-distr.sh), so no override is needed.
+    return
+  fi
+
   if [[ "${FORCE_RERUN}" != true ]] && helm status "${ARTIFACT_RELEASE}" --namespace "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
     log "Release '${ARTIFACT_RELEASE}' already installed — checking progress (use --rerun-phase to force reinstall)."
   else
@@ -5894,6 +5971,7 @@ write_sso_handoff() {
         echo
         echo "- Redirect (callback) URI: ${redir}"
         echo "- Scopes: openid email profile"
+        echo "- Token endpoint authentication method: client secret in the request body (client_secret_post). Amazon Cognito does not support HTTP Basic towards an external provider; PingOne defaults to Basic, so set \"Client Secret Post\" there"
         echo "- Make sure ID tokens carry the user's email (claim \`$(get_metadata "sso_email_claim")\` if not the standard \`email\`)"
         echo
         echo "Then send us the issuer URL, client ID and client secret. The issuer must be publicly reachable."

@@ -44,6 +44,7 @@ ENABLE_CLOUDTRAIL=""
 CLOUDTRAIL_MULTI_REGION=""
 KMS_LAYOUT=""
 CHARTS_FROM_ECR=""
+RELEASE_DIR=""
 ENABLE_OTEL=""
 AURORA_LAYOUT=""
 BIFROST_POSTGRES=""
@@ -97,6 +98,8 @@ Options:
                              api.D certificate is still requested by the installer (it prints the DNS records to add)
   --products LIST            default: ascend,defend
   --ai-provider-mode M       own-keys | bedrock | trial-key (default: bedrock)
+  --release-dir DIR          a release downloaded from Distr with scripts/straiker-release.sh pull: images and models are
+                             loaded from DIR into your ECR and S3 bucket (no copy from Straiker's registry). Needs oras.
   --multiarch-override R=U   image whose copy in your ECR lacks arm64, as <repo>:<tag>=<upstream> (repeatable).
                              Default: maximhq/bifrost at the tag pinned in charts/straiker-artifact, from Docker Hub.
                              Pass --multiarch-override none to disable.
@@ -172,6 +175,7 @@ while [[ $# -gt 0 ]]; do
     --production-sizing) PRODUCTION_SIZING=true; shift ;;
     --kms-layout) KMS_LAYOUT="${2:-}"; shift 2 ;;
     --charts-from-ecr) CHARTS_FROM_ECR=true; shift ;;
+    --release-dir) RELEASE_DIR="${2:-}"; shift 2 ;;
     --otel) ENABLE_OTEL=true; shift ;;
     --aurora-layout) AURORA_LAYOUT="${2:-}"; shift 2 ;;
     --bifrost-postgres) BIFROST_POSTGRES=true; shift ;;
@@ -230,6 +234,12 @@ fi
 [[ "${TIMEOUT_MINUTES}" =~ ^[0-9]+$ && "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || die "--timeout-minutes and --poll-seconds must be numbers"
 if [[ -n "${CUSTOMER_KEY_FILE}" && ! -r "${CUSTOMER_KEY_FILE}" ]]; then die "cannot read --customer-key-file ${CUSTOMER_KEY_FILE}"; fi
 
+if [[ -n "${RELEASE_DIR}" ]]; then
+  [[ -s "${RELEASE_DIR}/release.json" ]] || die "--release-dir ${RELEASE_DIR} has no release.json (run scripts/straiker-release.sh pull first)"
+  RELEASE_DIR="$(cd "${RELEASE_DIR}" && pwd)"
+  MULTIARCH_SET=true # the release already carries the multi-arch bifrost; nothing is copied from Docker Hub
+fi
+
 # Default multi-arch fix: the bifrost image the Straiker mirror carries is amd64-only, but the shared node pool is
 # arm64, so bifrost dies with "exec format error". Copy the multi-arch upstream into this account's ECR.
 if [[ "${MULTIARCH_SET}" != true ]]; then
@@ -244,6 +254,7 @@ export MULTIARCH_OVERRIDES
 preflight() {
   local missing=() t
   for t in aws kubectl helm python3 curl; do command -v "${t}" >/dev/null 2>&1 || missing+=("${t}"); done
+  if [[ -n "${RELEASE_DIR}" ]] && ! command -v oras >/dev/null 2>&1; then missing+=("oras (scripts/straiker-release.sh tools)"); fi
   if [[ -n "${MULTIARCH_OVERRIDES}" ]] && ! command -v crane >/dev/null 2>&1; then missing+=("crane (brew install crane)"); fi
   [[ ${#missing[@]} -eq 0 ]] || die "missing tools: ${missing[*]}"
 
@@ -462,6 +473,7 @@ run_args=("${base_args[@]}" --install-eks --data-layer --provision-strategy "${P
 [[ "${PRODUCTION_SIZING}" == true ]] && run_args+=(--production-sizing)
 [[ -n "${KMS_LAYOUT}" ]] && run_args+=(--kms-layout "${KMS_LAYOUT}")
 [[ "${CHARTS_FROM_ECR}" == true ]] && run_args+=(--charts-from-ecr)
+[[ -n "${RELEASE_DIR}" ]] && run_args+=(--release-dir "${RELEASE_DIR}")
 [[ "${ENABLE_OTEL}" == true ]] && run_args+=(--otel)
 [[ -n "${AURORA_LAYOUT}" ]] && run_args+=(--aurora-layout "${AURORA_LAYOUT}")
 [[ "${BIFROST_POSTGRES}" == true ]] && run_args+=(--bifrost-postgres)
