@@ -292,7 +292,7 @@ push_installer() {
   tar -czf "${tarball}" -C "${REPO_ROOT}" \
     --exclude='.terraform' --exclude='.terraform.lock.hcl.bak' --exclude='*.tfstate*' --exclude='.terragrunt-cache' \
     --exclude='scripts/release' --exclude='scripts/tests' --exclude='scripts/protected-clusters.txt' --exclude='*/*.md' \
-    scripts terraform charts LICENSE THIRD_PARTY_LICENSES.md
+    scripts terraform charts $(cd "${REPO_ROOT}" && ls LICENSE THIRD_PARTY_LICENSES.md 2>/dev/null)
   log "push  installer -> $(jq -r '.installer.dest' "${LIST}")"
   (cd "${WORK_DIR}" && oras push "$(jq -r '.installer.dest' "${LIST}")" \
     --artifact-type application/vnd.straiker.onprem.installer.v1 \
