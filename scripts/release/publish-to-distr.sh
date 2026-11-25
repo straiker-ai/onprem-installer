@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Publishes one on-prem release to Distr's OCI registry (registry.straiker.ai), from what already exists:
 #   images  : Straiker ECR (charts/straiker-artifact/values.yaml imageMirror list, tags pinned by charts/image-tags.yaml)
+#             -> ONE artifact images:<version>, one layer (an OCI-layout tar, all platforms) per image
 #   charts  : this repo's charts/ + the third-party charts the installer uses (versions from install-straiker.sh)
+#             -> ONE artifact charts:<version>, one layer (.tgz) per chart
 #   installer: this repo's scripts + terraform + charts, as one tarball
-#   models  : S3 onprem-artifact-models (charts/straiker-artifact/values.yaml modelSync list)
+#   models  : S3 onprem-artifact-models (charts/straiker-artifact/values.yaml modelSync list), one artifact per model
 #   release : release.json listing every artifact with its digest (signed with cosign when --sign-key is given)
+# A layer that is already in the registry is not uploaded again, so a new version re-uploads only what changed.
 # See doc/release-delivery-design.md.
 #
 #   scripts/release/publish-to-distr.sh --version onprem-2026.12.0                      # plan only (default): lists, pushes nothing
@@ -31,7 +34,7 @@ SIZES=false
 ONLY="images,charts,installer,models,release"
 SIGN_KEY=""
 
-usage() { sed -n 2,19p "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n 2,22p "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -87,13 +90,14 @@ build_list() {
   # repo = the image's path in the customer's ECR ("<prefix>/<repo>"), the same destRepository the in-cluster mirror uses.
   # Bifrost: Straiker's ECR copy is amd64-only and the shared pool is Graviton, so the release takes the multi-arch
   # upstream index instead (the same fix install-straiker.sh's ensure_multiarch_images applies after the mirror).
-  images="$(yq -o=json '.imageMirror.images' "${ARTIFACT_VALUES}" | jq --arg reg "${REGISTRY}" '[.[] |
+  images="$(yq -o=json '.imageMirror.images' "${ARTIFACT_VALUES}" | jq --arg reg "${REGISTRY}" --arg v "${VERSION}" '[.[] |
       (.source | sub("\\s+$"; "")) as $src
       | (.destRepository // ($src | sub("^[^/]+/onprem-base/"; "") | sub("^[^/]+/"; ""))) as $repo
       | (.tag | tostring) as $tag | {
       source: ((if $repo == "maximhq/bifrost" then "docker.io/maximhq/bifrost" else $src end) + ":" + $tag),
       repo: $repo, tag: $tag,
-      dest: ($reg + "/images/" + $repo + ":" + $tag),
+      dest: ($reg + "/images:" + $v),
+      file: (($repo | gsub("/"; "__")) + "__" + $tag + ".tar"),
       sku: (.sku // "base")
     }]')"
   models="$(yq -o=json '.modelSync' "${ARTIFACT_VALUES}" | jq --arg reg "${REGISTRY}" '. as $m | [.models[] | {
@@ -103,13 +107,13 @@ build_list() {
     }]')"
   charts="$(for f in "${REPO_ROOT}"/charts/*/Chart.yaml; do
       yq -o=json '.' "$f" | jq --arg d "$(dirname "$f")" '{name: .name, version: (.version | tostring), path: $d}'
-    done | jq -s --arg reg "${REGISTRY}" '[.[] | . + {dest: ($reg + "/charts/" + .name + ":" + .version)}]')"
+    done | jq -s --arg reg "${REGISTRY}" --arg v "${VERSION}" '[.[] | . + {dest: ($reg + "/charts:" + $v), file: (.name + "-" + .version + ".tgz")}]')"
   jq -n --arg v "${VERSION}" --arg reg "${REGISTRY}" --argjson images "${images}" --argjson models "${models}" \
     --argjson charts "${charts}" --argjson tp "$(third_party_charts)" '{
       version: $v, registry: $reg,
       installer: {dest: ($reg + "/installer:" + $v)},
       images: $images, charts: $charts,
-      thirdPartyCharts: [$tp[] | . + {dest: ($reg + "/charts/" + .name + ":" + .version)}],
+      thirdPartyCharts: [$tp[] | . + {dest: ($reg + "/charts:" + $v), file: (.name + "-" + .version + ".tgz")}],
       models: $models
     }' > "${LIST}"
 }
@@ -175,33 +179,63 @@ distr_login() {
   fi
 }
 
-push_images() {
-  aws_src ecr get-login-password | crane auth login "$(jq -r '.images[0].source' "${LIST}" | cut -d/ -f1)" -u AWS --password-stdin >/dev/null
-  local src dst
-  while IFS=$'\t' read -r src dst; do
-    if crane digest "${dst}" >/dev/null 2>&1 && [[ "$(crane digest "${dst}")" == "$(crane digest "${src}")" ]]; then
-      log "skip  ${dst} (same digest already there)"; continue
-    fi
-    log "copy  ${src} -> ${dst}"
-    crane copy "${src}" "${dst}"
-  done < <(jq -r '.images[] | [.source, .dest] | @tsv' "${LIST}")
+pack_tar() { # <dir> <tar>: a plain tar of an OCI layout; byte-stable where GNU tar allows, so unchanged images keep their digest
+  if tar --version 2>/dev/null | grep -q GNU; then
+    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$2" -C "$1" .
+  else
+    tar -cf "$2" -C "$1" .
+  fi
 }
 
+# All images go into ONE artifact (images:<version>), one layer per image: an OCI-layout tar holding every platform.
+# A layer already in the registry is skipped by the push, so a new version uploads only the images that changed.
+push_images() {
+  local ecr_host; ecr_host="$(jq -r '.images[0].source' "${LIST}" | cut -d/ -f1)"
+  aws_src ecr get-login-password | crane auth login "${ecr_host}" -u AWS --password-stdin >/dev/null
+  aws_src ecr get-login-password | oras login "${ecr_host}" -u AWS --password-stdin >/dev/null
+  local cache="${WORK_DIR}/images" ann="${WORK_DIR}/images-annotations.json" src repo tag sd file layout anns='{}'
+  local files=()
+  mkdir -p "${cache}"
+  while IFS=$'\t' read -r src repo tag file; do
+    sd="$(crane digest "${src}")"
+    if [[ -f "${cache}/${file}" && "$(cat "${cache}/${file}.digest" 2>/dev/null)" == "${sd}" ]]; then
+      log "cached ${file}"
+    else
+      log "pack  ${src}"
+      layout="$(mktemp -d "${WORK_DIR}/layout.XXXXXX")"
+      oras cp --to-oci-layout "${src}" "${layout}:${tag}" >/dev/null
+      rm -f "${cache}/${file}"; pack_tar "${layout}" "${cache}/${file}"; rm -rf "${layout}"
+      printf '%s' "${sd}" > "${cache}/${file}.digest"
+    fi
+    files+=("${file}:application/vnd.straiker.onprem.image.v1.tar")
+    anns="$(jq --arg f "${file}" --arg r "${repo}" --arg t "${tag}" --arg d "${sd}" \
+      '. + {($f): {"io.straiker.repo": $r, "io.straiker.tag": $t, "io.straiker.digest": $d}}' <<<"${anns}")"
+  done < <(jq -r '.images[] | [.source, .repo, .tag, .file] | @tsv' "${LIST}")
+  printf '%s' "${anns}" > "${ann}"
+  log "push  ${#files[@]} images -> ${REGISTRY}/images:${VERSION} (layers already there are skipped)"
+  (cd "${cache}" && oras push "${REGISTRY}/images:${VERSION}" --artifact-type application/vnd.straiker.onprem.images.v1 \
+    --annotation-file "${ann}" "${files[@]}" >/dev/null)
+  rm -rf "${cache}"
+}
+
+# All charts (ours + third-party) go into ONE artifact (charts:<version>), one .tgz layer per chart.
 push_charts() {
   local out="${WORK_DIR}/charts" path name ver
-  mkdir -p "${out}"
+  rm -rf "${out}"; mkdir -p "${out}"
   while IFS=$'\t' read -r name ver path; do
     log "chart ${name} ${ver}"
     helm package "${path}" -d "${out}" >/dev/null
-    helm push "${out}/${name}-${ver}.tgz" "oci://${REGISTRY}/charts" >/dev/null
   done < <(jq -r '.charts[] | [.name, .version, .path] | @tsv' "${LIST}")
   local from repo
   while IFS=$'\t' read -r name ver from repo; do
     log "chart ${name} ${ver} (third-party)"
     if [[ -n "${from}" ]]; then helm pull "${from}" --version "${ver}" -d "${out}" >/dev/null
     else helm pull "${name}" --repo "${repo}" --version "${ver}" -d "${out}" >/dev/null; fi
-    helm push "${out}/${name}-${ver}.tgz" "oci://${REGISTRY}/charts" >/dev/null
   done < <(jq -r '.thirdPartyCharts[] | [.name, .version, (.from // ""), (.repo // "")] | @tsv' "${LIST}")
+  local files=() f
+  for f in "${out}"/*.tgz; do files+=("$(basename "${f}"):application/vnd.straiker.onprem.chart.v1.tgz"); done
+  log "push  ${#files[@]} charts -> ${REGISTRY}/charts:${VERSION}"
+  (cd "${out}" && oras push "${REGISTRY}/charts:${VERSION}" --artifact-type application/vnd.straiker.onprem.charts.v1 "${files[@]}" >/dev/null)
 }
 
 push_installer() {
@@ -228,24 +262,31 @@ push_models() {
     log "push  model ${dst}"
     (cd "${dir}" && find . -type f ! -name '.*' | sed 's|^\./||' | sort \
       | xargs oras push "${dst}" --artifact-type application/vnd.straiker.onprem.model.v1 >/dev/null)
+    rm -rf "${dir}"
   done < <(jq -r '.models[] | [.name, .source, .dest] | @tsv' "${LIST}")
 }
 
 push_release() {
-  local manifest="${WORK_DIR}/release.json"
-  log "digest every artifact for the release manifest"
-  jq -c '.images[]' "${LIST}" >/dev/null
-  local tmp; tmp="$(mktemp)"
-  jq -r '[.installer.dest] + [.images[].dest] + [.charts[].dest] + [.thirdPartyCharts[].dest] + [.models[].dest] | .[]' "${LIST}" \
-    | while read -r ref; do printf '%s\t%s\n' "${ref}" "$(crane digest "${ref}")"; done > "${tmp}"
-  jq -R -s --slurpfile list "${LIST}" '
-    (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add) as $d
-    | $list[0] | del(.charts[].path)
-    | .installer.digest = $d[.installer.dest]
-    | .images |= map(.digest = $d[.dest]) | .charts |= map(.digest = $d[.dest])
-    | .thirdPartyCharts |= map(.digest = $d[.dest]) | .models |= map(.digest = $d[.dest])
-    | .createdAt = (now | todate) | .gitCommit = env.GIT_COMMIT' "${tmp}" > "${manifest}"
-  rm -f "${tmp}"
+  local manifest="${WORK_DIR}/release.json" img_ref="${REGISTRY}/images:${VERSION}" ch_ref="${REGISTRY}/charts:${VERSION}"
+  log "read the images artifact and digest every artifact for the release manifest"
+  local layers md ref
+  layers="$(oras manifest fetch "${img_ref}" | jq '[.layers[] | {
+    file: .annotations["org.opencontainers.image.title"], layerDigest: .digest, size: .size,
+    repo: .annotations["io.straiker.repo"], tag: .annotations["io.straiker.tag"], sourceDigest: .annotations["io.straiker.digest"]}]')" \
+    || { echo "ERROR: ${img_ref} is not in the registry yet. Push the images first." >&2; exit 1; }
+  md="$(jq -r '.models[].dest' "${LIST}" | while read -r ref; do printf '%s\t%s\n' "${ref}" "$(crane digest "${ref}")"; done \
+    | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add // {}')"
+  jq --argjson layers "${layers}" --argjson md "${md}" --arg ir "${img_ref}" --arg di "$(crane digest "${img_ref}")" \
+    --arg cr "${ch_ref}" --arg dc "$(crane digest "${ch_ref}")" --arg dinst "$(crane digest "$(jq -r '.installer.dest' "${LIST}")")" '
+    del(.charts[].path)
+    | .imagesArtifact = {dest: $ir, digest: $di} | .chartsArtifact = {dest: $cr, digest: $dc}
+    | .installer.digest = $dinst
+    | .images |= map(. as $i | ($layers | map(select(.repo == $i.repo and .tag == $i.tag)) | .[0]) as $l
+        | $i + {digest: $l.sourceDigest, layerDigest: $l.layerDigest})
+    | .models |= map(.digest = $md[.dest])
+    | .createdAt = (now | todate) | .gitCommit = env.GIT_COMMIT' "${LIST}" > "${manifest}"
+  jq -e '[.images[] | select(.layerDigest == null)] | length == 0' "${manifest}" >/dev/null \
+    || { echo "ERROR: some images in the list are not in ${img_ref}. Push the images again." >&2; exit 1; }
   local files=("release.json:application/vnd.straiker.onprem.release.v1+json")
   if [[ -n "${SIGN_KEY}" ]]; then
     cosign sign-blob --yes --key "${SIGN_KEY}" --output-signature "${WORK_DIR}/release.json.sig" "${manifest}" >/dev/null

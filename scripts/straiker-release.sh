@@ -8,9 +8,9 @@
 # pull downloads, into <dir> (default ~/straiker-release/<ver>):
 #   release.json   the list of every artifact with its digest (pushed by scripts/release/publish-to-distr.sh)
 #   installer/     the installer (scripts, terraform, charts), extracted
-#   images/<repo>/<tag>  every container image, as an OCI layout (all platforms)
+#   images/<repo>/<tag>  every container image, as an OCI layout (all platforms); one layer of the images:<ver> artifact each
 #   models/<name>  every vLLM model's files
-#   charts/        the Helm charts, as .tgz files
+#   charts/        the Helm charts, as .tgz files (all in the one charts:<ver> artifact)
 # Then: scripts/install-data-layer.sh ... --release-dir <dir> loads the images into your ECR and the models into your
 # S3 bucket during the install, instead of copying them from Straiker. See the install guide Straiker sends you.
 #
@@ -110,12 +110,14 @@ distr_login() {
 # ---------------------------------------------------------------- pull
 done_mark() { echo "$1/.straiker-done-${2#sha256:}"; } # marker: this folder holds exactly that digest
 
-pull_one_image() { # repo tag ref digest
-  local repo=$1 tag=$2 ref=$3 digest=$4 dir="${DIR}/images/$1/$2"
+pull_one_image() { # repo tag artifactRef sourceDigest layerDigest: fetch that one layer of images:<ver> and unpack it
+  local repo=$1 tag=$2 ref=$3 digest=$4 layer=$5 dir="${DIR}/images/$1/$2"
   [[ -f "$(done_mark "${dir}" "${digest}")" ]] && { echo "  ok    image ${repo}:${tag}"; return; }
   echo "  pull  image ${repo}:${tag}"
   rm -rf "${dir}"; mkdir -p "${dir}"
-  oras cp --to-oci-layout "${ref%:*}@${digest}" "${dir}:${tag}" >/dev/null
+  local tarball="${DIR}/.image-download.tar"
+  oras blob fetch "${ref%:*}@${layer}" --output "${tarball}" >/dev/null
+  tar -xf "${tarball}" -C "${dir}"; rm -f "${tarball}"
   touch "$(done_mark "${dir}" "${digest}")"
 }
 
@@ -128,12 +130,13 @@ pull_one_model() { # name ref digest
   touch "$(done_mark "${dir}" "${digest}")"
 }
 
-pull_one_chart() { # name version ref digest
-  local name=$1 ver=$2 ref=$3 digest=$4 out="${DIR}/charts"
-  [[ -f "${out}/${name}-${ver}.tgz" && -f "$(done_mark "${out}" "${digest}")" ]] && { echo "  ok    chart ${name} ${ver}"; return; }
-  echo "  pull  chart ${name} ${ver}"
-  mkdir -p "${out}"
-  helm pull "oci://${ref%:*}" --version "${ver}" -d "${out}" >/dev/null
+pull_charts() { # all charts are one artifact, charts:<ver>
+  local ref digest out="${DIR}/charts"
+  ref="$(jq -r '.chartsArtifact.dest' "${DIR}/release.json")"; digest="$(jq -r '.chartsArtifact.digest' "${DIR}/release.json")"
+  if [[ -f "$(done_mark "${out}" "${digest}")" ]]; then echo "  ok    charts"; return; fi
+  echo "  pull  charts"
+  rm -rf "${out}"; mkdir -p "${out}"
+  oras pull "${ref%:*}@${digest}" -o "${out}" >/dev/null
   touch "$(done_mark "${out}" "${digest}")"
 }
 
@@ -161,7 +164,7 @@ cmd_pull() {
   oras pull "${REGISTRY}/release:${VERSION}" -o "${DIR}" >/dev/null \
     || die "could not download release ${VERSION}. Check the version with Straiker, and that your Distr account has access to it."
   [[ -s "${DIR}/release.json" ]] || die "release ${VERSION} has no release.json."
-  jq -e '.images and .models and .installer' "${DIR}/release.json" >/dev/null || die "release.json is not valid."
+  jq -e '.images and .models and .installer and .imagesArtifact and .chartsArtifact' "${DIR}/release.json" >/dev/null || die "release.json is not valid."
 
   local free_gb need
   free_gb="$(df -Pk "${DIR}" | awk 'NR==2 {print int($4/1024/1024)}')"
@@ -172,11 +175,11 @@ cmd_pull() {
   log "Downloading the installer"
   pull_installer
   log "Downloading $(jq '.images | length' "${DIR}/release.json") container images"
-  while IFS=$'\t' read -r repo tag ref digest; do pull_one_image "${repo}" "${tag}" "${ref}" "${digest}"
-  done < <(jq -r '.images[] | [.repo, .tag, .dest, .digest] | @tsv' "${DIR}/release.json")
+  local layer
+  while IFS=$'\t' read -r repo tag ref digest layer; do pull_one_image "${repo}" "${tag}" "${ref}" "${digest}" "${layer}"
+  done < <(jq -r '.images[] | [.repo, .tag, .dest, .digest, .layerDigest] | @tsv' "${DIR}/release.json")
   log "Downloading $(jq '(.charts | length) + (.thirdPartyCharts | length)' "${DIR}/release.json") Helm charts"
-  while IFS=$'\t' read -r name ver ref digest; do pull_one_chart "${name}" "${ver}" "${ref}" "${digest}"
-  done < <(jq -r '(.charts + .thirdPartyCharts)[] | [.name, .version, .dest, .digest] | @tsv' "${DIR}/release.json")
+  pull_charts
   log "Downloading $(jq '.models | length' "${DIR}/release.json") AI models (this is the long part)"
   while IFS=$'\t' read -r name ref digest; do pull_one_model "${name}" "${ref}" "${digest}"
   done < <(jq -r '.models[] | [.name, .dest, .digest] | @tsv' "${DIR}/release.json")
@@ -201,6 +204,10 @@ cmd_verify() {
     [[ -f "$(done_mark "${DIR}/models/${name}" "${digest}")" ]] && [[ -n "$(ls -A "${DIR}/models/${name}" 2>/dev/null)" ]] \
       || { echo "  BAD   model ${name} (missing or incomplete)"; bad=$((bad + 1)); }
   done < <(jq -r '.models[] | [.name, .digest] | @tsv' "${DIR}/release.json")
+  local f
+  while read -r f; do
+    [[ -s "${DIR}/charts/${f}" ]] || { echo "  BAD   chart ${f} (missing)"; bad=$((bad + 1)); }
+  done < <(jq -r '(.charts + .thirdPartyCharts)[] | .file' "${DIR}/release.json")
   [[ -x "${DIR}/installer/scripts/install-data-layer.sh" ]] || { echo "  BAD   installer (not extracted)"; bad=$((bad + 1)); }
   [[ "${bad}" -eq 0 ]] || die "${bad} item(s) failed the check. Re-run the same pull command: it downloads only what is missing."
   log "Everything matches release.json."
