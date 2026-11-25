@@ -245,10 +245,26 @@ push_images() {
   rm -rf "${cache}"
 }
 
+# Charts with dependencies (straiker-system -> opensearch, straiker-core) need them in charts/<name>/charts/ before they are
+# packaged. They are fetched here, so the released chart and the installer bundle carry them and need no internet later.
+build_chart_deps() {
+  local cy dir url
+  for cy in "${REPO_ROOT}"/charts/*/Chart.yaml; do
+    dir="$(dirname "${cy}")"
+    [[ "$(yq '.dependencies | length' "${cy}")" -gt 0 ]] || continue
+    while read -r url; do
+      [[ "${url}" == http* ]] && helm repo add --force-update "dep-$(printf '%s' "${url}" | cksum | cut -d' ' -f1)" "${url}" >/dev/null
+    done < <(yq '.dependencies[].repository' "${cy}")
+    log "deps  $(basename "${dir}")"
+    helm dependency build "${dir}" >/dev/null
+  done
+}
+
 # All charts (ours + third-party) go into ONE artifact (charts:<version>), one .tgz layer per chart.
 push_charts() {
   local out="${WORK_DIR}/charts" path name ver
   rm -rf "${out}"; mkdir -p "${out}"
+  build_chart_deps
   while IFS=$'\t' read -r name ver path; do
     log "chart ${name} ${ver}"
     helm package "${path}" -d "${out}" >/dev/null
@@ -267,6 +283,7 @@ push_charts() {
 
 push_installer() {
   local tarball="${WORK_DIR}/straiker-installer-${VERSION}.tar.gz"
+  build_chart_deps
   log "pack  installer -> ${tarball}"
   tar -czf "${tarball}" -C "${REPO_ROOT}" \
     --exclude='.terraform' --exclude='.terraform.lock.hcl.bak' --exclude='*.tfstate*' --exclude='.terragrunt-cache' \
