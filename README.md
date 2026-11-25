@@ -45,6 +45,11 @@ This mode does **not** create a NAT gateway — your supplied private subnets mu
 own outbound internet routing. Like `--cloud-provider`/`--provision-strategy`, this is first-run-only:
 once set, it's permanent for the install recorded in `~/.straiker/install.json`.
 
+## Hardware sizing
+
+GPU, CPU, memory, storage, and bundled-model requirements for Ascend are in
+[doc/hardware-sizing.md](doc/hardware-sizing.md).
+
 ## Disable the default admin login
 
 Every install ships with a bootstrap admin login (`admin@straiker.internal`, fixed regardless of
