@@ -33,7 +33,7 @@ MODE="plan"
 SIZES=false
 ONLY="images,charts,installer,models,release"
 SIGN_KEY=""
-CHUNK_GIB=2 # layers/files above this are uploaded as parts (the Distr gateway times out finalizing one huge blob)
+CHUNK_GIB=1 # layers/files above this are uploaded as parts (the Distr gateway times out finalizing one huge blob)
 
 usage() { sed -n 2,22p "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -182,6 +182,15 @@ distr_login() {
   fi
 }
 
+push_retry() { # <oras push args...>: the push resumes (stored blobs are skipped), so a gateway timeout is retried
+  local n
+  for n in 1 2 3 4 5 6; do
+    oras push "$@" >/dev/null && return 0
+    log "WARN  oras push failed (attempt ${n}/6); retrying in 20s (blobs already stored are skipped)"; sleep 20
+  done
+  return 1
+}
+
 chunk_file() { # <file>: when larger than the chunk size, replace it by <file>.part0000, .part0001, ... (joined again by pull)
   local sz; sz="$(wc -c < "$1" | tr -d ' ')"
   (( sz > CHUNK_BYTES )) || return 0
@@ -208,7 +217,7 @@ push_images() {
   local p i
   while IFS=$'\t' read -r src repo tag file; do
     sd="$(crane digest "${src}")"
-    if [[ "$(cat "${cache}/${file}.digest" 2>/dev/null)" == "${sd}" && ( -f "${cache}/${file}" || -f "${cache}/${file}.part0000" ) ]]; then
+    if [[ "$(cat "${cache}/${file}.digest" 2>/dev/null)" == "${sd} ${CHUNK_GIB}" && ( -f "${cache}/${file}" || -f "${cache}/${file}.part0000" ) ]]; then
       log "cached ${file}"
     else
       log "pack  ${src}"
@@ -216,7 +225,7 @@ push_images() {
       oras cp --to-oci-layout "${src}" "${layout}:${tag}" >/dev/null
       rm -f "${cache}/${file}" "${cache}/${file}".part*; pack_tar "${layout}" "${cache}/${file}"; rm -rf "${layout}"
       chunk_file "${cache}/${file}"
-      printf '%s' "${sd}" > "${cache}/${file}.digest"
+      printf '%s' "${sd} ${CHUNK_GIB}" > "${cache}/${file}.digest"
     fi
     if [[ -f "${cache}/${file}" ]]; then parts=("${file}"); else
       parts=(); while read -r p; do parts+=("$(basename "${p}")"); done < <(ls "${cache}/${file}".part* | sort)
@@ -231,8 +240,8 @@ push_images() {
   done < <(jq -r '.images[] | [.source, .repo, .tag, .file] | @tsv' "${LIST}")
   printf '%s' "${anns}" > "${ann}"
   log "push  ${#files[@]} images -> ${REGISTRY}/images:${VERSION} (layers already there are skipped)"
-  (cd "${cache}" && oras push "${REGISTRY}/images:${VERSION}" --artifact-type application/vnd.straiker.onprem.images.v1 \
-    --annotation-file "${ann}" "${files[@]}" >/dev/null)
+  (cd "${cache}" && push_retry "${REGISTRY}/images:${VERSION}" --artifact-type application/vnd.straiker.onprem.images.v1 \
+    --annotation-file "${ann}" "${files[@]}")
   rm -rf "${cache}"
 }
 
@@ -253,7 +262,7 @@ push_charts() {
   local files=() f
   for f in "${out}"/*.tgz; do files+=("$(basename "${f}"):application/vnd.straiker.onprem.chart.v1.tgz"); done
   log "push  ${#files[@]} charts -> ${REGISTRY}/charts:${VERSION}"
-  (cd "${out}" && oras push "${REGISTRY}/charts:${VERSION}" --artifact-type application/vnd.straiker.onprem.charts.v1 "${files[@]}" >/dev/null)
+  (cd "${out}" && push_retry "${REGISTRY}/charts:${VERSION}" --artifact-type application/vnd.straiker.onprem.charts.v1 "${files[@]}")
 }
 
 push_installer() {
@@ -270,7 +279,7 @@ push_installer() {
 }
 
 push_models() {
-  local name src dst dir
+  local name src dst dir f mfiles
   while IFS=$'\t' read -r name src dst; do
     if crane digest "${dst}" >/dev/null 2>&1; then log "skip  model ${dst} (tag already there)"; continue; fi
     dir="${WORK_DIR}/models/${name}"
@@ -279,8 +288,8 @@ push_models() {
     aws_src s3 sync "${src}/" "${dir}/" --only-show-errors
     find "${dir}" -type f -size +"${CHUNK_BYTES}"c | while read -r f; do chunk_file "${f}"; done
     log "push  model ${dst}"
-    (cd "${dir}" && find . -type f ! -name '.*' | sed 's|^\./||' | sort \
-      | xargs oras push "${dst}" --artifact-type application/vnd.straiker.onprem.model.v1 >/dev/null)
+    mfiles=(); while IFS= read -r f; do mfiles+=("${f}"); done < <(cd "${dir}" && find . -type f ! -name '.*' | sed 's|^\./||' | sort)
+    (cd "${dir}" && push_retry "${dst}" --artifact-type application/vnd.straiker.onprem.model.v1 "${mfiles[@]}")
     rm -rf "${dir}"
   done < <(jq -r '.models[] | [.name, .source, .dest] | @tsv' "${LIST}")
 }
