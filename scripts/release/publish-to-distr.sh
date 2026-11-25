@@ -252,10 +252,10 @@ build_chart_deps() {
   for cy in "${REPO_ROOT}"/charts/*/Chart.yaml; do
     dir="$(dirname "${cy}")"
     # only dependencies that live in a remote repository; subcharts committed under charts/<name>/charts/ need nothing
-    [[ -n "$(yq '.dependencies[].repository | select(test("^https?://"))' "${cy}" 2>/dev/null)" ]] || continue
+    [[ -n "$(yq '.dependencies[] | (.repository // "") | select(test("^https?://"))' "${cy}" 2>/dev/null)" ]] || continue
     while read -r url; do
       helm repo add --force-update "dep-$(printf '%s' "${url}" | cksum | cut -d' ' -f1)" "${url}" >/dev/null
-    done < <(yq '.dependencies[].repository | select(test("^https?://"))' "${cy}")
+    done < <(yq '.dependencies[] | (.repository // "") | select(test("^https?://"))' "${cy}")
     log "deps  $(basename "${dir}")"
     helm dependency build "${dir}" >/dev/null
   done
