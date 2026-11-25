@@ -251,10 +251,11 @@ build_chart_deps() {
   local cy dir url
   for cy in "${REPO_ROOT}"/charts/*/Chart.yaml; do
     dir="$(dirname "${cy}")"
-    [[ "$(yq '.dependencies | length' "${cy}")" -gt 0 ]] || continue
+    # only dependencies that live in a remote repository; subcharts committed under charts/<name>/charts/ need nothing
+    [[ -n "$(yq '.dependencies[].repository | select(test("^https?://"))' "${cy}" 2>/dev/null)" ]] || continue
     while read -r url; do
-      [[ "${url}" == http* ]] && helm repo add --force-update "dep-$(printf '%s' "${url}" | cksum | cut -d' ' -f1)" "${url}" >/dev/null
-    done < <(yq '.dependencies[].repository' "${cy}")
+      helm repo add --force-update "dep-$(printf '%s' "${url}" | cksum | cut -d' ' -f1)" "${url}" >/dev/null
+    done < <(yq '.dependencies[].repository | select(test("^https?://"))' "${cy}")
     log "deps  $(basename "${dir}")"
     helm dependency build "${dir}" >/dev/null
   done
