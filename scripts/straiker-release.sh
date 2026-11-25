@@ -110,15 +110,25 @@ distr_login() {
 # ---------------------------------------------------------------- pull
 done_mark() { echo "$1/.straiker-done-${2#sha256:}"; } # marker: this folder holds exactly that digest
 
-pull_one_image() { # repo tag artifactRef sourceDigest layerDigest: fetch that one layer of images:<ver> and unpack it
-  local repo=$1 tag=$2 ref=$3 digest=$4 layer=$5 dir="${DIR}/images/$1/$2"
+pull_one_image() { # repo tag artifactRef sourceDigest layer[,layer...]: fetch the layer(s) of images:<ver>, join, unpack
+  local repo=$1 tag=$2 ref=$3 digest=$4 layers=$5 dir="${DIR}/images/$1/$2" l part="${DIR}/.image-part"
   [[ -f "$(done_mark "${dir}" "${digest}")" ]] && { echo "  ok    image ${repo}:${tag}"; return; }
   echo "  pull  image ${repo}:${tag}"
   rm -rf "${dir}"; mkdir -p "${dir}"
-  local tarball="${DIR}/.image-download.tar"
-  oras blob fetch "${ref%:*}@${layer}" --output "${tarball}" >/dev/null
+  local tarball="${DIR}/.image-download.tar"; : > "${tarball}"
+  for l in ${layers//,/ }; do
+    oras blob fetch "${ref%:*}@${l}" --output "${part}" >/dev/null
+    cat "${part}" >> "${tarball}"; rm -f "${part}"
+  done
   tar -xf "${tarball}" -C "${dir}"; rm -f "${tarball}"
   touch "$(done_mark "${dir}" "${digest}")"
+}
+
+join_parts() { # files that were uploaded in parts (<name>.part0000, .part0001, ...) are joined back into <name>
+  local f base
+  while read -r f; do
+    base="${f%.part0000}"; cat "${base}".part* > "${base}" && rm -f "${base}".part*
+  done < <(find "$1" -name '*.part0000')
 }
 
 pull_one_model() { # name ref digest
@@ -127,6 +137,7 @@ pull_one_model() { # name ref digest
   echo "  pull  model ${name} (large: several GB)"
   rm -rf "${dir}"; mkdir -p "${dir}"
   oras pull "${ref%:*}@${digest}" -o "${dir}" >/dev/null
+  join_parts "${dir}"
   touch "$(done_mark "${dir}" "${digest}")"
 }
 
@@ -177,7 +188,7 @@ cmd_pull() {
   log "Downloading $(jq '.images | length' "${DIR}/release.json") container images"
   local layer
   while IFS=$'\t' read -r repo tag ref digest layer; do pull_one_image "${repo}" "${tag}" "${ref}" "${digest}" "${layer}"
-  done < <(jq -r '.images[] | [.repo, .tag, .dest, .digest, .layerDigest] | @tsv' "${DIR}/release.json")
+  done < <(jq -r '.images[] | [.repo, .tag, .dest, .digest, ((.layers // [.layerDigest]) | join(","))] | @tsv' "${DIR}/release.json")
   log "Downloading $(jq '(.charts | length) + (.thirdPartyCharts | length)' "${DIR}/release.json") Helm charts"
   pull_charts
   log "Downloading $(jq '.models | length' "${DIR}/release.json") AI models (this is the long part)"

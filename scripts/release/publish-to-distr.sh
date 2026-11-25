@@ -33,6 +33,7 @@ MODE="plan"
 SIZES=false
 ONLY="images,charts,installer,models,release"
 SIGN_KEY=""
+CHUNK_GIB=2 # layers/files above this are uploaded as parts (the Distr gateway times out finalizing one huge blob)
 
 usage() { sed -n 2,22p "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --sizes) SIZES=true; shift ;;
     --only) ONLY="${2:-}"; shift 2 ;;
     --sign-key) SIGN_KEY="${2:-}"; shift 2 ;;
+    --chunk-gib) CHUNK_GIB="${2:-}"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -69,6 +71,7 @@ need=(yq jq)
 [[ -n "${SIGN_KEY}" ]] && need+=(cosign)
 for c in "${need[@]}"; do command -v "$c" >/dev/null 2>&1 || { echo "ERROR: '$c' is required." >&2; exit 2; }; done
 
+CHUNK_BYTES=$((CHUNK_GIB * 1024 * 1024 * 1024))
 mkdir -p "${WORK_DIR}"
 LIST="${WORK_DIR}/list.json"
 
@@ -179,6 +182,12 @@ distr_login() {
   fi
 }
 
+chunk_file() { # <file>: when larger than the chunk size, replace it by <file>.part0000, .part0001, ... (joined again by pull)
+  local sz; sz="$(wc -c < "$1" | tr -d ' ')"
+  (( sz > CHUNK_BYTES )) || return 0
+  split -b "${CHUNK_BYTES}" -d -a 4 "$1" "$1.part" && rm -f "$1"
+}
+
 pack_tar() { # <dir> <tar>: a plain tar of an OCI layout; byte-stable where GNU tar allows, so unchanged images keep their digest
   if tar --version 2>/dev/null | grep -q GNU; then
     tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$2" -C "$1" .
@@ -194,22 +203,31 @@ push_images() {
   aws_src ecr get-login-password | crane auth login "${ecr_host}" -u AWS --password-stdin >/dev/null
   aws_src ecr get-login-password | oras login "${ecr_host}" -u AWS --password-stdin >/dev/null
   local cache="${WORK_DIR}/images" ann="${WORK_DIR}/images-annotations.json" src repo tag sd file layout anns='{}'
-  local files=()
+  local files=() parts
   mkdir -p "${cache}"
+  local p i
   while IFS=$'\t' read -r src repo tag file; do
     sd="$(crane digest "${src}")"
-    if [[ -f "${cache}/${file}" && "$(cat "${cache}/${file}.digest" 2>/dev/null)" == "${sd}" ]]; then
+    if [[ "$(cat "${cache}/${file}.digest" 2>/dev/null)" == "${sd}" && ( -f "${cache}/${file}" || -f "${cache}/${file}.part0000" ) ]]; then
       log "cached ${file}"
     else
       log "pack  ${src}"
       layout="$(mktemp -d "${WORK_DIR}/layout.XXXXXX")"
       oras cp --to-oci-layout "${src}" "${layout}:${tag}" >/dev/null
-      rm -f "${cache}/${file}"; pack_tar "${layout}" "${cache}/${file}"; rm -rf "${layout}"
+      rm -f "${cache}/${file}" "${cache}/${file}".part*; pack_tar "${layout}" "${cache}/${file}"; rm -rf "${layout}"
+      chunk_file "${cache}/${file}"
       printf '%s' "${sd}" > "${cache}/${file}.digest"
     fi
-    files+=("${file}:application/vnd.straiker.onprem.image.v1.tar")
-    anns="$(jq --arg f "${file}" --arg r "${repo}" --arg t "${tag}" --arg d "${sd}" \
-      '. + {($f): {"io.straiker.repo": $r, "io.straiker.tag": $t, "io.straiker.digest": $d}}' <<<"${anns}")"
+    if [[ -f "${cache}/${file}" ]]; then parts=("${file}"); else
+      parts=(); while read -r p; do parts+=("$(basename "${p}")"); done < <(ls "${cache}/${file}".part* | sort)
+    fi
+    i=0
+    for p in "${parts[@]}"; do
+      files+=("${p}:application/vnd.straiker.onprem.image.v1.tar")
+      anns="$(jq --arg f "${p}" --arg r "${repo}" --arg t "${tag}" --arg d "${sd}" --arg i "${i}" \
+        '. + {($f): {"io.straiker.repo": $r, "io.straiker.tag": $t, "io.straiker.digest": $d, "io.straiker.part": $i}}' <<<"${anns}")"
+      i=$((i + 1))
+    done
   done < <(jq -r '.images[] | [.source, .repo, .tag, .file] | @tsv' "${LIST}")
   printf '%s' "${anns}" > "${ann}"
   log "push  ${#files[@]} images -> ${REGISTRY}/images:${VERSION} (layers already there are skipped)"
@@ -259,6 +277,7 @@ push_models() {
     log "fetch model ${src} -> ${dir}"
     mkdir -p "${dir}"
     aws_src s3 sync "${src}/" "${dir}/" --only-show-errors
+    find "${dir}" -type f -size +"${CHUNK_BYTES}"c | while read -r f; do chunk_file "${f}"; done
     log "push  model ${dst}"
     (cd "${dir}" && find . -type f ! -name '.*' | sed 's|^\./||' | sort \
       | xargs oras push "${dst}" --artifact-type application/vnd.straiker.onprem.model.v1 >/dev/null)
@@ -272,7 +291,8 @@ push_release() {
   local layers md ref
   layers="$(oras manifest fetch "${img_ref}" | jq '[.layers[] | {
     file: .annotations["org.opencontainers.image.title"], layerDigest: .digest, size: .size,
-    repo: .annotations["io.straiker.repo"], tag: .annotations["io.straiker.tag"], sourceDigest: .annotations["io.straiker.digest"]}]')" \
+    repo: .annotations["io.straiker.repo"], tag: .annotations["io.straiker.tag"], sourceDigest: .annotations["io.straiker.digest"],
+    part: ((.annotations["io.straiker.part"] // "0") | tonumber)}]')" \
     || { echo "ERROR: ${img_ref} is not in the registry yet. Push the images first." >&2; exit 1; }
   md="$(jq -r '.models[].dest' "${LIST}" | while read -r ref; do printf '%s\t%s\n' "${ref}" "$(crane digest "${ref}")"; done \
     | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add // {}')"
@@ -281,8 +301,8 @@ push_release() {
     del(.charts[].path)
     | .imagesArtifact = {dest: $ir, digest: $di} | .chartsArtifact = {dest: $cr, digest: $dc}
     | .installer.digest = $dinst
-    | .images |= map(. as $i | ($layers | map(select(.repo == $i.repo and .tag == $i.tag)) | .[0]) as $l
-        | $i + {digest: $l.sourceDigest, layerDigest: $l.layerDigest})
+    | .images |= map(. as $i | ($layers | map(select(.repo == $i.repo and .tag == $i.tag)) | sort_by(.part)) as $l
+        | $i + {digest: $l[0].sourceDigest, layerDigest: $l[0].layerDigest, layers: ($l | map(.layerDigest))})
     | .models |= map(.digest = $md[.dest])
     | .createdAt = (now | todate) | .gitCommit = env.GIT_COMMIT' "${LIST}" > "${manifest}"
   jq -e '[.images[] | select(.layerDigest == null)] | length == 0' "${manifest}" >/dev/null \
