@@ -39,13 +39,13 @@ usage() { sed -n 2,19p "$0" | sed 's/^# \{0,1\}//'; }
 os_packages() { # unzip, openssl, htpasswd, python3, tar, curl from the OS package manager
   local sudo=""; [[ "$(id -u)" -ne 0 ]] && sudo="sudo"
   if command -v dnf >/dev/null 2>&1; then
-    ${sudo} dnf install -y -q unzip openssl httpd-tools python3 tar gzip tmux git curl-minimal >/dev/null 2>&1 \
-      || ${sudo} dnf install -y -q unzip openssl httpd-tools python3 tar gzip tmux git >/dev/null
+    ${sudo} dnf install -y -q unzip openssl httpd-tools bind-utils python3 tar gzip tmux git curl-minimal >/dev/null 2>&1 \
+      || ${sudo} dnf install -y -q unzip openssl httpd-tools bind-utils python3 tar gzip tmux git >/dev/null
   elif command -v yum >/dev/null 2>&1; then
-    ${sudo} yum install -y -q unzip openssl httpd-tools python3 tar gzip tmux git curl >/dev/null
+    ${sudo} yum install -y -q unzip openssl httpd-tools bind-utils python3 tar gzip tmux git curl >/dev/null
   elif command -v apt-get >/dev/null 2>&1; then
     ${sudo} apt-get update -qq >/dev/null && ${sudo} DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      unzip openssl apache2-utils python3 tar gzip curl ca-certificates tmux git >/dev/null
+      unzip openssl apache2-utils dnsutils python3 tar gzip curl ca-certificates tmux git >/dev/null
   else
     die "unsupported Linux (no dnf, yum or apt-get). Use Amazon Linux 2023 or Ubuntu."
   fi
@@ -87,7 +87,7 @@ cmd_tools() {
   grep -qxF "${line}" "${HOME}/.bashrc" 2>/dev/null || echo "${line}" >> "${HOME}/.bashrc"
 
   local t missing=()
-  for t in aws oras crane helm kubectl jq yq python3 unzip openssl htpasswd curl tmux git; do
+  for t in aws oras crane helm kubectl jq yq python3 unzip openssl htpasswd dig curl tmux git; do
     command -v "${t}" >/dev/null 2>&1 || missing+=("${t}")
   done
   [[ ${#missing[@]} -eq 0 ]] || die "still missing after install: ${missing[*]}"

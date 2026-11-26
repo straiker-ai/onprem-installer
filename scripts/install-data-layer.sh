@@ -15,6 +15,8 @@
 # Interactive on the first run only: the Straiker customer key (unless --customer-key-file is given) and, in
 # bedrock mode, the Bedrock region/inference profile. Both are stored in the install state afterwards.
 set -euo pipefail
+export PATH="${HOME}/.straiker/bin:${HOME}/.local/bin:${PATH}"
+export AWS_PAGER=""
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="${STRAIKER_INSTALLER:-${REPO_ROOT}/scripts/install-straiker.sh}"
@@ -391,8 +393,12 @@ live_name_servers() { # [resolver]: what the internet currently says the NS of D
   [[ -n "${1:-}" ]] && at=("@$1")
   if command -v dig >/dev/null 2>&1; then
     dig +short +time=5 +tries=1 NS "${DOMAIN}" ${at[@]+"${at[@]}"} 2>/dev/null
-  else
+  elif command -v nslookup >/dev/null 2>&1; then
     nslookup -type=NS "${DOMAIN}" ${1:-} 2>/dev/null | sed -n 's/.*nameserver = //p'
+  elif command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    # no dig/nslookup (a fresh Amazon Linux has neither): ask Google's DNS-over-HTTPS
+    curl -fsS --max-time 10 "https://dns.google/resolve?name=${DOMAIN}&type=NS" 2>/dev/null \
+      | python3 -c 'import json,sys; [print(a["data"]) for a in json.load(sys.stdin).get("Answer", []) if a.get("type") == 2]' 2>/dev/null || true
   fi | sed 's/\.$//' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort
 }
 

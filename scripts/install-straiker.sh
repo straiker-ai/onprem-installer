@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Tools installed by scripts/straiker-release.sh tools live in ~/.straiker/bin; a shell that started before that has no PATH entry for it.
+export PATH="${HOME}/.straiker/bin:${HOME}/.local/bin:${PATH}"
+# AWS CLI v2 pages long output through less, which hangs a tmux session.
+export AWS_PAGER=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -3479,7 +3483,7 @@ phase_aws_artifacts() {
   set_metadata "ecr_registry" "${ecr_registry}"
   set_metadata "hauler_role_arn" "${hauler_role_arn}"
   set_metadata "workload_role_arn" "${workload_role_arn}"
-  [[ -n "${bedrock_role_arn}" ]] && set_metadata "bedrock_role_arn" "${bedrock_role_arn}"
+  if [[ -n "${bedrock_role_arn}" ]]; then set_metadata "bedrock_role_arn" "${bedrock_role_arn}"; fi
 }
 
 # AWS-managed data tier (opt-in via --data-layer). Runs after aws-artifacts:
@@ -5180,6 +5184,10 @@ dns_live_name_servers() {
     dig +short +time=5 +tries=1 NS "$1" ${at[@]+"${at[@]}"} 2>/dev/null
   elif command -v nslookup >/dev/null 2>&1; then
     nslookup -type=NS "$1" ${2:-} 2>/dev/null | sed -n 's/.*nameserver = //p'
+  elif command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    # no dig/nslookup (a fresh Amazon Linux has neither): ask Google's DNS-over-HTTPS
+    curl -fsS --max-time 10 "https://dns.google/resolve?name=${1}&type=NS" 2>/dev/null \
+      | python3 -c 'import json,sys; [print(a["data"]) for a in json.load(sys.stdin).get("Answer", []) if a.get("type") == 2]' 2>/dev/null || true
   fi | sed 's/\.$//' | tr 'A-Z' 'a-z' | sed '/^$/d' | sort
 }
 
@@ -6921,7 +6929,7 @@ phase_platform_services() {
     # the installer either (set -e / pipefail: a missing ConfigMap makes the pipeline fail).
     local cfg_before="" cfg_after=""
     if kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
-      cfg_before="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12 || true)"
+      cfg_before="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12 || true)"
     fi
     helm upgrade --install "${svc}" "${chart}" \
       --namespace "${INFRA_NAMESPACE}" --wait --timeout 15m \
@@ -6932,7 +6940,7 @@ phase_platform_services() {
       --set-string "${key}.migrations.image.version=${tag}" \
       --set "${key}.observability.otel.requireSecret=false" \
       ${extra[@]+"${extra[@]}"}
-    cfg_after="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | shasum | cut -c1-12 || true)"
+    cfg_after="$(kubectl get configmap "${svc}-config" -n "${INFRA_NAMESPACE}" -o jsonpath='{.data}' 2>/dev/null | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12 || true)"
     if [[ -n "${cfg_before}" && "${cfg_before}" != "${cfg_after}" ]] && kubectl get deploy "${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null 2>&1; then
       log "Configuration of '${svc}' changed: restarting it."
       kubectl rollout restart "deploy/${svc}-deployment" -n "${INFRA_NAMESPACE}" >/dev/null
@@ -10431,6 +10439,9 @@ EOF
     if [[ -z "${AWS_PROFILE_OPT}" ]]; then
       if [[ "$(get_metadata "aws_profile_set")" == "true" ]]; then
         AWS_PROFILE_OPT="$(get_metadata "aws_profile")"
+      elif [[ -z "${AWS_PROFILE:-}" && ! -e "${HOME}/.aws/config" && ! -e "${HOME}/.aws/credentials" ]]; then
+        # An EC2 instance role: there are no profiles to choose from, so do not ask.
+        AWS_PROFILE_OPT=""
       else
         AWS_PROFILE_OPT="$(prompt_line 'AWS profile to use (leave blank for the default profile/credential chain): ' || true)"
       fi
