@@ -9916,6 +9916,41 @@ show_api_client_reminder() {
   log "  (The console host straiker.<domain> has its own /oauth/token for browser sign-in only; do not use it for API clients.)"
 }
 
+# Last thing the installer prints, so it is the part nobody scrolls past: where to open the product, the API address, and the
+# callback URL the customer's identity provider must have registered (Cognito's, where the IdP sends users back).
+show_final_summary() {
+  [[ "${DATA_LAYER}" == "true" ]] || return 0
+  local domain console gw redir acs eid sso_name sso_type
+  domain="$(get_metadata "custom_domain")"
+  console=""; [[ -n "${domain}" ]] && console="https://$(custom_domain_hostname straiker)/"
+  gw="$(get_metadata "gateway_domain")"
+  if [[ -z "${gw}" && "${EDGE_TYPE}" == "xalb" && -n "${domain}" ]]; then gw="api.${domain}"; fi
+  redir="$(get_metadata "cognito_oidc_redirect_uri")"
+  acs="$(get_metadata "cognito_saml_acs_url")"
+  eid="$(get_metadata "cognito_entity_id")"
+  sso_name="$(get_metadata "sso_name")"; sso_type="$(get_metadata "sso_type")"
+  log ""
+  log "================================================================================"
+  log " Straiker is installed. Keep these:"
+  log "================================================================================"
+  [[ -n "${console}" ]] && log " Console URL : ${console}"
+  [[ -n "${gw}" ]] && log " API URL     : https://${gw}   (token: POST https://${gw}/auth/token)"
+  if [[ -n "${sso_name}" && -n "${redir}${acs}" ]]; then
+    log " SSO callback to register at your identity provider (${sso_type}, provider '${sso_name}'):"
+    if [[ "${sso_type}" == "SAML" ]]; then
+      log "   ACS URL (Single sign-on URL) : ${acs}"
+      log "   Entity ID (Audience URI)     : ${eid}"
+    else
+      log "   Redirect / callback URI      : ${redir}"
+    fi
+    [[ -n "$(get_metadata "sso_handoff_file")" ]] && log "   Full setup sheet             : $(get_metadata "sso_handoff_file")"
+  elif [[ -n "${redir}" ]]; then
+    log " SSO callback (add it to your identity provider if you use SSO): ${redir}"
+  fi
+  [[ -n "$(get_metadata "cognito_pool_id")" ]] && log " First admin : $(get_metadata "admin_email") (password: see the Secrets Manager command above)"
+  log "================================================================================"
+}
+
 # Reminder printed at the end of every successful run — the bootstrap admin
 # (see phase_shared_secrets/phase_straiker_core) always exists whichever
 # edge type was used, so this runs unconditionally rather than living inside
@@ -11001,6 +11036,7 @@ main() {
   show_access_info
   show_api_client_reminder
   show_bootstrap_admin_reminder
+  show_final_summary
 }
 
 main "$@"
