@@ -23,16 +23,26 @@ OBSERVABILITY_SRC="${REPO_ROOT}/terraform/aws/observability"
 
 # Same fixed /tmp work root install-straiker.sh uses — destroy needs to see the
 # same backend.tf/tfvars/provider cache/local state that install set up there.
-TF_WORK_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
-EKS_DIR="${TF_WORK_ROOT}/aws/eks"
-GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
-EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
-OBSERVABILITY_DIR="${TF_WORK_ROOT}/aws/observability"
-DATA_DIR="${TF_WORK_ROOT}/aws/data"
-ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
+TF_BASE_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
+TF_WORK_ROOT="${TF_BASE_ROOT}"
+set_tf_work_dirs() {
+  EKS_DIR="${TF_WORK_ROOT}/aws/eks"
+  GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
+  EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
+  OBSERVABILITY_DIR="${TF_WORK_ROOT}/aws/observability"
+  DATA_DIR="${TF_WORK_ROOT}/aws/data"
+  ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
+}
+set_tf_work_dirs
+# One working directory per cluster, as install-straiker.sh (an explicit STRAIKER_TF_WORK_ROOT is used as given).
+scope_tf_work_dirs() {
+  [[ -z "${STRAIKER_TF_WORK_ROOT:-}" && -n "${CLUSTER_NAME}" ]] || return 0
+  TF_WORK_ROOT="${TF_BASE_ROOT}/${CLUSTER_NAME}"
+  set_tf_work_dirs
+}
 
 # Same shared plugin cache install-straiker.sh sets up.
-export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${TF_WORK_ROOT}/plugin-cache}"
+export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${TF_BASE_ROOT}/plugin-cache}"
 mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
 NUKE_EKS_PATH="${INSTALLER_BUNDLE_HOME}/scripts/nuke-eks.sh"
@@ -764,6 +774,7 @@ resolve_destroy_inputs() {
   if [[ -z "${CLUSTER_NAME}" ]]; then
     CLUSTER_NAME="$(get_install_metadata "cluster_name")"
   fi
+  scope_tf_work_dirs
   if [[ -z "${TF_PREFIX}" ]]; then
     TF_PREFIX="$(get_install_metadata "tf_prefix")"
   fi

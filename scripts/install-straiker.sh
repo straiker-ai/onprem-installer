@@ -50,17 +50,29 @@ GCP_ARTIFACTS_SRC="${REPO_ROOT}/terraform/gcp/artifacts"
 # plugin downloads are hundreds of MB and $HOME may be tiny (e.g. AWS CloudShell's
 # 1 GB home volume). A fixed path (not mktemp) lets .terraform/ provider caches
 # and generated backend/tfvars survive across separate phase invocations.
-TF_WORK_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
-TFBE_DIR="${TF_WORK_ROOT}/aws/tfbe"
-EKS_DIR="${TF_WORK_ROOT}/aws/eks"
-ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
-DATA_DIR="${TF_WORK_ROOT}/aws/data"
-EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
-DNS_INFRA_DIR="${TF_WORK_ROOT}/aws/dns"
-OBSERVABILITY_DIR="${TF_WORK_ROOT}/aws/observability"
-GCP_TFBE_DIR="${TF_WORK_ROOT}/gcp/tfbe"
-GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
-GCP_ARTIFACTS_DIR="${TF_WORK_ROOT}/gcp/artifacts"
+TF_BASE_ROOT="${STRAIKER_TF_WORK_ROOT:-/tmp/straiker-tf}"
+TF_WORK_ROOT="${TF_BASE_ROOT}"
+set_tf_work_dirs() {
+  TFBE_DIR="${TF_WORK_ROOT}/aws/tfbe"
+  EKS_DIR="${TF_WORK_ROOT}/aws/eks"
+  ARTIFACTS_DIR="${TF_WORK_ROOT}/aws/artifacts"
+  DATA_DIR="${TF_WORK_ROOT}/aws/data"
+  EDGE_INFRA_DIR="${TF_WORK_ROOT}/aws/edge"
+  DNS_INFRA_DIR="${TF_WORK_ROOT}/aws/dns"
+  OBSERVABILITY_DIR="${TF_WORK_ROOT}/aws/observability"
+  GCP_TFBE_DIR="${TF_WORK_ROOT}/gcp/tfbe"
+  GKE_DIR="${TF_WORK_ROOT}/gcp/gke"
+  GCP_ARTIFACTS_DIR="${TF_WORK_ROOT}/gcp/artifacts"
+}
+set_tf_work_dirs
+# One working directory per cluster: tfbe's state is a LOCAL file (it bootstraps the state bucket), so a directory shared by
+# two clusters made the second install plan to rename the first one's state bucket. An explicit STRAIKER_TF_WORK_ROOT is
+# used as given. The provider cache stays shared (TF_PLUGIN_CACHE_DIR keeps pointing at the base).
+scope_tf_work_dirs() {
+  [[ -z "${STRAIKER_TF_WORK_ROOT:-}" && -n "${CLUSTER_NAME}" ]] || return 0
+  TF_WORK_ROOT="${TF_BASE_ROOT}/${CLUSTER_NAME}"
+  set_tf_work_dirs
+}
 
 # terraform/aws/eks's karpenter.tf provisions the AWS-side IAM/SQS/pod-identity
 # resources; this installs the controller itself via its OCI chart.
@@ -210,7 +222,7 @@ SHARED_SECRET_PROPS="INTERNAL_API_KEY SYS__FOUNDATION_API_KEY VLLM_API_KEY SYS__
 
 # Shared provider plugin cache across tfbe and eks (both need hashicorp/aws)
 # and across invocations — avoids re-downloading the same large provider.
-export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${TF_WORK_ROOT}/plugin-cache}"
+export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR:-${TF_BASE_ROOT}/plugin-cache}"
 mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
 # tofu init with one automatic repair: macOS clears old files from /tmp, which can leave the provider cache half-deleted, and init then
@@ -250,7 +262,7 @@ tofu_init() {
   out="$(tofu -chdir="${dir}" init "$@" 2>&1)" || rc=$?
   printf '%s\n' "${out}"
   if [[ ${rc} -ne 0 && "${out}" == *"existing cached package"* ]]; then
-    if [[ "${TF_PLUGIN_CACHE_DIR}" == "${TF_WORK_ROOT}"/* ]]; then
+    if [[ "${TF_PLUGIN_CACHE_DIR}" == "${TF_BASE_ROOT}"/* ]]; then
       echo "[*] The OpenTofu provider cache is inconsistent (${TF_PLUGIN_CACHE_DIR}); rebuilding it and retrying once." >&2
       rm -rf "${TF_PLUGIN_CACHE_DIR:?}"/*
       mkdir -p "${TF_PLUGIN_CACHE_DIR}"
@@ -10502,6 +10514,7 @@ EOF
   # default; never persisted blank.
   [[ -z "${CLUSTER_NAME}" ]] && CLUSTER_NAME="$(get_metadata "cluster_name")"
   resolve_cluster_name
+  scope_tf_work_dirs
   validate_cluster_name # also covers a name taken from the kubectl context or the remembered state
   set_metadata "cluster_name" "${CLUSTER_NAME}"
 
