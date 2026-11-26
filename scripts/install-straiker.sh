@@ -1291,6 +1291,43 @@ print(data.get(section, {}).get("phases", {}).get(phase, {}).get("status", "not_
 PY
 }
 
+# probe_run <pod> [kubectl run flags] [-- cmd args]: run a short-lived pod and print its output. Takes the arguments of `kubectl run`.
+# `kubectl run --rm -i` loses the output of a container that exits quickly (the pod is gone before kubectl attaches), which made
+# every probe come back empty. So: create the pod, wait until it has finished, read its log, delete it. When it never finishes
+# (image pull, no node), the pod's events are printed instead of an empty string.
+probe_run() {
+  local name=$1 ns="" timeout="${PROBE_POD_TIMEOUT:-300}" phase="" waited=0 out
+  shift
+  local pass=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --rm | -i | --quiet | --stdin) shift ;;
+      --pod-running-timeout=*) shift ;;
+      -n) ns=$2; pass+=(-n "$2"); shift 2 ;;
+      --) pass+=("$@"); break ;;
+      *) pass+=("$1"); shift ;;
+    esac
+  done
+  ns="${ns:-${INFRA_NAMESPACE}}"
+  kubectl delete pod "${name}" -n "${ns}" --ignore-not-found >/dev/null 2>&1 || true
+  if ! out="$(kubectl run "${name}" "${pass[@]}" </dev/null 2>&1)"; then
+    printf '%s\n' "${out}"
+    return 1
+  fi
+  while (( waited < timeout )); do
+    phase="$(kubectl get pod "${name}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    [[ "${phase}" == Succeeded || "${phase}" == Failed ]] && break
+    sleep 2; waited=$((waited + 2))
+  done
+  out="$(kubectl logs "${name}" -n "${ns}" 2>&1 || true)"
+  if [[ "${phase}" != Succeeded && "${phase}" != Failed ]]; then
+    out="${out}
+[probe pod ${name} was still '${phase:-unknown}' after ${timeout}s] $(kubectl get events -n "${ns}" --field-selector "involvedObject.name=${name}" -o jsonpath='{range .items[*]}{.reason}: {.message}; {end}' 2>/dev/null | cut -c1-400)"
+  fi
+  kubectl delete pod "${name}" -n "${ns}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  printf '%s\n' "${out}"
+}
+
 # A chart's dependencies are already in charts/<name>/charts/ (the release bundles them): then "helm dependency build" is not
 # needed, and it would fail without internet or the repository registered. Builds only when one is missing.
 helm_dependency_build_if_needed() {
@@ -3902,6 +3939,30 @@ release_load_artifacts() {
   require_command python3
   [[ -s "${manifest}" ]] || { mark_phase_blocked "--release-dir '${RELEASE_DIR}' has no release.json. Run scripts/straiker-release.sh pull first."; return 1; }
 
+  # The charts, and mirrored_image_tag, take their tags from THIS checkout; the release holds the images of the commit it was built from.
+  # A mismatch ends as ImagePullBackOff hours later, so stop now. (Both are in the installer folder the release ships.)
+  local missing_imgs
+  missing_imgs="$(python3 - "${manifest}" "${CHARTS_ROOT}/straiker-artifact/values.yaml" <<'PY' 2>/dev/null || true
+import json, re, sys
+rel = {(i["repo"], str(i["tag"])) for i in json.load(open(sys.argv[1]))["images"]}
+cur_repo = cur_tag = None
+want = set()
+for line in open(sys.argv[2]):
+    m = re.match(r"\s*tag:\s*[\"']?([^\"'\s#]+)", line)
+    if m: cur_tag = m.group(1)
+    m = re.match(r"\s*destRepository:\s*(\S+)", line)
+    if m and cur_tag: want.add((m.group(1), cur_tag))
+print(", ".join(sorted(f"{r}:{t}" for r, t in want - rel)))
+PY
+)"
+  if [[ -n "${missing_imgs}" ]]; then
+    mark_phase_blocked "This installer needs images that are not in the release in ${RELEASE_DIR}: ${missing_imgs}. The release and the installer come from different versions; use the installer folder inside the release (${RELEASE_DIR}/installer), or ask Straiker for a matching release."
+    return 1
+  fi
+  # The next phases need the namespace, and the in-cluster copy path (which used to create it) does not run.
+  ensure_k8s_ready_for_charts || return 1
+  kubectl create namespace "${INFRA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
   local ecr_host="${ecr_registry_prefixed%%/*}"
   if ! aws ecr get-login-password --region "${AWS_REGION}" | oras login "${ecr_host}" -u AWS --password-stdin >/dev/null 2>&1; then
     mark_phase_blocked "Could not log in to ECR ${ecr_host} with oras. Check AWS credentials for region ${AWS_REGION}."
@@ -3936,7 +3997,7 @@ for i in json.load(open(sys.argv[1]))["images"]:
     [[ -d "${RELEASE_DIR}/models/${m}" ]] || { mark_phase_blocked "Model '${m}' is missing from ${RELEASE_DIR}/models. Re-run scripts/straiker-release.sh pull."; return 1; }
     log "Uploading model '${m}' to s3://${models_bucket}/models/${m}/ (only changed files)..."
     aws s3 sync "${RELEASE_DIR}/models/${m}/" "s3://${models_bucket}/models/${m}/" \
-      --region "${AWS_REGION}" --exclude '.straiker-done-*' --only-show-errors \
+      --region "${AWS_REGION}" --exclude '.straiker-done-*' --delete --only-show-errors \
       || { mark_phase_blocked "Uploading model '${m}' to s3://${models_bucket} failed. Re-run the same command to continue."; return 1; }
   done
   log "Release ${RELEASE_DIR} loaded: ${total} images in ECR, ${#models[@]} model(s) in s3://${models_bucket}/models/."
@@ -6426,9 +6487,9 @@ elif "config" in m:
 
   # 2. ElastiCache accepts TLS (rediss://). Serverless caches are TLS-only.
   kubectl delete pod verify-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-  result="$(kubectl run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
+  result="$(probe_run verify-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
     --restart=Never --rm -i --quiet --pod-running-timeout=5m -- valkey-cli --tls -h "${redis_endpoint}" -p 6379 PING </dev/null 2>&1 || true)"
-  if printf '%s\n' "${result}" | grep -qx 'PONG'; then
+  if printf '%s\n' "${result}" | grep -q 'PONG'; then
     log "PASS  ElastiCache (${redis_endpoint}) answers PING over TLS."
   else
     log "FAIL  ElastiCache did not answer PING over TLS (${redis_endpoint}): ${result}"
@@ -6441,11 +6502,11 @@ elif "config" in m:
   if [[ -n "${iris_redis_host}" ]]; then
     ensure_iris_redis_secret "$(get_metadata "iris_redis_secret_name")" || return
     kubectl delete pod verify-iris-redis -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-    result="$(kubectl run verify-iris-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
+    result="$(probe_run verify-iris-redis -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/valkey/valkey:8-alpine" \
       --restart=Never --rm -i --quiet \
       --overrides='{"spec":{"containers":[{"name":"verify-iris-redis","image":"'"${registry_prefixed}"'/valkey/valkey:8-alpine","command":["valkey-cli","--tls","-h","'"${iris_redis_host}"'","-p","6379","PING"],"env":[{"name":"REDISCLI_AUTH","valueFrom":{"secretKeyRef":{"name":"iris-redis","key":"REDIS_AUTH_TOKEN"}}}],"stdin":true}]}}' \
       </dev/null 2>&1 || true)"
-    if printf '%s\n' "${result}" | grep -qx 'PONG'; then
+    if printf '%s\n' "${result}" | grep -q 'PONG'; then
       log "PASS  iris Valkey (${iris_redis_host}) answers PING over TLS with AUTH."
     else
       log "FAIL  iris Valkey did not answer PING over TLS with AUTH (${iris_redis_host}); needs the iris-redis Secret (phase 'straiker-ascend'): ${result}"
@@ -6463,7 +6524,7 @@ elif "config" in m:
     # start (image pull, node scale-up) and a single-node domain can answer late. Retry before calling it a failure.
     for os_try in 1 2 3 4; do
     kubectl delete pod verify-opensearch -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-    result="$(kubectl run verify-opensearch -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
+    result="$(probe_run verify-opensearch -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
       --restart=Never --rm -i --quiet \
       --overrides='{"spec":{"containers":[{"name":"verify-opensearch","image":"curlimages/curl:8.11.0","command":["sh","-c","curl -s --max-time 20 -u \"$OS_USER:$OS_PASS\" https://'"${os_host}"'/_cluster/health"],"env":[{"name":"OS_USER","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"username"}}},{"name":"OS_PASS","valueFrom":{"secretKeyRef":{"name":"opensearch-credentials","key":"password"}}}],"stdin":true}]}}' \
       </dev/null 2>&1 || true)"
@@ -6483,7 +6544,7 @@ elif "config" in m:
   cg_issuer="$(get_metadata "cognito_issuer")"
   if [[ -n "${cg_issuer}" ]]; then
     kubectl delete pod verify-cognito -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-    result="$(kubectl run verify-cognito -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
+    result="$(probe_run verify-cognito -n "${INFRA_NAMESPACE}" --image="curlimages/curl:8.11.0" \
       --restart=Never --rm -i --quiet \
       --overrides='{"spec":{"containers":[{"name":"verify-cognito","image":"curlimages/curl:8.11.0","command":["curl","-s","--max-time","20","'"${cg_issuer}"'/.well-known/openid-configuration"],"stdin":true}]}}' \
       </dev/null 2>&1 || true)"
@@ -6646,7 +6707,7 @@ elif "config" in m:
     # image would start its server instead.
     pg_overrides='{"spec":{"containers":[{"name":"verify-psql","image":"'"${registry_prefixed}"'/library/postgres:16-alpine","stdin":true,"command":["psql","host='"${pg_host}"' port='"${pg_port:-5432}"' dbname='"${pg_role}"' user='"${pg_role}"' sslmode=require","-tAc","select ssl from pg_stat_ssl where pid = pg_backend_pid();"],"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"straiker-db-dsn","key":"PASSWORD_'"${pg_role}"'"}}}]}]}}'
     kubectl delete pod verify-psql -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-    result="$(kubectl run verify-psql -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+    result="$(probe_run verify-psql -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
       --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${pg_overrides}" </dev/null 2>&1 || true)"
     if printf '%s\n' "${result}" | grep -qx 't'; then
       log "PASS  Aurora '${pg_label}' accepts sslmode=require (${pg_role} role, pg_stat_ssl.ssl = t)."
@@ -7401,7 +7462,7 @@ env = [
 print(json.dumps({"spec": {"containers": [{"name": "platform-tenant", "image": os.environ["REG"] + "/library/postgres:16-alpine",
     "stdin": True, "command": ["/bin/sh", "-c", os.environ["SCRIPT"]], "env": env}]}}))')"
   kubectl delete pod platform-tenant -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-  result="$(kubectl run platform-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+  result="$(probe_run platform-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
     --restart=Never --rm -i --quiet --overrides="${overrides}" </dev/null 2>&1 || true)"
   if printf '%s\n' "${result}" | grep -q '^TENANT '; then
     log "Platform tenant record: $(printf '%s\n' "${result}" | grep '^TENANT ' | head -1 | cut -d' ' -f2-)"
@@ -8725,7 +8786,7 @@ console_tenant_id() {
   registry_prefixed="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
   overrides="$(POD_MODE=tenant REG="${registry_prefixed}" HOST="$(get_metadata "aurora_endpoint")" PORT="$(get_metadata "aurora_port")" python3 -c "${K8S_POD_PY}")"
   kubectl delete pod console-tenant -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-  result="$(kubectl run console-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+  result="$(probe_run console-tenant -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
     --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
   result="$(printf '%s\n' "${result}" | sed -n 's/^TENANT \([0-9][0-9]*\)$/\1/p' | head -1)"
   [[ -n "${result}" ]] || return 1
@@ -8741,7 +8802,7 @@ registry_call() {
   registry_prefixed="$(docker_registry_with_prefix "$(get_metadata "ecr_registry")")"
   overrides="$(POD_MODE=registry REG="${registry_prefixed}" TENANT="${tenant}" METHOD="${method}" RPATH="${path}" BODY="${body}" IDEM="${idem}" NS="${INFRA_NAMESPACE}" python3 -c "${K8S_POD_PY}")"
   kubectl delete pod registry-call -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-  out="$(kubectl run registry-call -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+  out="$(probe_run registry-call -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
     --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
   if printf '%s\n' "${out}" | grep -q '^BODY:'; then
     printf '%s\n' "${out}" | sed -n 's/^BODY://p' | head -1
@@ -8759,7 +8820,7 @@ iris_grader_key_accepted() {
   kubectl create secret generic iris-grader-check -n "${INFRA_NAMESPACE}" --from-literal="KEY=${key}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   overrides="$(POD_MODE=check REG="${registry_prefixed}" NS="${INFRA_NAMESPACE}" python3 -c "${K8S_POD_PY}")"
   kubectl delete pod grader-check -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
-  out="$(kubectl run grader-check -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
+  out="$(probe_run grader-check -n "${INFRA_NAMESPACE}" --image="${registry_prefixed}/library/postgres:16-alpine" \
     --restart=Never --rm -i --quiet --pod-running-timeout=5m --overrides="${overrides}" </dev/null 2>&1 || true)"
   kubectl delete secret iris-grader-check -n "${INFRA_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   code="$(printf '%s\n' "${out}" | sed -n 's/^CODE://p' | head -1)"

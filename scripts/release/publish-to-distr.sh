@@ -309,7 +309,7 @@ push_models() {
     aws_src s3 sync "${src}/" "${dir}/" --only-show-errors
     find "${dir}" -type f -size +"${CHUNK_BYTES}"c | while read -r f; do chunk_file "${f}"; done
     log "push  model ${dst}"
-    mfiles=(); while IFS= read -r f; do mfiles+=("${f}"); done < <(cd "${dir}" && find . -type f ! -name '.*' | sed 's|^\./||' | sort)
+    mfiles=(); while IFS= read -r f; do mfiles+=("${f}"); done < <(cd "${dir}" && find . -type f \( ! -name '.*' -o -name '.straiker.v*' \) | sed 's|^\./||' | sort)
     (cd "${dir}" && push_retry "${dst}" --artifact-type application/vnd.straiker.onprem.model.v1 "${mfiles[@]}")
     rm -rf "${dir}"
   done < <(jq -r '.models[] | [.name, .source, .dest] | @tsv' "${LIST}")
