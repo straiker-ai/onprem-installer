@@ -1291,6 +1291,16 @@ print(data.get(section, {}).get("phases", {}).get(phase, {}).get("status", "not_
 PY
 }
 
+# A chart's dependencies are already in charts/<name>/charts/ (the release bundles them): then "helm dependency build" is not
+# needed, and it would fail without internet or the repository registered. Builds only when one is missing.
+helm_dependency_build_if_needed() {
+  local chart=$1
+  if helm dependency list "${chart}" 2>/dev/null | awk 'NR > 1 && NF > 0 && $NF != "ok" && $NF != "unpacked" { bad = 1 } END { exit bad }'; then
+    return 0
+  fi
+  helm dependency build "${chart}" >/dev/null
+}
+
 set_metadata() {
   local key=$1
   local value=$2
@@ -4205,7 +4215,7 @@ phase_straiker_system() {
   local infra_chart_ref="${HELM_REPO_NAME}/${INFRA_CHART_NAME}"
   local local_infra_chart="${CHARTS_ROOT}/${INFRA_CHART_NAME}"
   if [[ -z "${CHART_VERSION}" && -d "${local_infra_chart}" ]]; then
-    helm dependency build "${local_infra_chart}" >/dev/null
+    helm_dependency_build_if_needed "${local_infra_chart}"
     infra_chart_ref="${local_infra_chart}"
     log "Using local chart at '${infra_chart_ref}'."
   fi
@@ -8013,7 +8023,7 @@ apply_gpu_time_slicing() {
   [[ "${n}" == "${current}" ]] && return 0
   log "Setting NVIDIA device plugin time-slicing to ${n} servers per GPU (was ${current})."
   chart="$(chart_ref "${INFRA_CHART_NAME}")"
-  [[ -d "${chart}" ]] && helm dependency build "${chart}" >/dev/null
+  [[ -d "${chart}" ]] && helm_dependency_build_if_needed "${chart}"
   helm upgrade "${INFRA_RELEASE}" "${chart}" --namespace "${INFRA_NAMESPACE}" \
     --reset-then-reuse-values --set "nvidia.devicePlugin.timeSlicing.replicas=${n}" \
     --wait --timeout "${HELM_TIMEOUT}" >/dev/null || { mark_phase_blocked "Could not apply GPU time-slicing to release '${INFRA_RELEASE}'."; return 1; }
