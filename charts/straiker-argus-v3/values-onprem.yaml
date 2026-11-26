@@ -9,8 +9,9 @@
 #   argus.llmEndpoints.{vision,imageDetection,kev,kevPromptEndpoint} and argus.contextReview.*   by --inference-mode
 #
 # Decisions here (do not undo without asking):
-#  - llama, qwen, internlm, llmStock and lava stay EMPTY on purpose: antman/thor/quicksilver/hulk are not deployed on-prem,
-#    so the controls that depend on them are reported "unavailable" (a supported state of the engine).
+#  - llama (antman), qwen (thor), internlm (quicksilver), llmStock and lava (hulk) stay EMPTY by default: those models are off
+#    on-prem, so the controls that depend on them are reported "unavailable" (a supported state of the engine). The installer
+#    sets them when --enable-models turns the model on.
 #  - capture and metrics are OFF: capture files a replayable copy of every request (a SaaS training/ops corpus) and metrics
 #    are projected from it into ClickHouse through a SaaS-only ClickPipe. rawDump is dev-only.
 #  - the transcript compactor stays ON: the console's transcripts are read from the artifacts bucket.

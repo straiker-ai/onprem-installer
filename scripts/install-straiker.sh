@@ -8561,6 +8561,21 @@ phase_straiker_argus_v3() {
   if [[ "${models_deployed}" == *" wanda "* ]]; then
     cmd+=(--set-string "argus.llmEndpoints.imageDetection=http://inference-wanda.${ns}.${svc_suffix}:8000/v1/chat/completions")
   fi
+  # The optional models (--enable-models) feed Argus's other controls; the keys are SaaS's (argus values-prod-euc1-be.yaml).
+  # hawkeye has no key: Argus v3 no longer calls it (Kev replaced it), so it is deployed but nothing sends it traffic.
+  if [[ "${models_deployed}" == *" antman "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.llama=http://inference-antman.${ns}.${svc_suffix}:8000/v1/completions")
+  fi
+  if [[ "${models_deployed}" == *" thor "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.qwen=http://inference-thor.${ns}.${svc_suffix}:8000/v1/completions")
+  fi
+  if [[ "${models_deployed}" == *" quicksilver "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.internlm=http://inference-quicksilver.${ns}.${svc_suffix}:8000/v1/completions")
+  fi
+  if [[ "${models_deployed}" == *" hulk "* ]]; then
+    cmd+=(--set-string "argus.llmEndpoints.llmStock=http://inference-hulk.${ns}.${svc_suffix}:8000/v1/chat/completions"
+      --set-string "argus.llmEndpoints.lava=http://inference-hulk.${ns}.${svc_suffix}:8000/v1/chat/completions")
+  fi
   if [[ "${models_deployed}" == *" kev-agentic "* ]]; then
     cmd+=(--set-string "argus.llmEndpoints.kev=http://inference-kev-agentic.${ns}.${svc_suffix}:8000/v1/detect")
   fi

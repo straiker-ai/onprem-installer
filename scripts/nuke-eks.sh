@@ -107,7 +107,8 @@ echo "=== Phase 1: Uninstall Straiker charts ==="
 if kubectl cluster-info &>/dev/null 2>&1; then
   for pair in "straiker-system:straiker" "straiker-core:straiker" "straiker-artifact:straiker" "straiker-defend:straiker" "straiker-edge:straiker" \
               "inference-antman:straiker" "inference-hulk:straiker" "inference-quicksilver:straiker" "inference-thor:straiker" \
-              "inference-vision:straiker" "inference-wanda:straiker" "inference-thanos:straiker"; do
+              "inference-vision:straiker" "inference-wanda:straiker" "inference-thanos:straiker" \
+              "inference-hawkeye:straiker" "inference-kev-agentic:straiker" "inference-kev-non-agentic:straiker"; do
     release="${pair%%:*}"; ns="${pair##*:}"
     if helm status "${release}" -n "${ns}" &>/dev/null 2>&1; then
       echo "  uninstalling ${release}..."
