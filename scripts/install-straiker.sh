@@ -310,6 +310,14 @@ INFERENCE_PROFILE="${INFERENCE_PROFILE:-}"
 INFERENCE_MODE="${INFERENCE_MODE:-}"
 # TESTING ONLY (not remembered): deploy just these models of the selected products, e.g. when GPU quota covers part of the fleet.
 INFERENCE_MODELS="${INFERENCE_MODELS:-}"
+# Which models a Defend install runs (remembered). Default fleet: vision, wanda, kev-agentic, kev-non-agentic. The
+# optional models (antman, hulk, quicksilver, thor) are off until --enable-models adds them; --disable-models removes any
+# default one (for example the Kev models). "none" clears a remembered list. Models are always in the release, so they can
+# be switched later by re-running with new values.
+ENABLE_MODELS="${ENABLE_MODELS:-}"
+DISABLE_MODELS="${DISABLE_MODELS:-}"
+OPTIONAL_DEFEND_MODELS="antman hulk quicksilver thor"
+DEFAULT_DEFEND_MODELS="vision wanda kev-agentic kev-non-agentic"
 GPU_PLANNER="${REPO_ROOT}/scripts/gpu_planner.py"
 GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
 # EC2 service quota "Running On-Demand G and VT instances" (vCPUs); one server needs about 4.2 vCPUs, so Karpenter picks a .2xlarge node (8 vCPUs).
@@ -860,6 +868,9 @@ Options:
   --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
                                    fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
                                    use --ai-provider-mode bedrock for Ascend). Remembered.
+  --enable-models <a,b,c>          Also run these optional Defend models: antman, hulk, quicksilver, thor (off by default).
+                                   Remembered; "none" clears it. The model files must be in the release (they are).
+  --disable-models <a,b,c>         Do not run these models, for example kev-agentic,kev-non-agentic. Remembered; "none" clears.
   --inference-models <a,b,c>       TESTING ONLY. Deploy only these models (of vision, wanda, kev-agentic, kev-non-agentic, thanos
                                    that the selected products use), for a run where GPU quota covers part of the fleet. Not
                                    remembered: pass it only with --phase straiker-inference, never for a customer install.
@@ -1964,6 +1975,14 @@ parse_args() {
         ;;
       --inference-models)
         INFERENCE_MODELS=${2:-}
+        shift 2
+        ;;
+      --enable-models)
+        ENABLE_MODELS=${2:-}
+        shift 2
+        ;;
+      --disable-models)
+        DISABLE_MODELS=${2:-}
         shift 2
         ;;
       --saas-frontend)
@@ -7473,6 +7492,29 @@ remember_inference_settings() {
     return 1
     ;;
   esac
+  local mm all_defend=" ${DEFAULT_DEFEND_MODELS} ${OPTIONAL_DEFEND_MODELS} "
+  [[ -z "${ENABLE_MODELS}" ]] && ENABLE_MODELS="$(get_metadata "enable_models")"
+  [[ -z "${DISABLE_MODELS}" ]] && DISABLE_MODELS="$(get_metadata "disable_models")"
+  [[ "${ENABLE_MODELS}" == none ]] && ENABLE_MODELS=""
+  [[ "${DISABLE_MODELS}" == none ]] && DISABLE_MODELS=""
+  for mm in ${ENABLE_MODELS//,/ }; do
+    if [[ "${mm}" == hawkeye ]]; then
+      echo "ERROR: --enable-models: 'hawkeye' is not in this release yet (no model profile or weights)." >&2
+      return 1
+    fi
+    if [[ " ${OPTIONAL_DEFEND_MODELS} " != *" ${mm} "* ]]; then
+      echo "ERROR: --enable-models: '${mm}' is not an optional model (valid: ${OPTIONAL_DEFEND_MODELS}; the others run by default)." >&2
+      return 1
+    fi
+  done
+  for mm in ${DISABLE_MODELS//,/ }; do
+    if [[ "${all_defend}" != *" ${mm} "* && "${mm}" != thanos ]]; then
+      echo "ERROR: --disable-models: '${mm}' is not a known model (valid:${all_defend}thanos)." >&2
+      return 1
+    fi
+  done
+  set_metadata "enable_models" "${ENABLE_MODELS}"
+  set_metadata "disable_models" "${DISABLE_MODELS}"
   if [[ -n "${INFERENCE_MODELS}" ]]; then
     local wanted known m
     known=" $(PRODUCTS_OPT="${PRODUCTS_OPT}" INFERENCE_MODELS="" inference_models_for_products | tr '\n' ' ')"
@@ -8189,11 +8231,19 @@ inference_models_for_products() {
   fi
   if [[ ",${PRODUCTS_OPT}," == *",defend,"* ]]; then
     # Argus v3's models (the manager's final list): vision/wanda (image checks) and the two Kev classifiers. antman, hulk,
-    # quicksilver and thor are not deployed: the v3 controls that used them are off on-prem, on purpose.
-    models+=("vision" "wanda" "kev-agentic" "kev-non-agentic")
+    # quicksilver and thor are off unless --enable-models adds them; --disable-models removes any of these.
+    local dm
+    for dm in ${DEFAULT_DEFEND_MODELS} ${ENABLE_MODELS//,/ }; do models+=("${dm}"); done
   fi
   if [[ ",${PRODUCTS_OPT}," == *",ascend,"* ]]; then
     models+=("thanos")
+  fi
+  if [[ -n "${DISABLE_MODELS}" ]]; then
+    local live=() lm
+    for lm in "${models[@]+"${models[@]}"}"; do
+      [[ ",${DISABLE_MODELS}," == *",${lm},"* ]] || live+=("${lm}")
+    done
+    models=("${live[@]+"${live[@]}"}")
   fi
   if [[ -n "${INFERENCE_MODELS}" ]]; then
     local kept=() m
