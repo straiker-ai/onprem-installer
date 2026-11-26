@@ -3940,6 +3940,8 @@ for i in json.load(open(sys.argv[1]))["images"]:
       || { mark_phase_blocked "Uploading model '${m}' to s3://${models_bucket} failed. Re-run the same command to continue."; return 1; }
   done
   log "Release ${RELEASE_DIR} loaded: ${total} images in ECR, ${#models[@]} model(s) in s3://${models_bucket}/models/."
+  # The in-cluster copy path creates the namespace; this one does not run it, and the next phases need it.
+  kubectl create namespace "${INFRA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
 # Installs the straiker-artifact chart (mirror + model-sync Jobs) and blocks
@@ -5578,6 +5580,7 @@ ensure_opensearch_credentials_secret() {
     mark_phase_blocked "ClusterSecretStore '${ESO_STORE_NAME}' not found. Run phase 'external-secrets' first."
     return 1
   fi
+  kubectl create namespace "${INFRA_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl apply -n "${INFRA_NAMESPACE}" -f - >/dev/null <<EOF
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
