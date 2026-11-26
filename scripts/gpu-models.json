@@ -1,5 +1,5 @@
 {
-  "_comment": "Models served by local vLLM. weights_gb/kv_gb are ESTIMATES (bf16 weights + KV/activation budget at serving length); replace with measured values. quantized_gb is the footprint with bitsandbytes 4-bit (only if can_quantize). Edit this file, not the planner, to change the fleet. default_gpu = the GPU the chart's default tier gives this model on EKS (g6e=L40S, g5=A10G, l4=L4); used to project a plan before any GPU node exists. antman, thor, quicksilver and hulk (optional Defend models, --enable-models): weights_gb is the measured size of the model files in s3://onprem-artifact-models (2026-11-25); kv_gb is a 3 GB estimate. Their chart default is g4dn (T4, 16 GB), where antman and thor are tight. hawkeye (Qwen3-4B, bf16): weights_gb is the measured size of the model files (2026-11-25).",
+  "_comment": "Models served by local vLLM. weights_gb/kv_gb are ESTIMATES (bf16 weights + KV/activation budget at serving length); replace with measured values. quantized_gb is the footprint with bitsandbytes 4-bit (only if can_quantize). Edit this file, not the planner, to change the fleet. default_gpu = the GPU the chart's default tier gives this model on EKS (g6e=L40S, g5=A10G, l4=L4); used to project a plan before any GPU node exists. antman, thor, quicksilver and hulk (optional Defend models, --enable-models): weights_gb is the measured size of the model files in s3://onprem-artifact-models (2026-11-25); kv_gb is a 3 GB estimate. Their chart default is g4dn (T4, 16 GB), where antman and thor are tight.",
   "default_replicas": 2,
   "models": [
     {
@@ -83,15 +83,6 @@
       "multimodal": false,
       "server": "vllm",
       "default_gpu": "T4"
-    },
-    {
-      "name": "hawkeye",
-      "weights_gb": 7.5,
-      "kv_gb": 3.0,
-      "can_quantize": false,
-      "multimodal": false,
-      "server": "vllm",
-      "default_gpu": "A10G"
     }
   ]
 }

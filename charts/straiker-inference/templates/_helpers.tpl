@@ -100,13 +100,6 @@ thor:
   storagePrefix: thor
   servedNames: [thor]
   defaultGpuProfile: g4dn
-# hawkeye = straikerinc/Qwen3-4B-Instruct-agentic-detector-v7, as SaaS runs it (argus values-hawkeye*.yaml): 12000-token context,
-# memory fraction 0.9. Bf16 4B model (about 8 GB), so g5 (A10G) is enough; Frankfurt runs it on the agentic pool.
-hawkeye:
-  storagePrefix: hawkeye
-  servedNames: [hawkeye]
-  defaultGpuProfile: g5
-  serving: {dtype: bfloat16, maxModelLen: "12000", memFraction: "0.90"}
 # vision / wanda: serving values are the ones SaaS runs (argus deploy/inference-server values/prod/aws): bf16, fp8 KV cache,
 # 4096 context, one image per request, vLLM 0.22.1 (the Qwen3-VL deepstack fix). They need bf16 + fp8, so g5 (A10G) at least.
 vision:
