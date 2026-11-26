@@ -2784,6 +2784,17 @@ require_file_inputs() {
 }
 
 ensure_k8s_ready_for_charts() {
+  # kubectl follows whatever context is current: a new shell, or another cluster selected since the last run, would send helm and
+  # kubectl to the wrong cluster. On EKS, point the context at THIS install's cluster first (the cluster is always named by --cluster-name).
+  if [[ "${CLOUD_PROVIDER:-aws}" != "gke" && -n "${CLUSTER_NAME:-}" ]] && command -v aws >/dev/null 2>&1; then
+    local cur_ctx; cur_ctx="$(kubectl config current-context 2>/dev/null || true)"
+    if [[ "${cur_ctx}" != *"cluster/${CLUSTER_NAME}" && "${cur_ctx}" != "${CLUSTER_NAME}" ]]; then
+      if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+        log "kubectl context is '${cur_ctx:-none}', not cluster ${CLUSTER_NAME}: switching it."
+        aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null
+      fi
+    fi
+  fi
   if kubectl cluster-info >/dev/null 2>&1; then
     return 0
   fi
@@ -9594,7 +9605,7 @@ phase_straiker_edge() {
     local alb_subnets
     alb_subnets="$(get_metadata "alb_subnets")"
     if [[ -n "${alb_subnets}" ]]; then
-      cmd+=(--set "alb.subnets=${alb_subnets}")
+      cmd+=(--set-string "alb.subnets=${alb_subnets//,/\\,}")
     fi
   fi
   if [[ "${EDGE_TYPE}" == "alb" || "${EDGE_TYPE}" == "xalb" ]]; then
