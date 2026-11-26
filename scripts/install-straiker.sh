@@ -6421,7 +6421,9 @@ phase_verify_data_layer() {
   log "Verifying data layer..."
 
   # 1. EFS CSI driver — the models PVC mounts through it; without it pods can't mount.
-  if kubectl get csidriver efs.csi.aws.com >/dev/null 2>&1; then
+  # The CSIDriver object alone is not a driver: a cluster can have it with no EFS pods, and then no pod can mount the volume.
+  if kubectl get csidriver efs.csi.aws.com >/dev/null 2>&1 \
+    && [[ "$(kubectl get daemonset efs-csi-node -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || true)" -ge 1 ]]; then
     log "PASS  EFS CSI driver (efs.csi.aws.com) is installed."
   else
     log "FAIL  EFS CSI driver (efs.csi.aws.com) is not installed. Install the aws-efs-csi-driver EKS addon (with a Pod Identity role for EFS) so the models volume can mount."

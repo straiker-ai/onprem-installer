@@ -59,6 +59,16 @@ module "eks" {
       most_recent              = true
       service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
     }
+    # The model weights cache and the shared models volume are EFS: without this driver the volume binds (a static PV) but no pod can
+    # mount it. The data layer creates the file system and mount targets; this is the CSI side. The controller tolerates the system
+    # node's taint; the node DaemonSet already tolerates everything (GPU nodes included).
+    aws-efs-csi-driver = {
+      most_recent              = true
+      service_account_role_arn = module.efs_csi_irsa.iam_role_arn
+      configuration_values = jsonencode({
+        controller = { tolerations = [{ key = "CriticalAddonsOnly", operator = "Exists" }] }
+      })
+    }
     eks-pod-identity-agent = {
       most_recent = true
     }
@@ -159,6 +169,22 @@ module "ebs_csi_irsa" {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
+    }
+  }
+}
+
+# IRSA for the EFS CSI driver (mounting the models file system)
+module "efs_csi_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  role_name             = "${var.cluster_name}-efs-csi"
+  attach_efs_csi_policy = true
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:efs-csi-controller-sa", "kube-system:efs-csi-node-sa"]
     }
   }
 }
