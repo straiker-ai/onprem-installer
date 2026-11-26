@@ -183,12 +183,25 @@ distr_login() {
 }
 
 push_retry() { # <oras push args...>: the push resumes (stored blobs are skipped), so a gateway timeout is retried
-  local n
+  local n err; err="$(mktemp)"
   for n in 1 2 3 4 5 6; do
-    oras push "$@" >/dev/null && return 0
+    if oras push "$@" >/dev/null 2>"${err}"; then rm -f "${err}"; return 0; fi
+    cat "${err}" >&2
+    if grep -q "already exists and cannot be overwritten" "${err}"; then
+      rm -f "${err}"
+      echo "ERROR: that tag is already published (Distr never overwrites a tag). Use a new --version to publish changed content." >&2
+      return 1
+    fi
     log "WARN  oras push failed (attempt ${n}/6); retrying in 20s (blobs already stored are skipped)"; sleep 20
   done
-  return 1
+  rm -f "${err}"; return 1
+}
+
+# Distr tags are immutable. An artifact already published under this version is left as it is; content that changed
+# since needs a new --version, so say so loudly.
+already_published() { # <ref> <what>
+  crane digest "$1" >/dev/null 2>&1 || return 1
+  log "skip  $2: $1 is already published (tags cannot be overwritten). If its content changed, publish a new --version."
 }
 
 chunk_file() { # <file>: when larger than the chunk size, replace it by <file>.part0000, .part0001, ... (joined again by pull)
@@ -208,6 +221,7 @@ pack_tar() { # <dir> <tar>: a plain tar of an OCI layout; byte-stable where GNU 
 # All images go into ONE artifact (images:<version>), one layer per image: an OCI-layout tar holding every platform.
 # A layer already in the registry is skipped by the push, so a new version uploads only the images that changed.
 push_images() {
+  already_published "${REGISTRY}/images:${VERSION}" images && return 0
   local ecr_host; ecr_host="$(jq -r '.images[0].source' "${LIST}" | cut -d/ -f1)"
   aws_src ecr get-login-password | crane auth login "${ecr_host}" -u AWS --password-stdin >/dev/null
   aws_src ecr get-login-password | oras login "${ecr_host}" -u AWS --password-stdin >/dev/null
@@ -263,6 +277,7 @@ build_chart_deps() {
 
 # All charts (ours + third-party) go into ONE artifact (charts:<version>), one .tgz layer per chart.
 push_charts() {
+  already_published "${REGISTRY}/charts:${VERSION}" charts && return 0
   local out="${WORK_DIR}/charts" path name ver
   rm -rf "${out}"; mkdir -p "${out}"
   build_chart_deps
@@ -286,6 +301,7 @@ push_charts() {
 }
 
 push_installer() {
+  already_published "$(jq -r '.installer.dest' "${LIST}")" installer && return 0
   local tarball="${WORK_DIR}/straiker-installer-${VERSION}.tar.gz"
   build_chart_deps
   log "pack  installer -> ${tarball}"
