@@ -48,8 +48,9 @@ data:
           enabled: true
         basic_auth:
           enabled: true
-          username: ${OPENSEARCH_USERNAME}
-          password: ${OPENSEARCH_PASSWORD}
+          # Quoted: Benthos pastes the value in as text before parsing, and the generated password can start with ! * or %.
+          username: '${OPENSEARCH_USERNAME}'
+          password: '${OPENSEARCH_PASSWORD}'
         {{- end }}
         index: '${! this.stream }'
         action: index
