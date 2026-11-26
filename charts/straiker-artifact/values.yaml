@@ -183,6 +183,8 @@ modelSync:
       destPath: quicksilver
     - path: huggingface/thor/f516550d4db9
       destPath: thor
+    - path: huggingface/hawkeye/cd96de5a59aa
+      destPath: hawkeye
     - path: huggingface/thanos/94cc8385641b
       destPath: thanos
     - path: huggingface/wanda/290caf700ef4

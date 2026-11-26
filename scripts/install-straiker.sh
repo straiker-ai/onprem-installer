@@ -311,12 +311,12 @@ INFERENCE_MODE="${INFERENCE_MODE:-}"
 # TESTING ONLY (not remembered): deploy just these models of the selected products, e.g. when GPU quota covers part of the fleet.
 INFERENCE_MODELS="${INFERENCE_MODELS:-}"
 # Which models a Defend install runs (remembered). Default fleet: vision, wanda, kev-agentic, kev-non-agentic. The
-# optional models (antman, hulk, quicksilver, thor) are off until --enable-models adds them; --disable-models removes any
+# optional models (antman, hawkeye, hulk, quicksilver, thor) are off until --enable-models adds them; --disable-models removes any
 # default one (for example the Kev models). "none" clears a remembered list. Models are always in the release, so they can
 # be switched later by re-running with new values.
 ENABLE_MODELS="${ENABLE_MODELS:-}"
 DISABLE_MODELS="${DISABLE_MODELS:-}"
-OPTIONAL_DEFEND_MODELS="antman hulk quicksilver thor"
+OPTIONAL_DEFEND_MODELS="antman hawkeye hulk quicksilver thor"
 DEFAULT_DEFEND_MODELS="vision wanda kev-agentic kev-non-agentic"
 GPU_PLANNER="${REPO_ROOT}/scripts/gpu_planner.py"
 GPU_MODELS_FILE="${REPO_ROOT}/scripts/gpu-models.json"
@@ -868,7 +868,7 @@ Options:
   --inference-mode <vllm|bedrock>  vllm (default): run the model fleet on GPU nodes in this cluster. bedrock: no GPU
                                    fleet (Argus v3's vision/wanda/Kev controls and Ascend's thanos are then unavailable;
                                    use --ai-provider-mode bedrock for Ascend). Remembered.
-  --enable-models <a,b,c>          Also run these optional Defend models: antman, hulk, quicksilver, thor (off by default).
+  --enable-models <a,b,c>          Also run these optional Defend models: antman, hawkeye, hulk, quicksilver, thor (off by default).
                                    Remembered; "none" clears it. The model files must be in the release (they are).
   --disable-models <a,b,c>         Do not run these models, for example kev-agentic,kev-non-agentic. Remembered; "none" clears.
   --inference-models <a,b,c>       TESTING ONLY. Deploy only these models (of vision, wanda, kev-agentic, kev-non-agentic, thanos
@@ -8562,6 +8562,7 @@ phase_straiker_argus_v3() {
     cmd+=(--set-string "argus.llmEndpoints.imageDetection=http://inference-wanda.${ns}.${svc_suffix}:8000/v1/chat/completions")
   fi
   # The optional models (--enable-models) feed Argus's other controls; the keys are SaaS's (argus values-prod-euc1-be.yaml).
+  # hawkeye has no key: Argus v3 no longer calls it (Kev replaced it), so it is deployed but nothing sends it traffic.
   if [[ "${models_deployed}" == *" antman "* ]]; then
     cmd+=(--set-string "argus.llmEndpoints.llama=http://inference-antman.${ns}.${svc_suffix}:8000/v1/completions")
   fi
